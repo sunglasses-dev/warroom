@@ -16,7 +16,7 @@ Coordinate several Claude Code sessions through one text file. A shell waiter de
 | A text file is the chat | messages live in `board.md`; seats use `board.sh` to post and read, and helper state (seat registry, job ledger) sits in the run directory |
 | Models need not poll | a local shell waiter checks the board for each seat; the seat starts it as a background task and then sleeps |
 | The waiting loop makes no model calls | the waiter normally exits when a matching line arrives; it also exits when another waiter replaces it (exit 3, which is not a wake) and on errors |
-| A long job can post a wake, a PR can be watched | while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone, and keeps the ledger row if the post fails; `pr-watch.sh` posts `WATCH GREEN` or `WATCH FAIL` when a pull request's checks settle at a pinned head. It reports, it never merges |
+| A long job can post a wake, a PR can be watched | while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone (a process whose start time cannot be read is left in the ledger, not treated as gone), and keeps the ledger row if the post fails; `pr-watch.sh` posts `WATCH GREEN` or `WATCH FAIL` when a pull request's checks settle at a pinned head. It reports, it never merges |
 | Reopen prepares fresh sessions | `reopen.sh` asks every seat for a card and builds one paste message per seat; you save each card and check it before closing a session |
 
 ## Quick start: two sessions
@@ -92,10 +92,10 @@ A synthetic board (`examples/4-seat/sample-board.md`):
 
 ```
 [09:00 · BOSS] Day start. Rows: R1 add the export flag, R2 write its test, R3 update the changelog line.
-@W1 ACTION: take R1. Branch off main, one commit, post the diff stat when done.
+[09:01 · BOSS] @W1 ACTION: take R1. Branch off main, one commit, post the diff stat when done.
 [09:02 · W1] TAKEN R1.
 [09:31 · W1] R1 done. Flag is --export. 1 file, +14/-2. Receipt receipts/r1.md
-@W2 ACTION: R2 can start, flag name above.
+[09:32 · W1] @W2 ACTION: R2 can start, flag name above.
 [10:13 · MANAGER] @BOSS ACTION: R1 and R2 are ready for your read. PR 12.
 [10:34 · BOSS] WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)
 ```
@@ -124,8 +124,8 @@ A waiter reads only the first line of a post, right after its stamp. A post wake
   (it also exits when replaced by another waiter, or on an error)
     |
     v
-  launched as a Claude Code background task, its exit reaches the session;
-  the seat reads the line, acts, and starts its waiter again
+  launched as a Claude Code background task: Claude Code reports its exit to
+  the session, and the seat then reads the line, acts, and starts its waiter again
 ```
 
 Optional helpers beside the board: `pids.sh` notices when a registered job's process is gone, `pr-watch.sh` watches one pull request at a pinned head and reports when its checks are green or one fails (it never merges, and a green report is an observation, not a guarantee: whether an unchecked merge is possible is decided by your branch protection), `cpu-sentinel.py` reports selected processes that stay hot, `reopen.sh` prepares the cards and paste messages for fresh sessions.
@@ -138,7 +138,7 @@ Optional helpers beside the board: `pids.sh` notices when a registered job's pro
 | a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts and one Python watchdog |
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
 | a way to get more from your plan | it avoids spending model turns on repeatedly checking for work; your plan and its limits still apply |
-| a lock for every writer | the board, the job ledger and the state files are locked only against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked. Give each protected file one name (no symlinked or hard-linked board) and never delete a `.flock` file. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
+| a lock for every writer | the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard's marks are locked against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked, and the sentinel's strike file and log and the reopen files are written without that lock. Give each protected file one name (no symlinked or hard-linked board) and never delete a `.flock` file. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
 | a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. The scripts do not check that a seat acted on a line |
 
 ## FAQ

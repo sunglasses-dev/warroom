@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- macOS launchd job: runs the sentinel once a minute, report only. Edit the two paths, copy to ~/Library/LaunchAgents/,
-     then: launchctl load ~/Library/LaunchAgents/com.example.warroom-sentinel.plist
+<!-- macOS launchd job: runs the sentinel once a minute, report only. Edit the interpreter and script paths below, save it as
+     ~/Library/LaunchAgents/com.example.warroom-sentinel.plist, then: launchctl load that file.
      Add <string>--enforce</string> after the script path to let it kill; the default only reports. -->
 <plist version="1.0">
 <dict>

@@ -13,13 +13,13 @@ Two review rounds found the same two problems, each time in a new place:
 | a lock can be held by two writers | a stale-lock check evicted a live holder | the fix moved the hole into recovery: `wr_reclaim` moves the lock aside before it checks who owns it, so it can move a live successor's lock and let a second writer in |
 | "green at the pinned head" is not one moment | one look, then merge | two looks, then merge: the gap between the second look and the merge is still there, so a stub that is green twice and red at merge time still merges |
 
-Both fixes patched a symptom and moved the race. This doc changes the mechanism instead, so the race has nowhere to move to.
+Both fixes patched a symptom and moved the race. This doc changes the mechanism instead: a kernel lock that is released when its holder exits removes the stale-reclaimer race, and a read-only watcher removes the client-side merge race, within the limits stated below.
 
 ## Part A: the writer lock
 
 ### What the lock is for
 
-There is one writer at a time per protected file: the board (`wr_append`), the seat registry and a seat cursor (`waiter.sh`), the job ledger (`pids.sh`), a tail anchor (`board.sh tail`) and a guard mark (`board-guard.sh`). The lock is advisory: it only protects writers that use `wr_lock`. Three nestings exist today, and they are the only supported lock order: the ledger lock, then the board lock (`pids.sh check` posts while it holds the ledger); a guard mark lock, then the board lock (`board-guard.sh` posts while it holds the mark); and a seat cursor lock, then the seat registry lock (`waiter.sh` arming, both held by the same shell in slots 8 and 9). In the first two the board lock is taken by a separate `board.sh` process, not by the same shell. "One protected file" means one key under *Protection identity* below. Aliases (symlinks and hard links) are refused, not supported.
+There is one writer at a time per protected file: the board (`wr_append`), the seat registry and a seat cursor (`waiter.sh`), the job ledger (`pids.sh`), a tail anchor (`board.sh tail`) and a guard mark (`board-guard.sh`). The lock is advisory: it only protects writers that use `wr_lock`. Three nestings exist today, and they are the only supported lock order: the ledger lock, then the board lock (`pids.sh check` posts while it holds the ledger); a guard mark lock, then the board lock (`board-guard.sh` posts while it holds the mark); and a seat cursor lock, then the seat registry lock (`waiter.sh` arming, both held by the same shell in slots 8 and 9). In the first two the board lock is taken by a separate `board.sh` process, not by the same shell. "One protected file" means one key under *Protection identity* below. A symlinked leaf and a hard-linked file are refused; a symlinked parent folder is allowed and resolves to the same key.
 
 ### Option M: a directory lock plus a reclaim lock (the shape the ruling asked us to argue)
 
@@ -35,7 +35,7 @@ A directory lock with no automatic reclaim (manual cleanup after stopping every 
 
 ### Option K (recommended): a kernel lock on a file that is never replaced
 
-`flock(2)` locks belong to an open file description. The shell opens the lock file on a fixed descriptor, a short `python3 -I -S` helper calls `flock` on that inherited descriptor and exits, and the lock stays held while any copy of that open description is still open. python3 is already a runtime dependency (`merge-daemon.sh`, `hooks/board-tail.sh`, `hooks/waiter-check.sh`).
+`flock(2)` locks belong to an open file description. The shell opens the lock file on a fixed descriptor, a short `python3 -I -S` helper calls `flock` on that inherited descriptor and exits, and the lock stays held while any copy of that open description is still open. python3 is already a runtime dependency (`pr-watch.sh`, `hooks/board-tail.sh`, `hooks/waiter-check.sh`).
 
 #### The release rule (chosen explicitly)
 
@@ -44,7 +44,7 @@ A directory lock with no automatic reclaim (manual cleanup after stopping every 
 - **Script children never get a copy.** Anything started from a critical section that is a script or can run for a while (`board.sh post` in `pids.sh check` and `board-guard.sh`) is started through `wr_run`, which runs it with `8>&- 9>&-`. Such a child takes its own locks if it needs them.
 - **Short foreground commands keep a copy while they run.** These are `mv`, `sed`, `awk`, `cat`, `date`, `printf`, and the command substitutions around them, run in the foreground inside a section. Closing descriptors on each of these adds noise without changing the guarantee, because the holder waits for them anyway.
 - **The helper keeps its copy until it exits.** Under ordinary contention that is within the wait deadline. A helper that is itself stopped (SIGSTOP) or stalled falls under the stopped-descendant residual below: `wr_lock` waits for it, and the deadline is not a hard real-time bound (r3d2 FIX 2).
-- Nothing is started in the background inside a critical section. A smoke grep enforces this for the repo's sections.
+- Nothing is started in the background inside a critical section (a convention: the smoke lint below does not look for background starts).
 
 The disclosed residual: if one of those short foreground commands is stopped (SIGSTOP, a hung disk) and the holder is then killed, the lock stays held until that command ends. Waiters time out with a diagnostic. Nothing steals the lock, and nothing is unlocked with `LOCK_UN`, because unlocking through a shared description would release a live holder's lock.
 
@@ -87,7 +87,7 @@ r3d2 showed that the r3d2 rule (logical `pwd` of the parent plus the base name) 
 | `KEY.flock` is a symlink | refused: return 2. Only `wr_lock` creates sidecars (with `>>`), so a healthy run directory never has a linked one |
 | FILE does not exist yet | allowed. The checks apply whenever FILE exists |
 
-Not supported, and written in the limits: hard links to a protected file, re-pointing a parent-directory symlink while writers run, and moving or renaming the run directory while writers run. The checks run at every `wr_lock`. They are not re-run during a section, so a non-cooperating process that creates an alias in the middle of a section is outside the guarantee, like any write that bypasses the lock. Every protected path (`BOARD_FILE`, `pids.tsv`, `seats.tsv`, cursors, anchors, guard marks) is built by the scripts under `$WARROOM_DIR`. So a refusal only happens when someone points the config at a symlink or links a protected file by hand, and the error line says what to do. An inode-only key is not used, because the `mv` replacements change the data file's inode while the sidecar must stay the same.
+Not supported, and written in the limits: hard links to a protected file, re-pointing a parent-directory symlink while writers run, and moving or renaming the run directory while writers run. The checks run at every `wr_lock`. They are not re-run during a section, so a non-cooperating process that creates an alias in the middle of a section is outside the guarantee, like any write that bypasses the lock. Most protected paths (`pids.tsv`, `seats.tsv`, cursors, anchors, guard marks) are built by the scripts under `$WARROOM_DIR`; `BOARD` may also be an absolute path and gets the same checks. So a refusal only happens when someone points the config at a symlink or links a protected file by hand, and the error line says what to do. An inode-only key is not used, because the `mv` replacements change the data file's inode while the sidecar must stay the same.
 
 #### What each caller does when the lock is not taken
 
@@ -106,7 +106,7 @@ Today several callers fail silently (r3d FIX 3). The contract is: never write wi
 | `board-guard.sh` mark | `continue`, prints nothing, exits 0 | prints `board-guard: skipped SEAT (mark busy), will retry on the next prompt` and still exits 0, so a busy lock never blocks the prompt. The nested post (`board-guard.sh:39`) runs through `wr_run` and keeps its stderr. The mark is written only after the post succeeded, as today, so a failed post leaves the mark unchanged and the seat is named again on the next prompt. The hook runs on every prompt. This makes the line visible in the script's output; how the host shows hook stderr is not something this design promises |
 | board bootstrap (`_common.sh:22`) | `[ -e "$BOARD_FILE" ] \|\| : > "$BOARD_FILE"`: an unlocked check, then a truncating create, so a slow starter can empty a board another process has just written | `: >> "$BOARD_FILE"`: creates the file if it is missing and never truncates it (r3d2 FIX 3) |
 
-No caller retries in a loop beyond the `wr_lock` wait, with one exception: the waiter's delivery (`waiter.sh:82`) skips that poll and tries again on the next one.
+Each acquisition waits at most the `wr_lock` bound. The waiter's delivery skips that poll and tries again on the next one, and the waiter runs its job check (`pids.sh check`) again at every poll.
 
 "Never write without the lock" means: never change a protected file's **contents** without that file's lock. Three things happen without the lock, and none of them can change contents:
 
@@ -146,7 +146,7 @@ These results come from two sets of experiments. One set was run on this Mac bef
 
 ### Upgrading from the old lock
 
-The old `FILE.lock` directories and the new `FILE.flock` files do not exclude each other. So the upgrade is **quiescent**, for **all participants using this run directory**: close every seat session first, because hooks also take locks. Then stop the waiters, every job that posts, and anything run from another clone that points at the same run directory. Update, and start again. The release notes and the README say this. That README line documents the step. It does not prove anyone stopped their processes, and there is no runtime check that keeps an old writer out (r3d2 Q4: none is needed). After the upgrade, a leftover `FILE.lock` directory is inert and may be deleted. A `FILE.flock` is never deleted, not even by cleanup instructions.
+The old `FILE.lock` directories and the new `FILE.flock` files do not exclude each other. So the upgrade is **quiescent**, for **all participants using this run directory**: close every seat session first, because hooks also take locks. Then stop the waiters, every job that posts, and anything run from another clone that points at the same run directory. Update, and start again. The README says this. That README line documents the step. It does not prove anyone stopped their processes, and there is no runtime check that keeps an old writer out (r3d2 Q4: none is needed). After the upgrade, a leftover `FILE.lock` directory is inert and may be deleted. A `FILE.flock` is never deleted, not even by cleanup instructions.
 
 ### Limits that stay (written in the README and the `_common.sh` header)
 
@@ -157,7 +157,7 @@ The old `FILE.lock` directories and the new `FILE.flock` files do not exclude ea
 
 ### Why a python3 helper and not a lock utility (r3d2 RIDER 1)
 
-The r3d2 text here was wrong, and it is corrected. macOS `lockf(1)` can lock an already-open descriptor for a shell section (its man page: with no command, the argument must be a file descriptor), and `shlock(1)` is a PID-file lock, so it has the stale-owner problems of Option M. macOS has no `flock(1)`. Linux, where our CI runs, has util-linux `flock(1)` but not the BSD `lockf(1)`. Using a utility would mean one code path per system. One `fcntl.flock` call in python3 behaves the same on both, and python3 is already required. A lock daemon would be a new moving part.
+The r3d2 text here was wrong, and it is corrected. macOS `lockf(1)` can lock an already-open descriptor for a shell section (its man page: with no command, the argument must be a file descriptor), and `shlock(1)` is a PID-file lock, so it has the stale-owner problems of Option M. Stock utility sets differ: macOS ships no `flock(1)`, and Linux distributions ship util-linux `flock(1)` and usually not the BSD `lockf(1)`. This code calls neither. Using a utility would mean one code path per system. One `fcntl.flock` call in python3 behaves the same on both, and python3 is already required. A lock daemon would be a new moving part.
 
 ### Acceptance tests for Part A (named after r3d; each one fails on the current code or on a wrong implementation)
 
@@ -175,7 +175,7 @@ The r3d2 text here was wrong, and it is corrected. macOS `lockf(1)` can lock an 
 
   An occupied-slot-only subshell check fails this test.
 - `caller_timeout_visibility`: outer and nested lock failures are forced **separately** for every caller in the table, with no unlocked content change. The documented line survives each caller's redirects, through the waiter's `pids.sh check` call and through the guard. When the nested post fails, the ledger row is kept and the guard mark is unchanged. Bootstrap: a board with content stays unchanged when another process sources `_common.sh` with the old existence race forced. The current callers fail this test for the reasons r3d reproduced.
-- `lock_order_and_upgrade_boundary`, which is supplementary lint and not evidence of safety (the current code passes it too): ledger→board and mark→board work, and the reverse order is not present in the repo (grep). A smoke grep finds no background start inside a section, no other use of fds 8 and 9, and no `wr_lock` inside `$( … )` or a pipe. The README upgrade step is present.
+- `lock_order_and_upgrade_boundary`, which is supplementary lint and not evidence of safety (the current code passes it too): ledger→board and mark→board work, and the reverse order is not present in the repo (grep). A smoke lint finds no other use of fds 8 and 9 and no lock call inside `$( … )` or after a pipe; it does not look for background starts. The README upgrade step is present.
 - The old lock case, `tests/smoke.sh:122-131` at main (case 11: owner directory, reclaim, non-owner release), is removed together with its header line 13. Its replacements are the tests above. Every other smoke case stays (r3d2 FIX 4).
 
 ## Part B: the merge helper becomes a watcher (ruling: demote)
@@ -194,7 +194,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
 
 1. **It only reads.** The only GitHub call it makes is `gh pr view` (repo, state, head, base, checks). It never calls `gh pr merge`, `gh api` with a method, or any other write. It cannot merge, approve, enqueue or enable auto-merge.
 2. **One look per poll.** Each look is one `gh pr view` response, and that response is the unit of observation. The tool records when the response arrived and reports "the returned PR data showed …". It does not claim the response is one atomic moment on the server (the old `merge-daemon.sh:5` claim is not carried over). The "second confirming look" is removed: it was an observation dressed as a gate (r3d2 FIX 6).
-3. **Green rule (unchanged).** A check counts as green when it is SUCCESS, NEUTRAL or SKIPPED. A finished check with any other result is red. **Every** row of the response is judged, required or not, and rows are never merged into a map keyed by name: if two rows share a name and either one is red or pending, that name is red or pending. Legacy status contexts follow the same rule on their state. A missing or null field makes the look not green. Every `--require` name must appear and be green. Zero checks counts as pending, so a PR with no checks times out and is never reported green.
+3. **Green rule (unchanged).** A check counts as green when it is SUCCESS, NEUTRAL or SKIPPED. A finished check with any other result is red. **Every** row of the response is judged, required or not, and rows are never merged into a map keyed by name: if two rows share a name and either one is red or pending, that name is red or pending. A legacy status context is green only on SUCCESS (NEUTRAL and SKIPPED apply to check runs only); PENDING and EXPECTED keep waiting; any other state is red. A check row that lacks a field the verdict needs (its name, status, conclusion or state) makes that look unreadable: the look is not green and the watch keeps polling until the timeout; a missing workflow name, base branch or repository only reads `not reported` in the receipt. Every `--require` name must appear and be green; names are compared exactly as GitHub returned them (only the receipt's display text has control characters replaced). Zero checks counts as pending, so a PR with no checks times out and is never reported green.
 4. **Stops when:**
    - the head is not `--head`;
    - a check is red;
@@ -212,7 +212,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
    - the time the response arrived;
    - each check's name, result and workflow name as reported, with `not reported` where the response has none (legacy status contexts often have none). Name matching does not authenticate which provider ran a check;
    - the required names;
-   - all of these taken from the one response that produced the result, never mixed from earlier polls;
+   - the checks, the head, the base branch and the repository taken from the one response that produced the result, never mixed from earlier polls. The pinned head and the required names are the inputs the caller gave, and the receipt's `observed at` time is the local clock when that response arrived;
    - the sentence: "The returned PR data showed the checks below at the time above. This tool did not merge or modify the PR. Whether a merge can skip these checks is decided by the branch protection on the base branch, which this tool does not read."
 7. **Exit codes:** 0 = green seen, 1 = stopped or timed out, 2 = usage error. A receipt or board line that cannot be written makes the run exit 1, as before.
 
@@ -227,8 +227,8 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
 | # | invariant | why it holds |
 |---|---|---|
 | W1 | the tool makes no write to GitHub | the only `gh` subcommand in the script is `pr view`; a smoke grep and a gh stub that fails on any other subcommand both check this |
-| W2 | `WATCH GREEN` is posted only after one response that showed: the PR open, the head equal to `--head`, every check row green, every required name present, and at least one check | `judge` evaluates every row (no name-keyed map) and returns ready only in that case. Every other path ends in `WATCH FAIL` or keeps waiting |
-| W3 | no output claims that a merge happened, that a merge is safe, or that the result is a gate | the help text, receipt and board line come from fixed templates. The test checks the template text with check names and other response data replaced by placeholders, so a check named `PASS` or `guarantee` cannot fail it. The negative phrases "not a gate", "not a guarantee" and "did not merge" are allowed (r3d2 FIX 6) |
+| W2 | `WATCH GREEN` is posted only after one response that showed: the PR open, the head equal to `--head`, every check row green, every required name present (compared exactly), and at least one check | `judge` evaluates every row (no name-keyed map) and returns ready only in that case. Every other path ends in `WATCH FAIL` or keeps waiting |
+| W3 | no output claims that this tool merged anything, that a merge is safe, or that the result is a gate (a report that a PR was merged outside this tool is allowed) | the help text, receipt and board line come from fixed templates. The test checks the template text with check names and other response data replaced by placeholders, so a check named `PASS` or `guarantee` cannot fail it. The negative phrases "not a gate", "not a guarantee" and "did not merge" are allowed (r3d2 FIX 6) |
 
 ### Acceptance tests for Part B (gh stubbed, no network)
 
@@ -264,7 +264,7 @@ These lines change in the same pull request as the code, so no doc describes beh
 | README:84, examples/4-seat/sample-board.md:10 | `[10:34 · BOSS] WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)` |
 | README:115 | "`pr-watch.sh` watches one pull request at a pinned head and reports when its checks are green or one fails; it never merges, and a green report is an observation, not a guarantee. Whether an unchecked merge is possible is decided by your branch protection." |
 | PROTOCOL:29 | `\| waiting is done by scripts \| pr-watch.sh polls a pull request's checks at a pinned head and posts the result; an agent should not poll for green itself (convention). The tool never merges. Who may merge, and whether unchecked merges are possible, is your branch protection's job \|` |
-| PROTOCOL:37 | `\| a watched PR \| a finished watch writes $WARROOM_DIR/receipts/watch_<PR>_<time>.md and posts a board line that starts WATCH GREEN or WATCH FAIL and ends with the receipt path; if either cannot be written the run ends with exit 1 \|` |
+| PROTOCOL:37 | `\| a watched PR \| a finished watch writes $WARROOM_DIR/receipts/watch_<PR>_<time>_<pid>.md and posts a board line that starts WATCH GREEN or WATCH FAIL and ends with the receipt path; if either cannot be written the run ends with exit 1 \|` |
 | SECURITY:18 | "- pr-watch.sh making any write to GitHub, or reporting WATCH GREEN for a PR that was not open at the pinned head with every check green" |
 | SECURITY:24 | "the read-only `gh pr view` calls pr-watch.sh makes" replaces "the `gh` calls the merge daemon makes" |
 | CONTRIBUTING:21, examples/4-seat/BOSS.md:7 | "`gh` for pr-watch" and "use `bin/pr-watch.sh` to wait for checks" |
