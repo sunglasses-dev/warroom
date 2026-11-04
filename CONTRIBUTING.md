@@ -18,7 +18,7 @@ bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse,
 
 - **One mechanism per pull request.** A waiter fix and a new hook are two pull requests.
 - **Say how you proved it.** The command you ran and what it printed. If you fixed a bug, add a check to `tests/smoke.sh` that fails without your fix.
-- **No new dependencies.** bash, python3, and `gh` for the merge daemon. That is the whole list.
+- **No new dependencies.** bash, python3, and `gh` for pr-watch. That is the whole list.
 - **Plain words in docs.** Say what a thing does, not how good it is.
 
 ## How review works

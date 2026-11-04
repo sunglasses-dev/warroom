@@ -26,7 +26,7 @@ Seat names are set in `warroom.env` and default to `BOSS MANAGER W1 W2`; the exa
 | rule | how it is kept |
 |---|---|
 | no model timer | no script starts a model on a clock, and `waiter.sh` is the only thing that wakes a sleeping seat. `board-guard.sh` can post one idle reminder per silence when someone submits a prompt; a seat that owns a running registered job counts as working |
-| waiting is done by scripts | `merge-daemon.sh` polls the checks and makes one merge attempt pinned to a head, after a second look at the same head and checks; an agent should not poll for green itself (convention). Only branch protection with required checks on the server stops someone else merging unchecked |
+| waiting is done by scripts | `pr-watch.sh` polls a pull request's checks at a pinned head and posts the result; an agent should not poll for green itself (convention). The tool never merges. Who may merge, and whether unchecked merges are possible, is your branch protection's job |
 | posts are at most 10 lines | `board.sh post` refuses longer posts unless `WARROOM_LONG=1` is set; appending to the file directly skips the limit |
 | about one wake per seat per `WARROOM_MIN_GAP` seconds | a waiter that keeps running holds the matching lines during the gap and delivers them after it; two waiters armed for one seat at the same moment are not guaranteed to respect it. Its position is saved at arm and at each wake: arming again within `WARROOM_CURSOR_MAX_AGE` seconds (86400) resumes there. A board replaced by a new file, or whose beginning no longer matches, is read again from its start; a file emptied and refilled with the same first line is not reliably detected. The first arm, or one after that age, starts at the end of the board and sees only what follows |
 
@@ -34,7 +34,7 @@ Seat names are set in `warroom.env` and default to `BOSS MANAGER W1 W2`; the exa
 
 | job | receipt |
 |---|---|
-| a merge | a non-dry attempt tries to write `$WARROOM_DIR/receipts/merge_<PR>_<time>_<pid>.md` and to post a board line that starts `POSTCONDITION PASS` or `POSTCONDITION FAIL` and ends `(receipt <path>)`; if either cannot be written the run ends FAIL. The line says whether this run merged the PR, another account did, or the merge was accepted but is not done yet (queue or auto-merge); when the merging account cannot be read it says so. A dry run prints its result and writes neither |
+| a watched PR | a finished watch writes `$WARROOM_DIR/receipts/watch_<PR>_<time>.md` and posts a board line that starts `WATCH GREEN` or `WATCH FAIL` and ends with the receipt path; if either cannot be written the run ends with exit 1 |
 | a long job | register it with `pids.sh add LABEL PID SEAT` (`add` refuses pid 0 and a process whose start time it cannot read). While any waiter is running, its check notices the process is gone (or that its pid now belongs to a process that started at a different time) and posts a wake line to the owner. The post comes before the row is removed and is retried if it fails, so a crash between the two can post it twice; if the ledger cannot be written the command exits non-zero and leaves the old ledger, so a job can be missing from it or a wake can repeat. The owner needs a waiter of their own. `pids.sh done` removes the row without a wake |
 | a reopen | one card per seat, saved by you in `$WARROOM_DIR/cards/` (`reopen.sh card SEAT` prints a template, it does not save it); `reopen.sh done` adds a ledger row in `REOPEN_LEDGER.md` listing the seats whose reopened post it finds |
 
