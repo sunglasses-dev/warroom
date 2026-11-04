@@ -33,10 +33,10 @@ for seat in $SEATS; do
   # three = already said it.
   # Check, post and mark happen under one lock, so two prompts at the same moment say it once; the mark is written
   # only after the post succeeded, so a failed post is tried again at the next prompt.
-  wr_lock "$mark" || continue
+  wr_lock "$mark" || { echo "board-guard: skipped $seat (mark busy), will retry on the next prompt" >&2; continue; }
   here="$(wr_generation "$BOARD_FILE") $lineno $(printf '%s\n' "$line" | wr_sum)"
   if [ "$(cat "$mark" 2>/dev/null)" != "$here" ] &&
-     "$HERE/../bin/board.sh" post GUARD "@${seat} ACTION: no board post from you for ${age} min and no registered job. Take the next unclaimed card, or post what you are waiting on." >/dev/null 2>&1; then
+     wr_run "$HERE/../bin/board.sh" post GUARD "@${seat} ACTION: no board post from you for ${age} min and no registered job. Take the next unclaimed card, or post what you are waiting on." >/dev/null; then
     printf '%s\n' "$here" > "$mark.tmp.$$" && mv "$mark.tmp.$$" "$mark"
   fi
   wr_unlock "$mark"
