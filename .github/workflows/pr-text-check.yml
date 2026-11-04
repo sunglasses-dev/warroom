@@ -1,0 +1,36 @@
+name: pr-text-check
+# Runs tools/leak-check.sh over the text a pull request adds to the public record: its title, its body and the
+# messages of its commits. The tree is checked by leak-check.yml; this covers what that does not.
+# The PR text is passed through environment variables and written to files, never pasted into a shell line.
+# A pull request from a fork gets no secrets, so there only the built-in patterns run.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  pr-text-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Write the private denylist (a repository secret) to a file, if one is set
+        env:
+          DENYLIST: ${{ secrets.LEAKCHECK_DENYLIST }}
+        run: |
+          if [ -n "$DENYLIST" ]; then printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"; echo "LEAKCHECK_DENYLIST=$RUNNER_TEMP/denylist.txt" >> "$GITHUB_ENV"; fi
+      - name: Collect the pull request text
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          d="$RUNNER_TEMP/pr-text"; mkdir -p "$d"
+          printf '%s\n' "$PR_TITLE" > "$d/title.txt"
+          printf '%s\n' "$PR_BODY" > "$d/body.txt"
+          git log --format='%B' "$BASE..$HEAD" > "$d/commit-messages.txt"
+          echo "PR_TEXT_DIR=$d" >> "$GITHUB_ENV"
+      - name: Run the leak check over that text
+        run: bash tools/leak-check.sh "$PR_TEXT_DIR"
