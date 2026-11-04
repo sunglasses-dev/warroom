@@ -21,4 +21,5 @@ REOPEN_MESSAGES_*.md
 .reopen-requested
 sentinel/
 *.lock/
+*.flock
 *.tmp.*
