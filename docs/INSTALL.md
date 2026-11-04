@@ -9,9 +9,10 @@ mkdir -p ~/.warroom && cp warroom.env.example ~/.warroom/warroom.env
 ```
 mkdir -p ~/warroom-run && : >> ~/warroom-run/board.md
 ```
-3. **Hooks.** They go in your Claude Code settings file, `settings.json` in `$CLAUDE_CONFIG_DIR`, or else in the `.claude` folder of your home folder, and apply to every session that reads it. If the file exists, save a uniquely named copy first (`$f` is that file):
+3. **Hooks.** They go in your Claude Code settings file, `settings.json` in `$CLAUDE_CONFIG_DIR`, or else in the `.claude` folder of your home folder, and apply to every session that reads it. Set `f` to that file (run this line even if the file does not exist yet), then, if it exists, save a uniquely named copy:
 ```
-f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"; cp "$f" "$f.before-warroom-$(date +%s)"
+f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+cp "$f" "$f.before-warroom-$(date +%s)"
 ```
 Replace `/ABSOLUTE/PATH/TO/warroom` below with the full path of this clone, keeping the single quotes. Merge the `"hooks"` property into the file: no file yet, make this block the whole file; no `"hooks"` key, add this one; a `"hooks"` key already there, keep every event and entry in it and add only these as new groups at the end of each event's list. Never add a second `"hooks"` key or a second JSON document.
 
@@ -38,7 +39,7 @@ python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$f" && echo parses
 ```
 Compare the file with your copy (`diff "$f.before-warroom-<number>" "$f"`) and keep the copy until step 5 passes.
 
-5. **Two fresh sessions, then the wake check.** Open a new Claude Code session (an open one may need a restart before it uses the hooks) and paste this as its first message, once per seat, with the seat name in place of `BOSS` (use `W1` in the second session):
+5. **Two fresh sessions, then the wake check.** Open a new Claude Code session (an open one may need a restart before it uses the hooks) and paste this as its first message, once per seat, with the seat name in place of `BOSS` (use `W1` in the second session) and your clone path in place of the placeholder:
 
 ```
 You are BOSS. This session shows a [WAITER NOT ARMED] line that ends with your session id. As a background job, run the command that line gives, then read docs/PROTOCOL.md in the clone and post: bash '/ABSOLUTE/PATH/TO/warroom/bin/board.sh' post BOSS "online"
