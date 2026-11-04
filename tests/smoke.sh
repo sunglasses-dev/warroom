@@ -4,7 +4,7 @@
 #   2. a second waiter on a seat that is already held is refused
 #   3. a registered job that dies wakes its owner once, and its row is dropped, also when several seats check at once
 #   4. the idle guard names a silent seat once per silence, not once per prompt
-#   5. install.sh refuses a settings file that is not valid JSON and leaves it unchanged
+#   5. install.sh refuses a settings file that is not valid JSON, or has a hook command that is not a string, and leaves it unchanged
 #   6. a reopen request wakes the other seats; reopen.sh status exits 0 while they bank
 #   7. wake grammar: only a first line "@SEAT ACTION:" from another author wakes (not prose, ACTIONABLE, a second line, the seat's own post)
 #   8. a replaced board of the same length is read again from its start; a waiter missing its session id is refused
@@ -60,6 +60,9 @@ n=$(grep -c "GUARD\] @W1 ACTION" "$("$B/board.sh" path)")
 mkdir -p "$T/cfg" "$T/home"; printf '{"model": "x",}\n' > "$T/cfg/settings.json"; cp "$T/cfg/settings.json" "$T/orig"
 HOME="$T/home" CLAUDE_CONFIG_DIR="$T/cfg" bash "$ROOT/install.sh" --dir "$T/home/run" >/dev/null 2>&1; rc=$?
 [ $rc != 0 ] && cmp -s "$T/orig" "$T/cfg/settings.json" && ok "install refuses invalid settings, file unchanged" || bad "install on invalid settings: rc $rc"
+mkdir -p "$T/i5b/cfg" "$T/i5b/home"; printf '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": ["bash", "x.sh"]}]}]}}\n' > "$T/i5b/cfg/settings.json"; cp "$T/i5b/cfg/settings.json" "$T/i5b/orig"
+HOME="$T/i5b/home" CLAUDE_CONFIG_DIR="$T/i5b/cfg" bash "$ROOT/install.sh" --dir "$T/i5b/home/run" >"$T/i5b/out" 2>&1; rc=$?
+[ $rc != 0 ] && cmp -s "$T/i5b/orig" "$T/i5b/cfg/settings.json" && ! grep -q Traceback "$T/i5b/out" && grep -q 'is not a string' "$T/i5b/out" && ok "install refuses a hook command that is not a string, cleanly" || bad "non-string command: rc $rc ($(grep -m1 -E 'Error|string' "$T/i5b/out"))"
 
 # 6. a reopen request wakes the other seats, and status exits 0 while seats are still banking
 : > "$("$B/board.sh" path)"; rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/.reopen-requested"

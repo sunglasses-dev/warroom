@@ -103,6 +103,8 @@ for ev in WANT:
                                           and all(isinstance(h, dict) for h in g.get('hooks', [])) for g in groups)
     if not ok:
         die(f'{path}: hooks.{ev} is not a list of hook groups.')
+    if not all(isinstance(h.get('command', ''), str) for g in groups for h in g.get('hooks', [])):
+        die(f'{path}: hooks.{ev} has an entry whose "command" is not a string.')
 # the manifest: {"version": 1, "settings": {"<settings path>": [{"event", "matcher", "command", "script"}, ...]}}
 man = {'version': 1, 'settings': {}}
 if os.path.exists(man_path):
