@@ -105,4 +105,4 @@ Beside the board: `pids.sh` (a finished long job wakes its owner once), `merge-d
 
 ## The story
 
-I am not a programmer. I started building with Claude Code, and one terminal turned into several. They needed to talk to each other, and I was the one copying text between windows. Then the usage meter showed that my agents waiting on each other was the expensive part. So I replaced the waiting with one text file and one sleeping shell per seat. This is that file and those scripts. I use it every day.
+I am not a programmer. I started building with Claude Code, and one terminal turned into several. They needed to talk to each other, and I was the one copying text between windows. Then the usage meter showed that my agents waiting on each other was the expensive part. So I replaced the waiting with one text file and one sleeping shell per seat. This is that file and those scripts. I use it every day to build [Sunglasses](https://sunglasses.dev), a scanner for AI-agent input.
