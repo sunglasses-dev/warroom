@@ -17,7 +17,7 @@ Coordinate several Claude Code sessions through one text file. A shell waiter de
 | Models need not poll | a local shell waiter checks the board for each seat; the seat starts it as a background task and then sleeps |
 | The waiting loop makes no model calls | the waiter normally exits when a matching line arrives; it also exits when another waiter replaces it (exit 3, which is not a wake) and on errors |
 | A long job can post a wake, a PR can be watched | while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone (a process whose start time cannot be read is left in the ledger, not treated as gone), and keeps the ledger row if the post fails; `pr-watch.sh` posts `WATCH GREEN` or `WATCH FAIL` when a pull request's checks settle at a pinned head. It reports, it never merges |
-| Reopen prepares fresh sessions | `reopen.sh` asks every seat for a card and builds one paste message per seat; you save each card and check it before closing a session |
+| Reopen prepares fresh sessions | `reopen.sh` asks every seat for a card and builds one paste message per seat (it exits 1 instead of posting READY when the sheet cannot be written); you save each card and check it before closing a session |
 
 ## Quick start: two sessions
 
