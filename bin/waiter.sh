@@ -5,6 +5,7 @@
 # the author is not the seat itself. Prose, "ACTIONABLE", a quoted directive and any later line of a post wake nobody.
 # The exit is the wake: the session that started the job is told the job finished and sees the line. Re-arm after every wake.
 # SEAT=NONE opts a session out. One live session per seat: arming a taken seat is refused (exit 1). SESSION_ID is required.
+# "Live" means the registered waiter process itself (pid and start time), so a reused pid never holds a seat.
 # A waiter replaced by a newer arm of the same seat stops with exit 3, so that is never mistaken for a wake (exit 0).
 # Position: the last wake is saved in $WARROOM_DIR/.cursor-SEAT with the board's inode, its first line and the last line
 # read. A re-arm within WARROOM_CURSOR_MAX_AGE seconds (86400) resumes there, also across midnight; a replaced board, a
@@ -13,7 +14,7 @@
 # Rotate a board by moving it away (a new file starts); see bin/_cursor.sh for what is and is not noticed.
 # Tuning (warroom.env): WARROOM_POLL seconds between checks (5), WARROOM_MIN_GAP seconds between two wakes (60).
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"; . "$HERE/_cursor.sh"
-case "${1:-}" in -h|--help|help|"") sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help|help|"") sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 SEAT=$1; SID=${2:-}; POLL=${WARROOM_POLL:-5}; GAP=${WARROOM_MIN_GAP:-60}; AGE=${WARROOM_CURSOR_MAX_AGE:-86400}
 REG="$W/seats.tsv"; touch "$REG"; TAB="$(printf '\t')"
 if [ "$SEAT" != NONE ] && ! wr_seat_ok "$SEAT"; then echo "unknown seat '$SEAT' (seats: $SEATS, or NONE)" >&2; exit 2; fi
@@ -27,19 +28,24 @@ if [ "$SEAT" != NONE ]; then wr_lock "$CUR" || { echo "could not lock the cursor
 # Look at the holder and take the seat under ONE lock, so two arms at the same moment cannot both win.
 wr_lock "$REG" || { [ "$SEAT" = NONE ] || wr_unlock "$CUR"; echo "could not lock the seat registry" >&2; exit 1; }
 if [ "$SEAT" != NONE ]; then
-  for holder in $(awk -F'\t' -v s="$SID" -v seat="$SEAT" '$2==seat && $1!=s {print $3}' "$REG"); do
-    if kill -0 "$holder" 2>/dev/null; then
-      wr_unlock "$REG"; wr_unlock "$CUR"
-      echo "REFUSED: seat $SEAT is held by another live session (waiter pid $holder). Arm as NONE, or free the seat first." >&2; exit 1
-    fi
-  done
+  # a holder is the waiter process the row names: same pid AND same start time (column 5; an older row without one is
+  # judged by the pid alone), so a stale row whose pid now belongs to an unrelated process does not block the seat
+  while IFS="$TAB" read -r holder hstart; do
+    case "$(wr_proc "$holder" "$hstart")" in
+      alive) wr_unlock "$REG"; wr_unlock "$CUR"
+        echo "REFUSED: seat $SEAT is held by another live session (waiter pid $holder). Arm as NONE, or free the seat first." >&2; exit 1 ;;
+      unknown) wr_unlock "$REG"; wr_unlock "$CUR"
+        echo "REFUSED: seat $SEAT is held by pid $holder, whose start time cannot be read (ps failed), so it cannot be told from a reused pid. Nothing changed; try again." >&2; exit 1 ;;
+    esac
+  done < <(awk -F'\t' -v s="$SID" -v seat="$SEAT" 'BEGIN{OFS="\t"} $2==seat && $1!=s {print $3, $5}' "$REG")
   # a real seat replaces this session's old row and any other row of the seat
   awk -F'\t' -v s="$SID" -v seat="$SEAT" '$1!=s && $2!=seat' "$REG" > "$REG.tmp.$$"
 else
   # NONE is a shared marker, not a seat: replace only this session's own row, never another session's opt-out
   awk -F'\t' -v s="$SID" '$1!=s' "$REG" > "$REG.tmp.$$"
 fi
-printf '%s\t%s\t%s\t%s\n' "$SID" "$SEAT" "$$" "$(wr_now)" >> "$REG.tmp.$$"; mv "$REG.tmp.$$" "$REG"; wr_unlock "$REG"
+# row: session, seat, waiter pid, armed at, waiter start time ("" when ps could not read it: then the pid alone is judged)
+printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$SEAT" "$$" "$(wr_now)" "$(wr_started $$)" >> "$REG.tmp.$$"; mv "$REG.tmp.$$" "$REG"; wr_unlock "$REG"
 [ "$SEAT" = NONE ] && { echo "this session opted out of board triggers"; exit 0; }
 gen=$(wr_generation "$BOARD_FILE"); base=$(wc -l < "$BOARD_FILE" | tr -d ' ')
 c=$(wr_cursor_get "$CUR" "$BOARD_FILE" "$AGE"); [ "$c" = none ] || base=$c

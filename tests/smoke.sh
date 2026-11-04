@@ -28,6 +28,8 @@
 #  37. cpu-sentinel --dry-run changes nothing; a failed alert post is retried until it lands, then not repeated
 #  38. pr-watch: an option without a value exits 2 (no spin)
 #  39. leak-check: a bad denylist pattern or an unreadable file is an error (exit 2), run-state files in the tree are a hit
+#  40. process identity: ps failing is "unknown" (row kept, seat not taken, guard silent, hook says so), never "dead"; a
+#      reused pid holds no seat and inherits no sentinel strikes or opt-out; a failed sentinel sample keeps its state
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -612,7 +614,7 @@ kill $BL 2>/dev/null; wait $BL 2>/dev/null
 # 37. --dry-run changes nothing; a failed post is retried, a delivered one is not repeated
 RUN_DRY="$T/r26"; mkdir -p "$RUN_DRY/sentinel"; : > "$RUN_DRY/board.md"
 bash -c 'while :; do :; done' & BL=$!; sleep 2
-KEY="$BL:$(ps -o comm= -p $BL | sed 's/^ *//;s/ *$//')"
+KEY="$BL:$(ps -o lstart= -p $BL | tr -s ' ' | sed 's/^ //;s/ $//'):$(ps -o comm= -p $BL | sed 's/^ *//;s/ *$//')"   # pid:start:command
 printf '{"strikes": {"%s": 2}, "alerted": []}\n' "$KEY" > "$RUN_DRY/sentinel/strikes.json"; cp "$RUN_DRY/sentinel/strikes.json" "$T/r26.strikes"
 out=$(WARROOM_DIR="$RUN_DRY" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1)
 if printf '%s' "$out" | grep -q "would post to BOSS" && ! grep -q ACTION "$RUN_DRY/board.md" && cmp -s "$T/r26.strikes" "$RUN_DRY/sentinel/strikes.json" && [ ! -e "$RUN_DRY/sentinel/sentinel.log" ]; then
@@ -646,6 +648,61 @@ fi
 rm -f "$LK/tree/pids.tsv"; : > "$LK/tree/board.md.flock"; bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r4=$?
 [ $r4 = 1 ] && ok "leak-check: a lock sidecar (board.md.flock) inside the tree is a hit" || bad "leak-check on a tree holding board.md.flock: rc $r4"
 git -C "$ROOT" check-ignore -q board.md.flock && ok "a lock sidecar is ignored by git" || bad ".gitignore does not cover *.flock"
+
+# 40. process identity: alive, dead or unknown. A pid whose start time cannot be read (ps failed) is "unknown", never "dead";
+#     a seat, a strike count and an opt-out belong to one process (pid + start time), so a reused pid inherits none of them
+RI="$T/r40"; mkdir -p "$RI" "$T/fakebin"; : > "$RI/board.md"; printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/ps"; chmod +x "$T/fakebin/ps"
+lst() { ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; }
+sleep 60 & IJ=$!; WARROOM_DIR="$RI" "$B/pids.sh" add id-job $IJ W1 >/dev/null
+e=$(WARROOM_DIR="$RI" PATH="$T/fakebin:$PATH" "$B/pids.sh" check 2>&1 >/dev/null); rc=$?
+[ $rc = 3 ] && grep -q '^id-job' "$RI/pids.tsv" && ! grep -q "id-job" "$RI/board.md" && case "$e" in *"cannot read the start time of pid $IJ"*) true ;; *) false ;; esac \
+  && ok "identity: ps failing keeps a live job's row, posts no wake, says so, exits 3" \
+  || bad "identity: unreadable start time: rc $rc, rows $(grep -c '^id-job' "$RI/pids.tsv"), wakes $(grep -c id-job "$RI/board.md")"
+past=$(date -d '-40 min' +%H:%M 2>/dev/null || date -v-40M +%H:%M); printf '[%s · W1] hello\n' "$past" > "$RI/board.md"
+echo '{}' | WARROOM_DIR="$RI" WARROOM_IDLE_MIN=30 PATH="$T/fakebin:$PATH" bash "$ROOT/hooks/board-guard.sh" 2>/dev/null
+[ "$(grep -c "GUARD\] @W1 ACTION" "$RI/board.md")" = 0 ] && ok "identity: the guard does not call a seat idle when its job's identity is unknown" \
+  || bad "identity: guard named W1 idle while its job could not be checked"
+kill $IJ; wait $IJ 2>/dev/null; : > "$RI/board.md"; WARROOM_DIR="$RI" "$B/pids.sh" check >/dev/null 2>&1
+n=$(grep -c "job 'id-job'" "$RI/board.md")
+[ "$n" = 1 ] && ! grep -q '^id-job' "$RI/pids.tsv" && ok "identity: the job that really ended wakes its owner once" || bad "identity: dead job after unknown: $n wakes"
+# seats: a stale row whose pid now belongs to an unrelated live process (other start time) does not hold the seat
+sleep 60 & SL=$!; now=$(date +%Y-%m-%dT%H:%M:%S); TB="$(printf '\t')"
+printf 'sid-old%sW1%s%s%s%s%sMon Jan  1 00:00:00 2001\n' "$TB" "$TB" "$SL" "$TB" "$now" "$TB" > "$RI/seats.tsv"
+WARROOM_DIR="$RI" "$B/waiter.sh" W1 sid-new >/dev/null 2> "$T/r40.arm" & WP=$!; sleep 2
+grep -q '^armed W1' "$T/r40.arm" && ok "identity: a stale seat row whose pid was reused does not block the seat" || bad "identity: reused pid blocked W1: $(head -c 160 "$T/r40.arm")"
+kill $WP 2>/dev/null; wait $WP 2>/dev/null
+printf 'sid-old%sW1%s%s%s%s%s%s\n' "$TB" "$TB" "$SL" "$TB" "$now" "$TB" "$(lst $SL)" > "$RI/seats.tsv"
+WARROOM_DIR="$RI" "$B/waiter.sh" W1 sid-new >/dev/null 2>&1 & WP=$!; wait_exit $WP 5 && { wait $WP; r1=$?; } || { kill $WP; r1=spin; }
+WARROOM_DIR="$RI" PATH="$T/fakebin:$PATH" "$B/waiter.sh" W1 sid-new >/dev/null 2> "$T/r40.unk" & WP=$!; wait_exit $WP 5 && { wait $WP; r2=$?; } || { kill $WP; r2=spin; }
+[ "$r1" = 1 ] && [ "$r2" = 1 ] && grep -q "cannot be read" "$T/r40.unk" && ok "identity: the seat's own waiter holds it; an unreadable holder is refused, not taken" \
+  || bad "identity: holder with matching start rc $r1, unreadable holder rc $r2"
+printf 's-id%sW1%s%s%s%s%sMon Jan  1 00:00:00 2001\n' "$TB" "$TB" "$SL" "$TB" "$now" "$TB" > "$RI/seats.tsv"
+bn1=$(printf '{"session_id": "s-id"}' | WARROOM_DIR="$RI" bash "$ROOT/hooks/waiter-check.sh" 2>&1)
+printf 's-id%sW1%s%s%s%s%s%s\n' "$TB" "$TB" "$SL" "$TB" "$now" "$TB" "$(lst $SL)" > "$RI/seats.tsv"
+bn2=$(printf '{"session_id": "s-id"}' | WARROOM_DIR="$RI" bash "$ROOT/hooks/waiter-check.sh" 2>&1)
+bn3=$(printf '{"session_id": "s-id"}' | WARROOM_DIR="$RI" PATH="$T/fakebin:$PATH" bash "$ROOT/hooks/waiter-check.sh" 2>&1)
+case "$bn1" in "[WAITER ENDED]"*) a=1 ;; *) a=0 ;; esac; case "$bn3" in "[WAITER UNCHECKED]"*) c=1 ;; *) c=0 ;; esac
+[ "$a" = 1 ] && [ -z "$bn2" ] && [ "$c" = 1 ] && ok "identity: the hook warns on a reused waiter pid, is silent for the live one, says when it cannot tell" \
+  || bad "identity: hook banners: reused '$(printf '%s' "$bn1" | head -c 40)' live '$(printf '%s' "$bn2" | head -c 40)' unknown '$(printf '%s' "$bn3" | head -c 40)'"
+kill $SL 2>/dev/null; wait $SL 2>/dev/null
+# sentinel: saved strikes of an earlier process with the same pid and command do not carry over; a failed ps keeps the file
+RS="$T/r40s"; mkdir -p "$RS/sentinel"; : > "$RS/board.md"
+bash -c 'while :; do :; done' & BL=$!; sleep 2
+CM=$(ps -o comm= -p $BL | sed 's/^ *//;s/ *$//'); ST=$(lst $BL)
+printf '{"strikes": {"%s": 14, "%s": 14}, "alerted": []}\n' "$BL:$CM" "$BL:Thu Jan 1 00:00:00 1970:$CM" > "$RS/sentinel/strikes.json"
+WARROOM_DIR="$RS" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1
+[ "$(grep -c "process $BL " "$RS/board.md")" = 0 ] && grep -qE "pid $BL .*strike 1( |$)" "$RS/sentinel/sentinel.log" \
+  && ok "sentinel: a new process with a reused pid starts at strike 1, inherits no alert" || bad "sentinel: reused pid inherited strikes: $(tail -1 "$RS/sentinel/sentinel.log" | head -c 160)"
+cp "$RS/sentinel/strikes.json" "$T/r40s.strikes"
+WARROOM_DIR="$RS" PATH="$T/fakebin:$PATH" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; rc=$?
+[ $rc = 1 ] && cmp -s "$T/r40s.strikes" "$RS/sentinel/strikes.json" && ok "sentinel: a failed ps keeps the strike file as it was (exit 1)" || bad "sentinel with ps failing: rc $rc, strike file $(cmp -s "$T/r40s.strikes" "$RS/sentinel/strikes.json" && echo kept || echo CHANGED)"
+# an ok-<pid> file made before this process started is an earlier process's opt-out: the kill is still due
+printf '{"strikes": {"%s": 2}, "alerted": []}\n' "$BL:$ST:$CM" > "$RS/sentinel/strikes.json"; touch -t 0101010000 "$RS/sentinel/ok-$BL"
+o1=$(WARROOM_DIR="$RS" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1); touch "$RS/sentinel/ok-$BL"
+o2=$(WARROOM_DIR="$RS" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1)
+case "$o1" in *"would kill tree $BL"*) a=1 ;; *) a=0 ;; esac; case "$o2" in *"would kill tree $BL"*) b=1 ;; *) b=0 ;; esac
+[ "$a$b" = 10 ] && ok "sentinel: an opt-out older than the process is ignored, a current one stops the kill" || bad "sentinel opt-out by identity: old $a current $b (want 1 0)"
+kill $BL 2>/dev/null; wait $BL 2>/dev/null
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail

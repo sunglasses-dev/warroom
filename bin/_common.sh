@@ -135,3 +135,26 @@ wr_append() {
   [ "$_rc" = 0 ] || echo "could not append to $BOARD_FILE" >&2
   return "$_rc"
 }
+# Process identity = a pid plus the time its process started (ps lstart, C locale, blanks squeezed; resolution one second).
+# The job ledger, the seat registry, the idle guard and the waiter hook all judge a recorded process with wr_proc.
+# wr_started PID: print the start time of PID; exit 1 (nothing printed) when it cannot be read.
+wr_started() {
+  _wr_st=$( { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; } 8>&- 9>&- )   # no lock copy in ps
+  [ -n "$_wr_st" ] || return 1
+  printf '%s\n' "$_wr_st"
+}
+# wr_proc PID [STARTED]: print one word.
+#   dead     no such process, or (when STARTED is given) the pid now belongs to a process that started at another time
+#   alive    the process exists and, when STARTED is given, started at that time; with no STARTED the pid alone decides
+#   unknown  the process exists but its start time cannot be read (ps failed): it is neither alive nor dead. Callers
+#            keep what they hold and say so; they never treat unknown as dead.
+wr_proc() {
+  case "$1" in ''|*[!0-9]*|?????????????*) echo dead; return 0 ;; esac
+  [ "$((10#$1))" -gt 0 ] || { echo dead; return 0; }          # pid 0 would mean the whole process group
+  kill -0 "$1" 2>/dev/null || { echo dead; return 0; }
+  [ -n "${2:-}" ] || { echo alive; return 0; }
+  if _wr_ps=$(wr_started "$1"); then
+    if [ "$_wr_ps" = "$2" ]; then echo alive; else echo dead; fi
+  elif kill -0 "$1" 2>/dev/null; then echo unknown
+  else echo dead; fi                                           # it ended between the two looks
+}

@@ -3,14 +3,15 @@
 # registered job running, with one "@SEAT ACTION:" line on the board, at most once per silence.
 # Silent means: no board line stamped with its name for WARROOM_IDLE_MIN minutes (default 30).
 # A seat that owns a registered job whose process is still running is working, not idle. "Still running" means the same
-# process: when the ledger recorded a start time, a reused pid that started at another time does not count.
+# process: when the ledger recorded a start time, a reused pid that started at another time does not count. A job whose
+# start time cannot be read (ps failed) counts as running: the guard never calls a seat idle when it cannot tell.
 # "At most once per silence": the mark remembers which post it spoke about (board generation, line number and the line
 # itself), so a replaced board, or a new post that lands on the same line number, starts a new silence.
 # a bad warroom.env must not block the prompt (exit 2 would): see WR_CONFIG_EXIT in bin/_common.sh
 # shellcheck disable=SC2034
 WR_CONFIG_EXIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"; . "$HERE/../bin/_cursor.sh"
-case "${1:-}" in -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 cat >/dev/null 2>&1
 IDLE=${WARROOM_IDLE_MIN:-30}; h=$(date +%H); m=$(date +%M); TAB="$(printf '\t')"
 nowmin=$((10#$h*60+10#$m))
@@ -21,11 +22,14 @@ for seat in $SEATS; do
   [ "$age" -ge "$IDLE" ] || continue
   # a seat that owns a registered job whose process is still alive is working (pids.tsv: label pid owner started)
   busy=0
-  while IFS="$TAB" read -r _l jp _o js; do
+  while IFS="$TAB" read -r jl jp _o js; do
     [ -n "$jp" ] || continue
-    kill -0 "$jp" 2>/dev/null || continue
-    # same process? (a recorded start time must match; a row without one is judged by the pid alone)
-    [ -z "$js" ] || [ "$(ps -o lstart= -p "$jp" 2>/dev/null | tr -s ' ' | sed 's/^ //')" = "$js" ] && busy=1
+    # same process? (a recorded start time must match; a row without one is judged by the pid alone). A job whose start
+    # time cannot be read (ps failed) may still be running, so it counts as working, and the hook says why on stderr.
+    case "$(wr_proc "$jp" "$js")" in
+      alive) busy=1 ;;
+      unknown) busy=1; echo "board-guard: cannot read the start time of pid $jp (job '$jl'); $seat counted as working" >&2 ;;
+    esac
   done < <(awk -F'\t' -v s="$seat" '$3==s' "$W/pids.tsv" 2>/dev/null)
   [ "$busy" = 0 ] || continue
   mark="$W/.guard-$seat"

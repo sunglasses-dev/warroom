@@ -12,9 +12,13 @@ above HOT percent CPU and keeps a strike count per process: one strike is one ru
 A ledger row counts only when its pid is positive, its owner is a configured seat, and (when the row records a start
 time) the pid still belongs to the process that started at that time; otherwise the row is ignored.
 
+A process is its pid plus its start time: strikes, the "already alerted" mark and the opt-out below all belong to one
+process, and a new process that gets a reused pid starts from zero. When ps fails, the run stops (exit 1) and keeps the
+strike file as it was.
+
 Nothing is ever killed unless you pass --enforce. Without it the script reports: it writes its log and strike file and posts
 its alerts, so an alert can still reach a seat. `touch $WARROOM_DIR/sentinel/ok-<pid>` stops the kill for that process (the
-alert still posts). An alert is one board line, "@OWNER ACTION:", posted once when a hot process reaches its alert
+alert still posts); a file made before the process started is an earlier process's and does not count. An alert is one board line, "@OWNER ACTION:", posted once when a hot process reaches its alert
 strike count; if the post fails it is tried again on the next run until it succeeds. The strike count and the "already
 alerted" mark belong to one hot spell: a process that cools down is forgotten, and a later hot spell can alert again.
 
@@ -118,35 +122,56 @@ def log(msg):
         f.write(line + '\n')
 
 def sample():
-    rows = subprocess.run(['ps', '-Ao', 'pid,ppid,pcpu,comm,args'], capture_output=True, text=True).stdout.splitlines()[1:]
+    """pid -> process, from ONE ps snapshot that also holds each start time (lstart, C locale, blanks squeezed: the form
+    pids.sh records). A process is pid + start time, so a reused pid is a new process. None when ps fails."""
+    r = subprocess.run(['ps', '-Ao', 'pid,ppid,pcpu,lstart,comm,args'], capture_output=True, text=True,
+                       env=dict(os.environ, LC_ALL='C'))
+    rows = r.stdout.splitlines()[1:]
+    if r.returncode or not rows:
+        return None
     procs = {}
     for ln in rows:
-        p = ln.split(None, 4)
-        if len(p) < 4:
+        p = ln.split(None, 9)          # pid ppid pcpu, then lstart = 5 words (Wed Nov  4 13:38:01 2026), comm, args
+        if len(p) < 9 or not (p[0].isdigit() and p[1].isdigit() and p[7].isdigit()):
             continue
-        procs[int(p[0])] = dict(pid=int(p[0]), ppid=int(p[1]), cpu=float(p[2]), comm=p[3], args=p[4] if len(p) > 4 else p[3])
+        procs[int(p[0])] = dict(pid=int(p[0]), ppid=int(p[1]), cpu=float(p[2]), start=' '.join(p[3:8]), comm=p[8],
+                                args=p[9] if len(p) > 9 else p[8])
     return procs
 
-def started(pid):
-    """start time of a pid in the same form pids.sh records it (C locale, blanks squeezed); '' if unreadable"""
-    r = subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output=True, text=True, env=dict(os.environ, LC_ALL='C'))
-    return ' '.join(r.stdout.split())
+def started_epoch(start):
+    try:
+        return time.mktime(time.strptime(start, '%a %b %d %H:%M:%S %Y'))
+    except ValueError:
+        return None
 
-def ledger():
+def ledger(procs):
     """pid -> (label, owner) for every valid row of pids.tsv: label, pid, owner[, start time]. A row with a recorded start
-    time counts only while that pid still started at that time (a reused pid is someone else's process)."""
+    time counts only while that pid still started at that time (a reused pid is someone else's process). The start
+    time comes from the same snapshot as the CPU sample, so the two cannot disagree."""
     out = {}
     try:
         for ln in open(os.path.join(W, 'pids.tsv')):
             f = ln.rstrip('\n').split('\t')
             if len(f) < 3 or not f[1].isdigit() or int(f[1]) <= 0 or f[2] not in SEATS:
                 continue
-            if len(f) > 3 and f[3].strip() and ' '.join(f[3].split()) != started(f[1]):
+            pid = int(f[1])
+            if len(f) > 3 and f[3].strip() and (pid not in procs or ' '.join(f[3].split()) != procs[pid]['start']):
                 continue
-            out[int(f[1])] = (f[0], f[2])
+            out[pid] = (f[0], f[2])
     except OSError:
         pass
     return out
+
+def opted_out(p):
+    """ok-<pid> stops the kill only for the process that was running when the file was made: a file older than the
+    process's start belongs to an earlier process with the same pid. An unreadable start keeps the opt-out (no kill)."""
+    path = os.path.join(STATE, f"ok-{p['pid']}")
+    try:
+        made = os.stat(path).st_mtime
+    except OSError:
+        return False
+    began = started_epoch(p['start'])
+    return began is None or made >= began - 1      # lstart has one-second resolution
 
 def ancestors(pid, procs):
     seen = []
@@ -172,7 +197,10 @@ def kill_tree(pid, procs):
     except OSError:
         pass
 
-procs = sample(); jobs = ledger(); me = os.getpid()
+procs = sample(); me = os.getpid()
+if procs is None:                              # no sample: keep every strike and mark as they are, change nothing
+    log('ps failed: no sample this run; strike file kept as it was'); sys.exit(1)
+jobs = ledger(procs)
 try:
     saved = json.load(open(STRIKES))
 except (OSError, ValueError):
@@ -190,7 +218,7 @@ for p in procs.values():
     exe = p['comm'] if p['comm'].startswith('/') else p['args'].split()[0]
     if exe.startswith(SYSTEM_PREFIX) and os.path.basename(exe) not in SHELLS:
         continue
-    key = f"{p['pid']}:{p['comm']}"; hot[key] = p
+    key = f"{p['pid']}:{p['start']}:{p['comm']}"; hot[key] = p    # one process = pid + start time; a reused pid starts at 0
     n = strikes.get(key, 0) + 1; strikes[key] = n
     owner = None; label = None
     for a in ancestors(p['pid'], procs):
@@ -211,7 +239,7 @@ for p in procs.values():
         if alert(who, f"process {p['pid']} ({os.path.basename(p['comm'])}) has used {p['cpu']:.0f}% CPU for {n} runs ({cls}). "
                       f"Stop it, or touch {STATE}/ok-{p['pid']} to let it run."):
             alerted.add(key)
-    if n >= kill_at and not os.path.exists(os.path.join(STATE, f"ok-{p['pid']}")):
+    if n >= kill_at and not opted_out(p):
         if ENFORCE and not DRY:
             log(f"KILL tree {p['pid']} ({cls})"); kill_tree(p['pid'], procs)
         elif n == kill_at:
