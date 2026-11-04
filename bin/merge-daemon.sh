@@ -13,15 +13,18 @@
 #     if the receipt or the board line cannot be written the run itself ends FAIL
 # Limit: this script cannot stop someone else merging. The guarantee that nothing merges unchecked is a server-side one:
 # branch protection with required status checks on the target branch. Without --require it also warns, because a check
-# that has not registered yet is not waited for. Needs: gh (logged in) and python3. --dry-run merges and writes nothing.
+# that has not registered yet is not waited for. Needs: gh (logged in) and python3. --dry-run merges and writes nothing
+#   (no receipt, no board line) on every outcome, pass or fail.
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"
-case "${1:-}" in -h|--help|help|"") sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help|help|"") sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 PR=$1; shift; HEAD=""; REPO=""; SEAT=$BOSS_SEAT; POLL=30; TIMEOUT=7200; DRY=0; REQUIRE=""
+need() { # need OPTION VALUE: an option that takes a value must be followed by one (not by nothing or another option)
+  case "${2-}" in ''|--*) echo "$1 needs a value" >&2; exit 2 ;; esac; }
 while [ $# -gt 0 ]; do case "$1" in
-  --head) HEAD=${2:-}; shift 2 ;; --repo) REPO=${2:-}; shift 2 ;; --seat) SEAT=${2:-}; shift 2 ;;
-  --require) REQUIRE="${REQUIRE:+$REQUIRE
-}${2:-}"; shift 2 ;;
-  --poll) POLL=${2:-}; shift 2 ;; --timeout) TIMEOUT=${2:-}; shift 2 ;; --dry-run) DRY=1; shift ;;
+  --head) need "$@"; HEAD=$2; shift 2 ;; --repo) need "$@"; REPO=$2; shift 2 ;; --seat) need "$@"; SEAT=$2; shift 2 ;;
+  --require) need "$@"; REQUIRE="${REQUIRE:+$REQUIRE
+}$2"; shift 2 ;;
+  --poll) need "$@"; POLL=$2; shift 2 ;; --timeout) need "$@"; TIMEOUT=$2; shift 2 ;; --dry-run) DRY=1; shift ;;
   *) echo "unknown option $1" >&2; exit 2 ;; esac; done
 case "$PR" in ''|*[!0-9]*) echo "PR must be a number" >&2; exit 2 ;; esac
 case "$HEAD" in
@@ -33,11 +36,16 @@ case "$POLL$TIMEOUT" in ''|*[!0-9]*) echo "--poll and --timeout are whole second
 wr_seat_ok "$SEAT" || { echo "unknown seat '$SEAT' (seats: $SEATS)" >&2; exit 2; }
 [ -n "$REQUIRE" ] || echo "warning: no --require given; a check that has not registered yet is not waited for. Branch protection with required checks is the real guard." >&2
 R=(); [ -n "$REPO" ] && R=(--repo "$REPO")
-RECEIPT="$W/receipts/merge_${PR}_$(date +%Y%m%d_%H%M%S)_$$.md"; mkdir -p "$W/receipts"
+RECEIPT="$W/receipts/merge_${PR}_$(date +%Y%m%d_%H%M%S)_$$.md"
 
 finish() { # finish PASS|FAIL "detail" — receipt and board line must both succeed, or the run fails
   _res=$1; _rc=0
+  if [ "$DRY" = 1 ]; then      # a dry run ends the same way on every outcome: say it, write nothing (no receipt, no board line)
+    echo "dry run: would end $_res for PR $PR: $2 (nothing written)"; [ "$_res" = PASS ] && exit 0; exit 1
+  fi
+  mkdir -p "$W/receipts" || { echo "could not create $W/receipts" >&2; _rc=1; }
   { echo "# merge receipt PR $PR"; echo "- result: $_res"; echo "- detail: $2"; echo "- pinned head: $HEAD"
+    echo "- invocation: pid $$"
     echo "- required checks: ${REQUIRE:-none}" | tr '\n' ' '; echo; echo "- time: $(date '+%Y-%m-%d %H:%M:%S')"; } > "$RECEIPT" \
     || { echo "could not write the receipt $RECEIPT" >&2; _rc=1; }
   "$HERE/board.sh" post "$SEAT" "POSTCONDITION $_res merge of PR $PR: $2 (receipt $RECEIPT)" >/dev/null \
@@ -103,9 +111,27 @@ while :; do
   [ "$(date +%s)" -ge "$end" ] && finish FAIL "timed out waiting for checks ($REASON)"
   sleep "$POLL"
 done
-if [ $DRY = 1 ]; then echo "dry run: PR $PR is green at $HEAD on two looks; would squash-merge pinned to it"; exit 0; fi
-err=$(gh pr merge "$PR" "${R[@]}" --squash --match-head-commit "$HEAD" --subject "$S_TITLE (#$PR)" --body "" 2>&1 >/dev/null) \
-  || finish FAIL "gh pr merge was refused: $(printf '%s' "$err" | head -n 1 | cut -c1-120)"
-snapshot || finish FAIL "merge was sent, but the PR could not be read back"
-mc=$(gh pr view "$PR" "${R[@]}" --json mergeCommit -q .mergeCommit.oid 2>/dev/null)
-if [ "$S_STATE" = MERGED ] && [ -n "$mc" ]; then finish PASS "merged as $mc"; else finish FAIL "readback shows state '$S_STATE' and no merge commit"; fi
+if [ $DRY = 1 ]; then finish PASS "green at $HEAD on two looks; would squash-merge pinned to it"; fi
+err=$(gh pr merge "$PR" "${R[@]}" --squash --match-head-commit "$HEAD" --subject "$S_TITLE (#$PR)" --body "" 2>&1 >/dev/null) || {
+  _why=$(printf '%s' "$err" | head -n 1 | cut -c1-120)
+  # refused: another actor may have merged it between our last look and this call. That is not a merge by this run.
+  if snapshot && [ "$S_STATE" = MERGED ]; then
+    finish FAIL "NOT merged by this run (invocation $$): gh refused ($_why) and the PR is already MERGED by someone else"
+  fi
+  finish FAIL "gh pr merge was refused: $_why"; }
+snapshot || finish FAIL "merge call (invocation $$) was accepted, but the PR could not be read back"
+# Three different outcomes, never one: merged now / accepted but not merged yet (queue or auto-merge) / merged by another account.
+rb=$(gh pr view "$PR" "${R[@]}" --json mergeCommit,mergedBy -q '[.mergeCommit.oid // "", .mergedBy.login // ""] | @tsv' 2>/dev/null)
+mc=${rb%%$'\t'*}; merger=""; case "$rb" in *$'\t'*) merger=${rb#*$'\t'} ;; esac
+me=$(gh api user -q .login 2>/dev/null)
+if [ "$S_STATE" != MERGED ]; then
+  finish FAIL "merge call (invocation $$) was accepted but the PR is still '$S_STATE': queued or auto-merge? Nothing is merged yet; look again later"
+elif [ -z "$mc" ]; then
+  finish FAIL "readback shows state '$S_STATE' and no merge commit"
+elif [ -n "$merger" ] && [ -n "$me" ] && [ "$merger" = "$me" ]; then
+  finish PASS "merged by this run (invocation $$, account $me) as $mc"
+elif [ -n "$merger" ] && [ -n "$me" ]; then
+  finish FAIL "NOT merged by this run's account: PR is MERGED as $mc by $merger (this run is $me, invocation $$)"
+else
+  finish PASS "merged as $mc (the merging account could not be read, so this does not prove this run did it; invocation $$)"
+fi

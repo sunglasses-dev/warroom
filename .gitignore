@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 
-# local state that must never be committed
+# local state that must never be committed. These are the DEFAULT names only: keep WARROOM_DIR outside the clone, and
+# run tools/leak-check.sh, which fails when a state file like these is inside the tree.
 warroom.env
 warroom-run/
 board.md
@@ -16,3 +17,8 @@ REOPEN_MESSAGES_*.md
 .cursor-*
 .lastwake-*
 .anchor-*
+.guard-*
+.reopen-requested
+sentinel/
+*.lock/
+*.tmp.*
