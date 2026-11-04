@@ -4,7 +4,7 @@
 #   2. a second waiter on a seat that is already held is refused
 #   3. a registered job that dies wakes its owner once, and its row is dropped, also when several seats check at once
 #   4. the idle guard names a silent seat once per silence, not once per prompt
-#   5. install.sh refuses a settings file that is not valid JSON, or has a hook command that is not a string, and leaves it unchanged
+#   5. install.sh never writes the settings file; --check reports an invalid one (exit 2) and names a skipped entry
 #   6. a reopen request wakes the other seats; reopen.sh status exits 0 while they bank
 #   7. wake grammar: only a first line "@SEAT ACTION:" from another author wakes (not prose, ACTIONABLE, a second line, the seat's own post)
 #   8. a replaced board of the same length is read again from its start; a waiter missing its session id is refused
@@ -15,10 +15,12 @@
 #  12. the job ledger: concurrent add of one label gives one row; a reused pid (wrong start time) counts as gone
 #  13. pr-watch (gh stubbed): only `gh pr view` is ever called, a green needs every row green, and the receipt holds the response that produced it
 #  14-16. warroom.env is data: command text refused, the current folder ignored, shell and cpu-sentinel.py agree
-#  17-20. install.sh: refuses command text in --dir, survives an interrupted write, re-points a moved clone, keeps config
+#  17-20. install.sh: refuses command text in --dir, prints a four-entry block (path with a space), --check after a moved
+#         clone, keeps config
 #  21. every hook with a bad warroom.env exits 1 (shown, prompt goes through), never 2 (Claude Code blocks the prompt)
-#  22-26. install.sh changes only entries it wrote (manifest), keeps matcher scopes, validates an existing config;
-#         a key set twice is refused by both readers; two installers at once give one result
+#  22-26. install.sh --check exit codes 0/1/2 with reasons, an exact-text inventory (counts, matchers, skipped, other
+#         spellings), an existing config is validated; a key set twice is refused by both readers; --uninstall,
+#         --check and --dry-run change no file; no write target may be the settings file (26b)
 #  27-32. second review (waiter, cursor, guard, reopen): shared opt-out rows, one wake when a waiter is replaced, a board refilled in
 #         place, the guard's job identity and its mark across board generations, reopen READY only with cards, quoted commands
 #  33. a missing board is created without truncating (parallel first posts all survive); an uncreatable board is an error
@@ -38,6 +40,7 @@ export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1
 B="$ROOT/bin"; fail=0
 ok()  { echo "ok   $1"; }
 bad() { echo "FAIL $1"; fail=1; }
+blk() { sed -n '/^--- begin hook block ---$/,/^--- end hook block ---$/p' "$1" | sed '1d;$d'; }   # the hook block install.sh prints
 wait_exit() { for _ in $(seq 1 "$2"); do kill -0 "$1" 2>/dev/null || return 0; sleep 1; done; return 1; }
 
 # 1. wake grammar
@@ -70,13 +73,18 @@ for _ in 1 2 3; do echo '{}' | WARROOM_IDLE_MIN=30 bash "$ROOT/hooks/board-guard
 n=$(grep -c "GUARD\] @W1 ACTION" "$("$B/board.sh" path)")
 [ "$n" = 1 ] && ok "guard names a silent seat once per silence" || bad "guard posted $n times for one silence"
 
-# 5. installer never overwrites unreadable settings
+# 5. install never writes the settings file: an invalid one stays byte-identical and the advice says not to paste into
+#    it; --check reports it (exit 2, with the reason) and skips a hook command that is not a string
+E5="env -u WARROOM_ENV -u SEATS -u WARROOM_DIR"
 mkdir -p "$T/cfg" "$T/home"; printf '{"model": "x",}\n' > "$T/cfg/settings.json"; cp "$T/cfg/settings.json" "$T/orig"
-HOME="$T/home" CLAUDE_CONFIG_DIR="$T/cfg" bash "$ROOT/install.sh" --dir "$T/home/run" >/dev/null 2>&1; rc=$?
-[ $rc != 0 ] && cmp -s "$T/orig" "$T/cfg/settings.json" && ok "install refuses invalid settings, file unchanged" || bad "install on invalid settings: rc $rc"
+$E5 HOME="$T/home" CLAUDE_CONFIG_DIR="$T/cfg" bash "$ROOT/install.sh" --dir "$T/home/run" >"$T/i5" 2>&1; rc=$?
+$E5 HOME="$T/home" CLAUDE_CONFIG_DIR="$T/cfg" bash "$ROOT/install.sh" --check >"$T/c5" 2>&1; rc2=$?
+[ $rc = 0 ] && [ $rc2 = 2 ] && cmp -s "$T/orig" "$T/cfg/settings.json" && grep -q 'Do not paste into it' "$T/i5" && grep -q 'cannot inspect: .*is not valid JSON' "$T/c5" \
+  && ! grep -q Traceback "$T/c5" && ok "invalid settings: byte-identical, advice says do not paste, --check exits 2 with the reason" || bad "invalid settings: install rc $rc, check rc $rc2"
 mkdir -p "$T/i5b/cfg" "$T/i5b/home"; printf '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": ["bash", "x.sh"]}]}]}}\n' > "$T/i5b/cfg/settings.json"; cp "$T/i5b/cfg/settings.json" "$T/i5b/orig"
-HOME="$T/i5b/home" CLAUDE_CONFIG_DIR="$T/i5b/cfg" bash "$ROOT/install.sh" --dir "$T/i5b/home/run" >"$T/i5b/out" 2>&1; rc=$?
-[ $rc != 0 ] && cmp -s "$T/i5b/orig" "$T/i5b/cfg/settings.json" && ! grep -q Traceback "$T/i5b/out" && grep -q 'is not a string' "$T/i5b/out" && ok "install refuses a hook command that is not a string, cleanly" || bad "non-string command: rc $rc ($(grep -m1 -E 'Error|string' "$T/i5b/out"))"
+$E5 HOME="$T/i5b/home" CLAUDE_CONFIG_DIR="$T/i5b/cfg" bash "$ROOT/install.sh" --check >"$T/i5b/out" 2>&1; rc=$?
+[ $rc = 1 ] && cmp -s "$T/i5b/orig" "$T/i5b/cfg/settings.json" && grep -q 'skipped  hooks.SessionStart\[0\].hooks\[0\] (no matcher): "command" is not a string' "$T/i5b/out" \
+  && ! grep -q Traceback "$T/i5b/out" && ok "--check: a command that is not a string is skipped and named" || bad "non-string command: check rc $rc"
 
 # 6. a reopen request wakes the other seats, and status exits 0 while seats are still banking
 : > "$("$B/board.sh" path)"; rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/.reopen-requested"
@@ -429,25 +437,31 @@ env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i10/home" CLAUDE_CONFIG_DIR=
 [ $rc != 0 ] && [ ! -e "$T/m-dir" ] && [ ! -e "$T/i10/home/.warroom" ] && [ ! -e "$T/i10/cfg/settings.json" ] \
   && ok "install refuses \$(...) in --dir and writes nothing" || bad "install --dir with command text: rc $rc"
 
-# 18. an interrupted settings write leaves settings.json exactly as it was (the write goes to a temp file first)
-mkdir -p "$T/i11/cfg" "$T/i11/home"
-# bash counts ulimit -f in 1024-byte blocks: 8 = 8 KiB. The file fits under it; the file with the hooks added does not.
-python3 -c 'import json,sys; json.dump({"model": "x", "pad": "p" * 7950}, open(sys.argv[1], "w"))' "$T/i11/cfg/settings.json"
-cp "$T/i11/cfg/settings.json" "$T/i11/orig"
-( ulimit -f 8; env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i11/home" CLAUDE_CONFIG_DIR="$T/i11/cfg" bash "$ROOT/install.sh" --dir "$T/i11/run" >/dev/null 2>&1 ); rc=$?
-[ $rc != 0 ] && cmp -s "$T/i11/orig" "$T/i11/cfg/settings.json" && ok "interrupted settings write leaves the file intact, install fails" \
-  || bad "interrupted write: rc $rc, file $(cmp -s "$T/i11/orig" "$T/i11/cfg/settings.json" && echo same || echo CHANGED)"
+# 18. the printed hook block is valid JSON with exactly the four entries, each command quoted for a clone path with a
+#     space and an apostrophe; the settings file stays byte-identical, and a missing one is not created
+CL="$T/sp ace/it's/wr"; mkdir -p "$CL" "$T/i11/cfg" "$T/i11/home" "$T/i11b/cfg" "$T/i11b/home"; cp -R "$ROOT/install.sh" "$ROOT/bin" "$ROOT/hooks" "$CL/"
+printf '{"model": "x"}\n' > "$T/i11/cfg/settings.json"; cp "$T/i11/cfg/settings.json" "$T/i11/orig"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i11/home" CLAUDE_CONFIG_DIR="$T/i11/cfg" bash "$CL/install.sh" --dir "$T/i11/run" >"$T/i11/out" 2>&1; rc=$?
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i11b/home" CLAUDE_CONFIG_DIR="$T/i11b/cfg" bash "$CL/install.sh" --dir "$T/i11b/run" >/dev/null 2>&1; rc2=$?
+blk "$T/i11/out" > "$T/i11/block.json"
+v=$(python3 -c '
+import json, shlex, sys
+d = json.load(open(sys.argv[1])); root = sys.argv[2]
+got = [(e, h.get("type"), shlex.split(h["command"])) for e, gs in d["hooks"].items() for g in gs for h in g["hooks"]]
+want = [(e, "command", ["bash", root + "/hooks/" + s]) for e, s in [("SessionStart", "waiter-check.sh"),
+        ("UserPromptSubmit", "waiter-check.sh"), ("UserPromptSubmit", "board-tail.sh"), ("UserPromptSubmit", "board-guard.sh")]]
+print(list(d) == ["hooks"] and got == want)' "$T/i11/block.json" "$CL" 2>&1 | tail -1)
+[ $rc = 0 ] && [ $rc2 = 0 ] && [ "$v" = True ] && cmp -s "$T/i11/orig" "$T/i11/cfg/settings.json" && [ ! -e "$T/i11b/cfg/settings.json" ] \
+  && ok "printed block: four entries, quoted for a path with a space and an apostrophe; settings untouched, none created" || bad "printed block: rc $rc/$rc2, block '$v'"
 
-# 19. reinstall: an entry this installer wrote (listed in its manifest) from a clone that has moved is pointed here,
-#     never doubled, and a second run changes nothing
-mkdir -p "$T/i12/cfg" "$T/i12/home/.warroom"
-printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash /gone/clone/hooks/board-tail.sh"}]}]}}\n' > "$T/i12/cfg/settings.json"
-python3 -c 'import json,os,sys; json.dump({"version": 1, "settings": {os.path.realpath(sys.argv[1]): [{"event": "UserPromptSubmit", "matcher": None, "command": "bash /gone/clone/hooks/board-tail.sh", "script": "board-tail.sh"}]}}, open(sys.argv[2], "w"))' "$T/i12/cfg/settings.json" "$T/i12/home/.warroom/installed-hooks.json"
+# 19. a moved clone: --check finds none of this clone's four commands and lists the old clone's as another reference
+mkdir -p "$T/i12/cfg" "$T/i12/home"
+printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash /gone/clone/hooks/board-tail.sh"}]}]}}\n' > "$T/i12/cfg/settings.json"; cp "$T/i12/cfg/settings.json" "$T/i12/orig"
 env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" --dir "$T/i12/run" >/dev/null 2>&1
-env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" >"$T/i12/out2" 2>&1
-n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["hooks"]; print(sum(len(g["hooks"]) for e in d.values() for g in e), sum("/gone/" in h["command"] for e in d.values() for g in e for h in g["hooks"]))' "$T/i12/cfg/settings.json")
-nb=0; for f in "$T"/i12/cfg/settings.json.warroom-bak-*; do [ -e "$f" ] && nb=$((nb + 1)); done
-[ "$n" = "4 0" ] && [ "$nb" = 1 ] && grep -q "nothing to change" "$T/i12/out2" && ok "moved clone (in the manifest) re-pointed, second run changes nothing" || bad "reinstall: entries/old '$n', backups $nb"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" --check >"$T/i12/out2" 2>&1; rc=$?
+n=$(grep -c '^   found 0  ' "$T/i12/out2")
+[ $rc = 1 ] && [ "$n" = 4 ] && grep -qF 'other reference  UserPromptSubmit  "bash /gone/clone/hooks/board-tail.sh"' "$T/i12/out2" && grep -q 'result: 4 of 4 not found' "$T/i12/out2" \
+  && cmp -s "$T/i12/orig" "$T/i12/cfg/settings.json" && ok "moved clone: four not found, the old entry listed as another reference, file untouched" || bad "moved clone: check rc $rc, not found $n"
 
 # 20. reinstall with other seats than the existing config is refused, not silently ignored
 env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" --seats "X1 X2" >/dev/null 2>&1; rc=$?
@@ -459,19 +473,43 @@ hr=""; for h in board-guard board-tail waiter-check; do
 done
 [ "$hr" = " board-guard=1 board-tail=1 waiter-check=1" ] && [ ! -e "$T/m-env" ] && ok "hooks exit 1, not 2, on a bad warroom.env" || bad "hook exit codes on a bad config:$hr"
 
-# 22. a hook entry the installer did not write is left alone, even when its file name matches and its path is gone
+# 22. --check: exit 0 with all four found, 1 with one missing, 2 when the file cannot be inspected (missing, invalid
+#     JSON, a key twice, a wrong "hooks" shape), each with its own reason; the file stays byte-identical every time
 mkdir -p "$T/i22/cfg" "$T/i22/home"
-printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash /missing/other-tool/hooks/board-tail.sh"}]}]}}\n' > "$T/i22/cfg/settings.json"
-env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i22/home" CLAUDE_CONFIG_DIR="$T/i22/cfg" bash "$ROOT/install.sh" --dir "$T/i22/run" >"$T/i22/out" 2>&1; rc=$?
-n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["hooks"]; print(sum("/missing/other-tool/" in h["command"] for e in d.values() for g in e for h in g["hooks"]), sum(len(g["hooks"]) for e in d.values() for g in e))' "$T/i22/cfg/settings.json")
-[ $rc = 0 ] && [ "$n" = "1 5" ] && grep -q "left alone" "$T/i22/out" && ok "an entry the installer did not write is kept as it was" || bad "foreign hook: rc $rc, kept/total '$n'"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i22/home" CLAUDE_CONFIG_DIR="$T/i22/cfg" bash "$ROOT/install.sh" --dir "$T/i22/run" >"$T/i22/out" 2>&1
+blk "$T/i22/out" > "$T/i22/all"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["hooks"]["UserPromptSubmit"][0]["hooks"].pop(); print(json.dumps(d))' "$T/i22/all" > "$T/i22/one"
+printf '{"hooks": \n' > "$T/i22/bad"; printf '{"hooks": {"UserPromptSubmit": {"hooks": []}}}\n' > "$T/i22/shape"; printf '{"hooks": []}\n' > "$T/i22/list"
+printf '{"hooks": {}, "hooks": {}}\n' > "$T/i22/dup"
+r=""; for c in all one bad shape list dup gone; do
+  rm -f "$T/i22/cfg/settings.json"; [ $c = gone ] || cp "$T/i22/$c" "$T/i22/cfg/settings.json"
+  env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i22/home" CLAUDE_CONFIG_DIR="$T/i22/cfg" bash "$ROOT/install.sh" --check >"$T/i22/c-$c" 2>&1; x=$?
+  if [ $c = gone ]; then [ ! -e "$T/i22/cfg/settings.json" ] || x="$x-CREATED"; else cmp -s "$T/i22/$c" "$T/i22/cfg/settings.json" || x="$x-CHANGED"; fi
+  grep -q Traceback "$T/i22/c-$c" && x="$x-traceback"; r="$r $c=$x"
+done
+why=""; grep -q 'result: 4 of 4 found as exact text' "$T/i22/c-all" || why="$why all"; grep -q 'result: 1 of 4 not found' "$T/i22/c-one" || why="$why one"
+grep -q 'is not valid JSON' "$T/i22/c-bad" || why="$why bad"; grep -q 'hooks.UserPromptSubmit is not a list of hook groups' "$T/i22/c-shape" || why="$why shape"
+grep -q '"hooks" is not a JSON object' "$T/i22/c-list" || why="$why list"; grep -q 'appears twice' "$T/i22/c-dup" || why="$why dup"; grep -q 'does not exist' "$T/i22/c-gone" || why="$why gone"
+[ "$r" = " all=0 one=1 bad=2 shape=2 list=2 dup=2 gone=2" ] && [ -z "$why" ] && ok "--check exit codes 0/1/2 with their reasons, file byte-identical, none created" || bad "--check:$r; reason missing for:$why"
 
-# 23. our own entry under two matcher scopes (startup, resume) keeps both scopes
+# 23. --check is an exact-text inventory: one command under two matcher scopes is found twice with both matchers; a
+#     wrong "type" is skipped and named; the same path spelled with other quotes is not counted but listed; a
+#     disableAllHooks setting is shown
 mkdir -p "$T/i23/cfg" "$T/i23/home"
-python3 -c 'import json,shlex,sys; c="bash "+shlex.quote(sys.argv[2]+"/hooks/waiter-check.sh"); json.dump({"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": c}]}, {"matcher": "resume", "hooks": [{"type": "command", "command": c}]}]}}, open(sys.argv[1], "w"))' "$T/i23/cfg/settings.json" "$ROOT"
-env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i23/home" CLAUDE_CONFIG_DIR="$T/i23/cfg" bash "$ROOT/install.sh" --dir "$T/i23/run" >/dev/null 2>&1; rc=$?
-m=$(python3 -c 'import json,sys; print(" ".join(sorted(g.get("matcher","-") for g in json.load(open(sys.argv[1]))["hooks"]["SessionStart"])))' "$T/i23/cfg/settings.json")
-[ $rc = 0 ] && [ "$m" = "resume startup" ] && ok "two matcher scopes of one entry are both kept" || bad "matcher scopes after install: rc $rc, '$m'"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); g=d["hooks"]["SessionStart"][0]; d["hooks"]["SessionStart"]=[dict(g, matcher="startup"), dict(g, matcher="resume")]; print(json.dumps(d))' "$T/i22/all" > "$T/i23/cfg/settings.json"
+cp "$T/i23/cfg/settings.json" "$T/i23/orig"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i23/home" CLAUDE_CONFIG_DIR="$T/i23/cfg" bash "$ROOT/install.sh" --check >"$T/i23/out" 2>&1; rc=$?
+python3 -c '
+import json, shlex, sys
+d = json.load(open(sys.argv[1])); u = d["hooks"]["UserPromptSubmit"][0]["hooks"]
+u[0]["type"] = "prompt"                                          # wrong type: skipped
+u[1]["command"] = "bash \"" + shlex.split(u[1]["command"])[1] + "\""   # same path, double quotes: listed, not counted
+d["disableAllHooks"] = True; print(json.dumps(d))' "$T/i23/orig" > "$T/i23/cfg/settings.json"; cp "$T/i23/cfg/settings.json" "$T/i23/orig2"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i23/home" CLAUDE_CONFIG_DIR="$T/i23/cfg" bash "$ROOT/install.sh" --check >"$T/i23/out2" 2>&1; rc2=$?
+[ $rc = 0 ] && grep -q '^   found 2  SessionStart' "$T/i23/out" && grep -q 'at hooks.SessionStart\[1\].hooks\[0\] (matcher "resume")' "$T/i23/out" \
+  && [ $rc2 = 1 ] && grep -q 'skipped  hooks.UserPromptSubmit\[0\].hooks\[0\] (no matcher): "type" is not "command"' "$T/i23/out2" \
+  && grep -q 'other reference  UserPromptSubmit  "bash \\"' "$T/i23/out2" && grep -q 'disableAllHooks' "$T/i23/out2" && cmp -s "$T/i23/orig2" "$T/i23/cfg/settings.json" \
+  && ok "--check: counts and matchers, wrong type skipped, other spelling listed not counted, disableAllHooks shown" || bad "--check inventory: rc $rc/$rc2"
 
 # 24. an existing warroom.env whose seats break the rules stops the install before anything is written
 mkdir -p "$T/i24/cfg" "$T/i24/home/.warroom"; printf 'SEATS="ALL"\n' > "$T/i24/home/.warroom/warroom.env"
@@ -484,11 +522,55 @@ env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" bash -c '. "$1/bin/_common.
 env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" python3 "$B/cpu-sentinel.py" --config >/dev/null 2>&1; r2=$?
 [ $r1 != 0 ] && [ $r2 != 0 ] && [ ! -e "$T/dup-first" ] && [ ! -e "$T/dup-last" ] && ok "a key set twice is refused by both readers" || bad "duplicate key: shell rc $r1, sentinel rc $r2"
 
-# 26. two installers at the same moment: both finish, the settings hold each entry once and the manifest lists them
-mkdir -p "$T/i26/cfg" "$T/i26/home"; printf '{"model": "x"}\n' > "$T/i26/cfg/settings.json"
-for i in 1 2; do env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i26/home" CLAUDE_CONFIG_DIR="$T/i26/cfg" bash "$ROOT/install.sh" --dir "$T/i26/run" >"$T/i26/o$i" 2>&1 & done; wait
-n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2])); print(d["model"], sum(len(g["hooks"]) for e in d["hooks"].values() for g in e), sum(len(v) for v in m["settings"].values()))' "$T/i26/cfg/settings.json" "$T/i26/home/.warroom/installed-hooks.json" 2>/dev/null)
-[ "$n" = "x 4 4" ] && ok "two installers at once: one result, manifest matches" || bad "concurrent install: '$n' ($(cat "$T/i26/o1" "$T/i26/o2" | grep -i -m1 -E 'could not|changed|another'))"
+# 26. --uninstall lists what the file holds, prints the four commands and a separate quoted cleanup command, and
+#     changes no file; --check, --uninstall and --dry-run in a fresh home create nothing; --dry-run prints the same
+#     block as a real run
+mkdir -p "$T/i26/cfg" "$T/i26/home"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i26/home" CLAUDE_CONFIG_DIR="$T/i26/cfg" bash "$ROOT/install.sh" --dir "$T/i26/run" >"$T/i26/real" 2>&1
+blk "$T/i26/real" > "$T/i26/real.block"; cp "$T/i26/real.block" "$T/i26/cfg/settings.json"; echo hello > "$T/i26/run/board.md"
+snap() { python3 -c '   # every path under $1 with its type, size, mtime and content hash (links not followed)
+import hashlib, os, stat, sys
+for d, ds, fs in sorted(os.walk(sys.argv[1])):
+    for n in sorted(ds + fs) + ([""] if d == sys.argv[1] else []):
+        p = os.path.join(d, n); st = os.lstat(p)
+        h = hashlib.sha256(open(p, "rb").read()).hexdigest() if stat.S_ISREG(st.st_mode) else os.readlink(p) if stat.S_ISLNK(st.st_mode) else ""
+        print(os.path.relpath(p, sys.argv[1]), stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns, h)' "$1"; }
+snap "$T/i26" > "$T/s26a"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i26/home" CLAUDE_CONFIG_DIR="$T/i26/cfg" bash "$ROOT/install.sh" --uninstall >"$T/i26u" 2>&1; urc=$?
+snap "$T/i26" > "$T/s26b"
+rmline="   rm -r -- $(printf '%q' "$T/i26/home/.warroom/warroom.env") $(printf '%q' "$T/i26/run")"
+[ $urc = 0 ] && cmp -s "$T/s26a" "$T/s26b" && blk "$T/i26u" | cmp -s - "$T/i26/real.block" && grep -qxF "$rmline" "$T/i26u" && [ "$(grep -c '^   this clone  ' "$T/i26u")" = 4 ] \
+  && grep -qF "$T/i26/cfg/settings.json" "$T/i26u" && grep -q 'deletes the board, its whole history' "$T/i26u" \
+  && ok "--uninstall lists four entries, prints the block and the cleanup command, changes no file" || bad "--uninstall: rc $urc, files $(cmp -s "$T/s26a" "$T/s26b" && echo same || echo CHANGED)"
+mkdir -p "$T/i26d/cfg" "$T/i26d/home"; snap "$T/i26d" > "$T/s26c"; r=""
+for m in --check --uninstall "--dry-run --dir $T/i26d/run"; do
+  # shellcheck disable=SC2086  # $m holds the option and its value on purpose
+  env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i26d/home" CLAUDE_CONFIG_DIR="$T/i26d/cfg" bash "$ROOT/install.sh" $m >"$T/i26d.out" 2>&1; r="$r ${m%% *}=$?"
+done
+snap "$T/i26d" > "$T/s26d"
+[ "$r" = " --check=2 --uninstall=0 --dry-run=0" ] && cmp -s "$T/s26c" "$T/s26d" && blk "$T/i26d.out" | cmp -s - "$T/i26/real.block" && [ -s "$T/i26/real.block" ] \
+  && ok "--check, --uninstall, --dry-run create nothing; --dry-run prints the real run's block" || bad "fresh-home modes:$r, files $(cmp -s "$T/s26c" "$T/s26d" && echo same || echo CHANGED)"
+
+# 26b. no write target may be the settings file: WARROOM_ENV naming it or a link to it, or a board that links to it,
+#      is refused before any write (settings bytes and time unchanged, a missing one not created); a normal install
+#      keeps an existing board as it was
+c=$T/i27; mkdir -p "$c/cfg" "$c/h1/run"; printf '{"model": "x"}\n' > "$c/cfg/settings.json"; ln -s "$c/cfg/settings.json" "$c/alias.env"
+snap "$c/cfg" > "$c/s0"; r=""
+for e in "$c/cfg/settings.json" "$c/alias.env"; do
+  env -u SEATS -u WARROOM_DIR WARROOM_ENV="$e" HOME="$c/h1" CLAUDE_CONFIG_DIR="$c/cfg" bash "$ROOT/install.sh" --replace-config --dir "$c/h1/run" >"$c/o" 2>&1; x=$?
+  grep -q 'is the Claude Code settings file' "$c/o" || x="$x-noreason"; r="$r $x"
+done
+ln -s "$c/cfg/settings.json" "$c/h1/run/board.md"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$c/h1" CLAUDE_CONFIG_DIR="$c/cfg" bash "$ROOT/install.sh" --dir "$c/h1/run" >"$c/o" 2>&1; x=$?
+grep -q 'is the Claude Code settings file' "$c/o" || x="$x-noreason"; r="$r $x"; snap "$c/cfg" > "$c/s1"
+mkdir -p "$c/cfg2" "$c/home2/run"; ln -s "$c/cfg2/settings.json" "$c/home2/run/board.md"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$c/home2" CLAUDE_CONFIG_DIR="$c/cfg2" bash "$ROOT/install.sh" --dir "$c/home2/run" >"$c/o" 2>&1; x=$?
+[ ! -e "$c/cfg2/settings.json" ] || x="$x-CREATED"; r="$r $x"
+mkdir -p "$c/home3/run"; printf 'kept\n' > "$c/home3/run/board.md"; touch -t 0101010000 "$c/home3/run/board.md"; snap "$c/home3/run" > "$c/s2"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$c/home3" CLAUDE_CONFIG_DIR="$c/cfg" bash "$ROOT/install.sh" --dir "$c/home3/run" >/dev/null 2>&1; x=$?
+snap "$c/home3/run" > "$c/s3"; cmp -s "$c/s2" "$c/s3" || x="$x-BOARD-CHANGED"; r="$r $x"
+[ "$r" = " 1 1 1 1 0" ] && cmp -s "$c/s0" "$c/s1" && ok "write targets that are the settings file are refused before any write; an existing board is kept" \
+  || bad "settings collisions: '$r' (env, env link, board link, dangling board link, existing board), settings $(cmp -s "$c/s0" "$c/s1" && echo same || echo CHANGED)"
 # 27. two sessions opting out (NONE) keep both rows; a seat's own arm still replaces only that seat's row (FIX 5)
 rm -f "$WARROOM_DIR/seats.tsv"
 "$B/waiter.sh" NONE sid-n1 >/dev/null 2>&1; "$B/waiter.sh" NONE sid-n2 >/dev/null 2>&1; "$B/waiter.sh" NONE sid-n1 >/dev/null 2>&1
