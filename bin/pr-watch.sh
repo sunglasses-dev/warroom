@@ -19,7 +19,7 @@ need() { # need OPTION VALUE: an option that takes a value must be followed by o
   case "${2-}" in ''|--*) echo "$1 needs a value" >&2; exit 2 ;; esac; }
 while [ $# -gt 0 ]; do case "$1" in
   --head) need "$@"; HEAD=$2; shift 2 ;; --repo) need "$@"; REPO=$2; shift 2 ;; --seat) need "$@"; SEAT=$2; shift 2 ;;
-  --require) need "$@"; REQUIRE="${REQUIRE:+$REQUIRE
+  --require) need "$@"; case "$2" in *$'\n'*|*$'\r'*) echo "--require name must be one line" >&2; exit 2 ;; esac; REQUIRE="${REQUIRE:+$REQUIRE
 }$2"; shift 2 ;;
   --poll) need "$@"; POLL=$2; shift 2 ;; --timeout) need "$@"; TIMEOUT=$2; shift 2 ;;
   *) echo "unknown option $1" >&2; exit 2 ;; esac; done
@@ -44,7 +44,7 @@ import json, os, re, sys
 src, bodyf, pinned = sys.argv[1], sys.argv[2], sys.argv[3]
 req = [r for r in os.environ.get("REQUIRE", "").split("\n") if r]
 GREEN = ("SUCCESS", "NEUTRAL", "SKIPPED")
-def clean(x): return str(x).replace("\n", " ").replace("\r", " ")
+def clean(x): return re.sub(r"[\x00-\x1f\x7f]", " ", str(x))   # display text only; the name tested against --require stays raw
 def out(v, why): print(v); print(clean(why)); sys.exit(0)
 try:
     d = json.load(open(src))
@@ -53,10 +53,10 @@ except Exception:
 if not isinstance(d, dict): out("UNREADABLE", "the PR data is not an object")
 state, head, rows = d.get("state"), d.get("headRefOid"), d.get("statusCheckRollup")
 if state not in ("OPEN", "CLOSED", "MERGED"): out("UNREADABLE", "the PR data has no usable state")
-items = []   # (name, result text, workflow text, verdict g/p/b/u)
+items = []   # (raw name or None, display name, result text, workflow text, verdict g/p/b/u)
 if isinstance(rows, list):
     for c in rows:
-        if not isinstance(c, dict): items.append(("not reported", "not reported", "not reported", "u")); continue
+        if not isinstance(c, dict): items.append((None, "not reported", "not reported", "not reported", "u")); continue
         wf = c.get("workflowName"); wf = clean(wf) if isinstance(wf, str) and wf else "not reported"
         if "state" in c and "status" not in c:                      # legacy status context
             name, st = c.get("context"), c.get("state")
@@ -68,8 +68,9 @@ if isinstance(rows, list):
             elif status != "COMPLETED": v, res = "p", status
             elif not isinstance(concl, str) or not concl: v, res = "u", "not reported"
             else: v, res = ("g" if concl in GREEN else "b"), concl
-        if not isinstance(name, str) or not name: name, v = "not reported", "u"
-        items.append((clean(name), clean(res), wf, v))
+        raw = name if isinstance(name, str) and name else None
+        if raw is None: v = "u"
+        items.append((raw, clean(raw) if raw is not None else "not reported", clean(res), wf, v))
 url = d.get("url"); m = re.match(r"https?://[^/]+/([^/]+/[^/]+)/pull/", url) if isinstance(url, str) else None
 base = d.get("baseRefName")
 def body():
@@ -81,19 +82,19 @@ def body():
          "- required names: " + (", ".join(req) if req else "none")]
     if isinstance(rows, list):
         L.append("- checks (name · result · workflow):" + ("" if items else " none reported"))
-        L += ["  - %s · %s · %s" % (n, r, w) for n, r, w, _ in items]
+        L += ["  - %s · %s · %s" % (d, r, w) for _, d, r, w, _ in items]
     else:
         L.append("- checks: not reported")
-    open(bodyf, "w").write("\n".join(L) + "\n")
+    with open(bodyf, "w") as f: f.write("\n".join(L) + "\n")
 if state == "MERGED": body(); out("STOP", "merged outside this tool")
 if state == "CLOSED": body(); out("STOP", "the PR is closed")
 if not isinstance(head, str) or not head: out("UNREADABLE", "the PR data has no head")
 if not isinstance(rows, list): out("UNREADABLE", "the PR data has no checks list")
 if head != pinned: body(); out("STOP", "the head is %s, not the pinned %s" % (head[:12], pinned[:12]))
-bad = sum(1 for i in items if i[3] == "b"); unk = sum(1 for i in items if i[3] == "u")
+bad = sum(1 for i in items if i[4] == "b"); unk = sum(1 for i in items if i[4] == "u")
 if bad: body(); out("STOP", "%d check(s) finished without a green result" % bad)
 if unk: out("UNREADABLE", "%d check row(s) lack a field the verdict needs" % unk)
-pend = sum(1 for i in items if i[3] == "p"); seen = set(i[0] for i in items)
+pend = sum(1 for i in items if i[4] == "p"); seen = set(i[0] for i in items if i[0] is not None)
 miss = [r for r in req if r not in seen]
 if pend or not items or miss:
     body(); out("WAIT", "waiting: %d pending, %d total%s" % (pend, len(items), (", required not seen: " + ", ".join(miss)) if miss else ""))
@@ -101,24 +102,36 @@ body(); out("GREEN", "every check green")
 ' "$1" "$TMPD/look.body" "$HEAD"
 }
 
-# finish RESULT REASON: write the receipt, then the board line. Both must succeed, or the run ends 1 with no green line.
+# finish RESULT REASON: build the receipt, write it and read it back, then post the board line. Every read and write is checked;
+# if any fails the run ends 1 and no green line is posted. A green is never reported on evidence that could not be read back.
 finish() {
-  _res=$1; _why=$2; _t=$(date +%H:%M); _rc=0
-  { echo "# watch receipt PR $PR"
-    echo "- result: WATCH $_res"
-    echo "- reason: $_why"
-    echo "- status: observed, not a gate (this tool did not merge or modify the PR)"
-    echo "- written: $(date '+%Y-%m-%d %H:%M:%S')"
-    if [ -n "$CUR_TIME" ] && [ -s "$TMPD/cur.body" ]; then
-      echo "- observed at: $CUR_TIME (the response that produced this result)"; cat "$TMPD/cur.body"
-    else
-      echo "- pinned head: $HEAD"; echo "- required names: $([ -n "$REQUIRE" ] && printf '%s' "$REQUIRE" | tr '\n' ',' || echo none)"
-      echo "- current fields: unavailable ($CUR_WHY)"
-      if [ -n "$PREV_TIME" ] && [ -s "$TMPD/prev.body" ]; then echo "- earlier evidence, observed at $PREV_TIME, not current:"; sed 's/^/  /' "$TMPD/prev.body"; fi
+  _res=$1; _why=$2; _t=$(date +%H:%M); _rc=0; _evok=1
+  if [ -n "$CUR_TIME" ] && [ -s "$TMPD/cur.body" ]; then
+    _cur=$(cat "$TMPD/cur.body") || { _evok=0; _cur=""; }
+    _sec="- observed at: $CUR_TIME (the response that produced this result)
+$_cur"
+  else
+    _prev=""
+    if [ -n "$PREV_TIME" ] && [ -s "$TMPD/prev.body" ]; then
+      _p=$(sed 's/^/  /' "$TMPD/prev.body") || { _evok=0; _p=""; }
+      _prev="
+- earlier evidence, observed at $PREV_TIME, not current:
+$_p"
     fi
-    echo
-    echo "The returned PR data showed the checks above at the time above. This tool did not merge or modify the PR. Whether a merge can skip these checks is decided by the branch protection on the base branch, which this tool does not read."
-  } > "$RECEIPT" || { echo "could not write the receipt $RECEIPT" >&2; _rc=1; }
+    _sec="- pinned head: $HEAD
+- required names: $([ -n "$REQUIRE" ] && printf '%s' "$REQUIRE" | tr '\n' ',' || echo none)
+- current fields: unavailable ($CUR_WHY)$_prev"
+  fi
+  if [ "$_evok" = 0 ] && [ "$_res" = GREEN ]; then _res=FAIL; _why="the stored evidence for this look could not be read back"; fi
+  _txt="# watch receipt PR $PR
+- result: WATCH $_res
+- reason: $_why
+- status: observed, not a gate (this tool did not merge or modify the PR)
+- written: $(date '+%Y-%m-%d %H:%M:%S')
+$_sec
+
+The returned PR data showed the checks above at the time above. This tool did not merge or modify the PR. Whether a merge can skip these checks is decided by the branch protection on the base branch, which this tool does not read."
+  printf '%s\n' "$_txt" > "$RECEIPT" && [ "$(cat "$RECEIPT")" = "$_txt" ] || { echo "could not write the receipt $RECEIPT" >&2; _rc=1; }
   if [ "$_rc" = 0 ]; then
     if [ "$_res" = GREEN ]; then _line="WATCH GREEN PR $PR at ${HEAD:0:12}: the PR data returned at $_t showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt $RECEIPT)"
     else _line="WATCH FAIL PR $PR: $_why (receipt $RECEIPT)"; fi
@@ -129,21 +142,35 @@ finish() {
   [ "$_res" = GREEN ] && [ "$_rc" = 0 ] && exit 0
   exit 1; }
 
+# keep LOOK: the body of this look becomes the current evidence only if both copies were made and read back identical.
+# Copies go to new names and are renamed into place, so a failed copy leaves the earlier evidence untouched and unmixed.
+keep_look() {
+  cp "$TMPD/look.body" "$TMPD/cur.new" && cp "$TMPD/look.body" "$TMPD/prev.new" \
+    && cmp -s "$TMPD/look.body" "$TMPD/cur.new" && cmp -s "$TMPD/look.body" "$TMPD/prev.new" \
+    && mv "$TMPD/cur.new" "$TMPD/cur.body" && mv "$TMPD/prev.new" "$TMPD/prev.body"; }
+
 CUR_TIME=""; CUR_WHY="no look yet"; PREV_TIME=""
 end=$(( $(date +%s) + TIMEOUT ))
 while :; do
-  rm -f "$TMPD/look.body"
+  rm -f "$TMPD/look.body" "$TMPD/look.verdict"
+  V=""; WHY=""
   if gh pr view "$PR" "${R[@]}" --json state,headRefOid,baseRefName,url,statusCheckRollup > "$TMPD/look.json" 2>/dev/null; then
     OBS=$(date +%H:%M:%S)
-    { read -r V; read -r WHY; } < <(judge "$TMPD/look.json")
-    [ -n "${V:-}" ] || { V=UNREADABLE; WHY="the PR data could not be judged"; }
+    # the verdict and the body of one look are one result: judge must exit 0, print both lines, and leave a non-empty body for any verdict that has one
+    if judge "$TMPD/look.json" > "$TMPD/look.verdict" 2>/dev/null && { read -r V; read -r WHY; } < "$TMPD/look.verdict" && [ -n "$V" ]; then
+      case "$V" in GREEN|STOP|WAIT) [ -s "$TMPD/look.body" ] || { V=UNREADABLE; WHY="the evidence for this look could not be written"; } ;; esac
+    else V=UNREADABLE; WHY="the PR data could not be judged"; fi
   else
     OBS=$(date +%H:%M:%S); V=UNREADABLE; WHY="gh could not read the PR"
   fi
   if [ -s "$TMPD/look.body" ]; then
-    cp "$TMPD/look.body" "$TMPD/cur.body"; cp "$TMPD/look.body" "$TMPD/prev.body"; CUR_TIME=$OBS; PREV_TIME=$OBS; CUR_WHY=""
+    if keep_look; then CUR_TIME=$OBS; PREV_TIME=$OBS; CUR_WHY=""
+    else CUR_WHY="the evidence for the look at $OBS could not be stored"; CUR_TIME=""
+      # a storage fault is final: reporting any other look as the result would mix evidence
+      finish FAIL "could not store the evidence for the look at $OBS, so no result is reported"
+    fi
   else
-    : > "$TMPD/cur.body"; CUR_TIME=""; CUR_WHY="$WHY at $OBS"
+    CUR_TIME=""; CUR_WHY="$WHY at $OBS"
   fi
   case "$V" in
     GREEN) finish GREEN "$WHY" ;;
