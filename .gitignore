@@ -1,2 +1,18 @@
 __pycache__/
 *.pyc
+
+# local state that must never be committed
+warroom.env
+warroom-run/
+board.md
+seats.tsv
+pids.tsv
+receipts/
+cards/
+REOPEN_LEDGER.md
+REOPEN_MESSAGES_*.md
+*.warroom-bak-*
+*.bak-*
+.cursor-*
+.lastwake-*
+.anchor-*

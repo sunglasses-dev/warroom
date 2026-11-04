@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question
-    url: ../../discussions
+    url: https://github.com/sunglasses-dev/warroom/discussions
     about: Ask anything in Discussions, including the basic questions.
   - name: Security problem
-    url: ../../security/advisories/new
+    url: https://github.com/sunglasses-dev/warroom/security/advisories/new
     about: Report privately. Please do not open a public issue.
