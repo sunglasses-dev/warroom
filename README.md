@@ -26,7 +26,7 @@ You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for 
 **1. Install.** `install.sh` writes `warroom.env` and the run directory, and prints the four hook entries for you to add. It never edits your Claude Code settings file.
 
 ```
-git clone <this repo> warroom && cd warroom
+git clone https://github.com/sunglasses-dev/warroom warroom && cd warroom
 bash install.sh --dry-run     # runs the checks, prints the plan and the hook block, writes nothing
 bash install.sh               # writes warroom.env and the run directory, prints the hook block
 ```
