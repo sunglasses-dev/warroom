@@ -1,0 +1,13 @@
+name: Bug
+description: Something does the wrong thing
+labels: [bug]
+body:
+  - type: textarea
+    attributes: {label: What you ran, description: The exact commands, and your OS + bash version (bash --version | head -1)}
+    validations: {required: true}
+  - type: textarea
+    attributes: {label: What happened, description: Paste the output. Remove anything private first.}
+    validations: {required: true}
+  - type: textarea
+    attributes: {label: What you expected}
+    validations: {required: true}
