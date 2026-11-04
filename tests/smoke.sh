@@ -34,6 +34,7 @@
 #      reused pid holds no seat and inherits no sentinel strikes or opt-out; a failed sentinel sample keeps its state
 #  41-43. position integrity (a rewrite anywhere in the part already read is noticed), every state write checked (fault
 #         injection with a stub mv), the board bootstrap under a forced race (with a wrong-code control)
+#  44. the sample board, replayed through real waiters, wakes W1, W2 and BOSS by exactly their own handoffs
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -903,6 +904,18 @@ MUT="$T/mut42"; mkdir -p "$MUT"; cp -R "$B" "$MUT/bin"; sed 's/: >> "\$BOARD_FIL
 RACE="$T/race-mut"; WARROOM_DIR="$T/race-run2" BOARD="$RACE/board.md" RACE_DIR="$RACE" PATH="$SH42:$PATH" bash -c '. "$1"' _ "$MUT/bin/_common.sh" >/dev/null 2>&1
 [ -z "$(cat "$RACE/board.md" 2>/dev/null)" ] && ok "bootstrap control: the old truncating create loses that line, so the fixture catches it" || bad "bootstrap control: the old form did not lose the line; the fixture is blind"
 unset FAILMV_FILE
+
+# 44. the sample board teaches the real grammar: replayed through real waiters, W1, W2 and BOSS are each woken by exactly the
+#     handoffs addressed to them (W1 once, W2 twice in one wake, BOSS once); an unstamped continuation line wakes nobody
+RS="$T/sample"; mkdir -p "$RS"; SB="$ROOT/examples/4-seat/sample-board.md"; res=""
+for s in W1 W2 BOSS; do
+  : > "$RS/board.md"; rm -f "$RS"/.cursor-* "$RS"/.lastwake-* "$RS/seats.tsv"
+  SEATS="BOSS MANAGER W1 W2" WARROOM_DIR="$RS" "$B/waiter.sh" "$s" "sid-s-$s" > "$RS/$s.out" 2>/dev/null & WP=$!; sleep 2
+  cat "$SB" >> "$RS/board.md"; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null
+  res="$res $s=$(grep -c "ACTION" "$RS/$s.out")/$(grep -c "@$s ACTION" "$RS/$s.out")"
+done
+[ "$res" = " W1=1/1 W2=2/2 BOSS=1/1" ] && ok "sample board: W1, W2 and BOSS are woken by exactly their own handoffs" || bad "sample board replay: '$res' (want W1=1/1 W2=2/2 BOSS=1/1)"
+! grep -qE '^@(W1|W2|BOSS|MANAGER|ALL) ACTION' "$SB" && ok "sample board: no handoff line is an unstamped continuation" || bad "sample board: a handoff line has no stamp"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
