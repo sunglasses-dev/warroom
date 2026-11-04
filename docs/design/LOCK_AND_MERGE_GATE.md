@@ -1,6 +1,6 @@
 # Design: the writer lock and the merge gate
 
-Status: DRAFT r3d3 for a design-only review. No code changes before that review says GO. r3d returned DESIGN NO GO and Part B became the demotion the lead ruled (R105 (a)): the public tool watches and reports, it never merges. r3d2 (2026-11-04) returned DESIGN NO GO with one BLOCKER, lock identity through a leaf symlink, plus FIX 1-6 and RIDER 1. All of them are answered below, and the changed places carry an "(r3d2 …)" tag. Repo line references are at main ec57546.
+Status: **DESIGN GO (r3d3, 2026-11-04 11:49), Part A and Part B, no BLOCKER.** The implementation must also do r3d3 FIX 1-3 and RIDER 1 (section *r3d3 implementation requirements* at the end). History: r3d returned DESIGN NO GO and Part B became the demotion the lead ruled (R105 (a)): the public tool watches and reports, it never merges. r3d2 (2026-11-04) returned DESIGN NO GO with one BLOCKER, lock identity through a leaf symlink, plus FIX 1-6 and RIDER 1. All of them are answered below, and the changed places carry an "(r3d2 …)" tag. Repo line references are at main ec57546.
 **r3d3 is the last design round for the lock (lead ruling, 11-04 11:40).** If r3d3 is not GO, the shared lock leaves public v1: the docs say "one writer per board; the lock is ours", and Part B (`pr-watch.sh`) ships alone.
 Scope: `bin/_common.sh` (`wr_lock`, `wr_unlock`, `wr_reclaim`) and `bin/merge-daemon.sh` (replaced by `bin/pr-watch.sh`), plus the README / PROTOCOL / SECURITY wording about them.
 
@@ -279,5 +279,28 @@ These lines change in the same pull request as the code, so no doc describes beh
 4. FIX 4 and FIX 5: do the tests now reject the wrong implementations named in r3d2? Those are a per-spelling sidecar, an occupied-slot-only subshell check, hand-sanitised children, a required-names-only watcher, a last-row-wins map, a receipt from a stale or mixed response, and a tool that always fails.
 5. FIX 6 and RIDER 1: is any Part B or Part C wording still a claim the watcher cannot back, and is the utilities paragraph now accurate?
 6. Is anything left that would let the same class come back a third time?
+
+## r3d3 implementation requirements (required in the code PRs, judged on the code)
+
+- **FIX 1 (lock, waiter):**
+  - Add the third nesting, cursor → registry in the same shell (`waiter.sh:26,28`), to the lock-order inventory, with both cursor-failure paths and real-caller tests.
+  - The delivery path (`waiter.sh:82`) retries on a later poll, so "no caller retries" is wrong there; say so.
+  - Replace `: > "$LAST"` (`waiter.sh:85`) with a non-truncating timestamp update (`touch`). The cursor lock covers the cursor and the wake timestamp as one group.
+  - Add a regression for a BOARD configured as the waiter's marker name (`.lastwake-SEAT`). Today that reproduces as a held board truncated from 44 bytes to 0. The board must stay byte-identical.
+- **FIX 2 (tests):**
+  - Duplicate rows in both orders (FAILURE or PENDING before SUCCESS too).
+  - A pending-to-green sequence with the head unchanged and the base and check rows varying. Head drift is a separate test that ends in FAIL.
+  - Null or missing fields that the verdict needs, plus a positive case where the workflow is absent.
+  - Real caller and descriptor checks, with each named mutant run to show it fails.
+- **FIX 3 (receipt):**
+  - The pinned head and the required names come from the invocation. The observation time is local. Repo, base, observed head and check rows come from the response that produced the result.
+  - On head drift, record both the pinned head and the observed head.
+  - On a gh failure or a malformed response, mark the current fields unavailable and never present an earlier response as fresh. If earlier evidence is kept, give its own observation time.
+  - Optional workflow metadata may be absent. Fields the verdict needs may not.
+- **RIDER 1:**
+  - `bin/_common.sh:20` accepts an absolute BOARD, so the identity checks apply to it too, and absolute paths stay supported. Correct the "every protected path is under `$WARROOM_DIR`" sentence.
+  - The header says leaf symlinks are refused and stable symlinked parents resolve physically.
+  - `flock(1)` availability is a difference between the stock platforms, not a rule.
+- Also (T10, 11-04, PR #10 CI runs 41897175688 and 41898159647): 8 simultaneous `board.sh post` to a missing board must all land on Linux CI.
 
 Out of scope here: installer ownership (C699, PRs #11 and #12, merged) and the FIX bundle (C701, PR #9 merged, PR #10 open).
