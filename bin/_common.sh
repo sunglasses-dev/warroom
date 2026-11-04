@@ -1,9 +1,12 @@
+# shellcheck shell=bash
 # bin/_common.sh — sourced by every script in bin/ and hooks/. Not run on its own.
 # Finds warroom.env, then sets SEATS, WARROOM_DIR, BOARD (full path in $BOARD_FILE) and a few helpers.
 export LC_ALL=C
 WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC2034  # WR_ENV_FILE and BOSS_SEAT are read by the scripts that source this file
 WR_ENV_FILE=""
 for _f in "${WARROOM_ENV:-}" "$PWD/warroom.env" "$HOME/.warroom/warroom.env" "$WR_ROOT/warroom.env"; do
+  # shellcheck source=/dev/null disable=SC2034
   if [ -n "$_f" ] && [ -f "$_f" ]; then . "$_f"; WR_ENV_FILE="$_f"; break; fi
 done
 SEATS=${SEATS:-"BOSS MANAGER W1 W2"}
@@ -12,6 +15,7 @@ BOARD=${BOARD:-board.md}
 case "$BOARD" in /*) BOARD_FILE="$BOARD" ;; *) BOARD_FILE="$WARROOM_DIR/$BOARD" ;; esac
 W="$WARROOM_DIR"
 mkdir -p "$W" 2>/dev/null; [ -e "$BOARD_FILE" ] || : > "$BOARD_FILE"
+# shellcheck disable=SC2034
 BOSS_SEAT=${SEATS%% *}
 
 wr_now()   { date +%H:%M; }

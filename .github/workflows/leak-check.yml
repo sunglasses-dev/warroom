@@ -1,5 +1,7 @@
 name: leak-check
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   leak-check:
     runs-on: ubuntu-latest

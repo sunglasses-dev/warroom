@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question
+    url: ../../discussions
+    about: Ask anything in Discussions, including the basic questions.
+  - name: Security problem
+    url: ../../security/advisories/new
+    about: Report privately. Please do not open a public issue.

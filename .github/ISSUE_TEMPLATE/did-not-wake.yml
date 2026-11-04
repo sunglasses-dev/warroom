@@ -1,0 +1,14 @@
+name: It did not wake
+description: A seat should have woken up and did not (or woke when it should not have)
+labels: [wake-bug]
+body:
+  - type: textarea
+    attributes: {label: The board line, description: The exact line that should have woken the seat, copied from the board file}
+    validations: {required: true}
+  - type: textarea
+    attributes: {label: Waiter state, description: "Output of: cat $WARROOM_DIR/seats.tsv, and whether the waiter process was still alive (ps -p <pid>)"}
+    validations: {required: true}
+  - type: input
+    attributes: {label: Seat name and session, description: "e.g. W1, armed as: bash bin/waiter.sh W1 <session id>"}
+  - type: textarea
+    attributes: {label: Anything else, description: "Poll/gap settings if you changed them, OS, how long you waited"}

@@ -17,15 +17,16 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown option $1 (try --help)" >&2; exit 2 ;; esac; done
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; SET="$CFG/settings.json"; ENVF="$HOME/.warroom/warroom.env"
-do_() { if [ $DRY = 1 ]; then echo "[dry-run] $*"; else eval "$@"; fi; }
+do_() { if [ "$DRY" = 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }   # runs its arguments as given, no eval
+write_env() { printf 'SEATS="%s"\nWARROOM_DIR="%s"\nBOARD="board.md"\n' "$SEATS_ARG" "$DIR_ARG" > "$ENVF"; }
 
 echo "1. config: $ENVF"
 if [ -f "$ENVF" ]; then echo "   exists, kept"; else
-  do_ "mkdir -p '$HOME/.warroom'"
-  do_ "printf 'SEATS=\"%s\"\nWARROOM_DIR=\"%s\"\nBOARD=\"board.md\"\n' '$SEATS_ARG' '$DIR_ARG' > '$ENVF'"
+  do_ mkdir -p "$HOME/.warroom"
+  do_ write_env
 fi
 echo "2. run directory: $DIR_ARG"
-do_ "mkdir -p '$DIR_ARG' && touch '$DIR_ARG/board.md'"
+do_ mkdir -p "$DIR_ARG"; do_ touch "$DIR_ARG/board.md"
 
 echo "3. hooks in $SET"
 if [ $DRY = 1 ]; then echo "   [dry-run] would back up settings.json and add: SessionStart waiter-check, UserPromptSubmit waiter-check, board-tail, board-guard"; else

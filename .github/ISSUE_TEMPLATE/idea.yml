@@ -1,0 +1,9 @@
+name: Idea
+description: A change you would like to see
+labels: [idea]
+body:
+  - type: textarea
+    attributes: {label: The problem, description: What goes wrong or takes too long today}
+    validations: {required: true}
+  - type: textarea
+    attributes: {label: The smallest change that fixes it}
