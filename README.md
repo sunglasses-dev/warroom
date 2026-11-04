@@ -33,7 +33,7 @@ bash install.sh               # writes warroom.env, backs up your Claude Code se
 
 `warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else.
 
-Keep the clone where it is: the hooks point at its absolute path. If you move it, run `install.sh` again; the entries for the old place are pointed at the new one.
+Keep the clone where it is: the hooks point at its absolute path. If you move it, run `install.sh` again; the entries for the old place are pointed at the new one. The installer only changes hook entries it wrote itself: it lists them in `installed-hooks.json` next to `warroom.env` and leaves every other entry as it is, even one that looks like a war room hook (it prints those as "left alone"). The three steps are separate writes, not one transaction: if the settings step fails, the config file and run directory from the first two steps stay, and running `install.sh` again continues from there. Two installers at once wait for each other; another program editing settings.json at the same moment can still race it, and the installer stops instead of overwriting when it sees the file changed.
 
 **2. Start two Claude Code sessions** and paste one of the first messages `install.sh` printed into each, for example `BOSS` into the first and `W1` into the second.
 

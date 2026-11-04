@@ -8,6 +8,7 @@
 #   and may start with ~/ or $HOME/ (the only expansion). Any other character ($ ` ; | & < > quotes...) is refused.
 #   WARROOM_POLL WARROOM_MIN_GAP WARROOM_IDLE_MIN WARROOM_LONG take digits only.
 # Precedence: a variable already set in the environment, then the file, then the built-in default.
+# A KEY may appear once: a second line with the same KEY is refused (the Python reader in cpu-sentinel.py does the same).
 # Seat names: [A-Z][A-Z0-9_]{0,15}, no repeats; ALL, NONE and GUARD are reserved.
 WR_KEYS="SEATS WARROOM_DIR BOARD WARROOM_POLL WARROOM_MIN_GAP WARROOM_IDLE_MIN WARROOM_LONG"
 WR_SEAT_RE='^[A-Z][A-Z0-9_]{0,15}$'
@@ -41,7 +42,7 @@ wr_seats_ok() {
 
 # wr_load_config FILE: sets each KEY found in FILE unless the environment already set it; on a bad line prints why and returns 2
 wr_load_config() {
-  _lc_n=0
+  _lc_n=0; _lc_seen=" "
   while IFS= read -r _lc_line || [ -n "$_lc_line" ]; do
     _lc_n=$((_lc_n + 1)); _lc_line=${_lc_line%$'\r'}
     case "$_lc_line" in ''|'#'*) continue ;; esac
@@ -49,6 +50,8 @@ wr_load_config() {
       echo "warroom.env line $_lc_n ($1): expected KEY=VALUE with nothing before KEY" >&2; return 2; fi
     _lc_k=${BASH_REMATCH[1]}; _lc_v=${BASH_REMATCH[2]}
     case " $WR_KEYS " in *" $_lc_k "*) ;; *) echo "warroom.env line $_lc_n ($1): unknown key $_lc_k (known: $WR_KEYS)" >&2; return 2 ;; esac
+    case "$_lc_seen" in *" $_lc_k "*) echo "warroom.env line $_lc_n ($1): $_lc_k is set twice; keep one line" >&2; return 2 ;; esac
+    _lc_seen="$_lc_seen$_lc_k "
     case "$_lc_v" in \"*\") _lc_v=${_lc_v#\"}; _lc_v=${_lc_v%\"} ;; \'*\') _lc_v=${_lc_v#\'}; _lc_v=${_lc_v%\'} ;; esac
     if ! _lc_v=$(wr_check_value "$_lc_v"); then
       echo "warroom.env line $_lc_n ($1): $_lc_k may only use letters, digits, space and _ . / ~ - (and start with ~/ or \$HOME/)" >&2; return 2; fi
