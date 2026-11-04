@@ -1,6 +1,6 @@
 # Design: the writer lock and the merge gate
 
-Status: **DESIGN GO (r3d3, 2026-11-04 11:49), Part A and Part B, no BLOCKER.** The implementation must also do r3d3 FIX 1-3 and RIDER 1 (section *r3d3 implementation requirements* at the end). History: r3d returned DESIGN NO GO and Part B became the demotion the lead ruled (R105 (a)): the public tool watches and reports, it never merges. r3d2 (2026-11-04) returned DESIGN NO GO with one BLOCKER, lock identity through a leaf symlink, plus FIX 1-6 and RIDER 1. All of them are answered below, and the changed places carry an "(r3d2 …)" tag. Repo line references are at main ec57546.
+Status: **DESIGN GO (r3d3), Part A and Part B, no BLOCKER.** The implementation must also do r3d3 FIX 1-3 and RIDER 1 (section *r3d3 implementation requirements* at the end). History: r3d returned DESIGN NO GO and Part B became the demotion the maintainers ruled: the public tool watches and reports, it never merges. r3d2 returned DESIGN NO GO with one BLOCKER, lock identity through a leaf symlink, plus FIX 1-6 and RIDER 1. All of them are answered below, and the changed places carry an "(r3d2 …)" tag. Repo line references are at main ec57546.
 **r3d3 is the last design round for the lock (lead ruling, 11-04 11:40).** If r3d3 is not GO, the shared lock leaves public v1: the docs say "one writer per board; the lock is ours", and Part B (`pr-watch.sh`) ships alone.
 Scope: `bin/_common.sh` (`wr_lock`, `wr_unlock`, `wr_reclaim`) and `bin/merge-daemon.sh` (replaced by `bin/pr-watch.sh`), plus the README / PROTOCOL / SECURITY wording about them.
 
@@ -128,7 +128,7 @@ Every content change happens inside a section: an append, a rewrite, an `mv` int
 
 #### Verified behaviour (scratch experiments here and in r3d, not repo code)
 
-These results come from two sets of experiments. One set was run on this Mac before the first draft. The other is ASTRA's r3d set (`tmp/lock_probes.log`, `tmp/stress_probe.log`).
+These results come from two sets of experiments. One set was run on this Mac before the first draft. The other is the r3d reviewer's set (`tmp/lock_probes.log`, `tmp/stress_probe.log`).
 
 - A lock held through an inherited fd 8 blocks a second locker. SIGKILL of a sole holder releases it.
 - Locks on two distinct files, held on 8 and 9, are independent.
@@ -176,11 +176,11 @@ The r3d2 text here was wrong, and it is corrected. macOS `lockf(1)` can lock an 
 - `lock_order_and_upgrade_boundary`, which is supplementary lint and not evidence of safety (the current code passes it too): ledger→board and mark→board work, and the reverse order is not present in the repo (grep). A smoke grep finds no background start inside a section, no other use of fds 8 and 9, and no `wr_lock` inside `$( … )` or a pipe. The README upgrade step is present.
 - The old lock case, `tests/smoke.sh:122-131` at main (case 11: owner directory, reclaim, non-owner release), is removed together with its header line 13. Its replacements are the tests above. Every other smoke case stays (r3d2 FIX 4).
 
-## Part B: the merge helper becomes a watcher (ruling R105: demote)
+## Part B: the merge helper becomes a watcher (ruling: demote)
 
 ### Why the public tool stops merging
 
-r3d showed that a gated merge needs two things this template cannot establish from the client side. First, it must prove that the target branch's required checks are enforced *for the credential that merges*. Rulesets hide their bypass list from the rules endpoint, and the detail endpoints may omit it, so "unknown" cannot honestly become "no bypass". Second, the merge must be a direct one: `gh pr merge` can enrol a merge queue or turn on auto-merge, so the actual merge happens later and is not tied to the observation. This is the second round on the same class (proving server enforcement for this actor), so R31 applies. The public v1 therefore drops merging altogether. Any private tool its authors run is separate, is not shipped, and is not described or vouched for by anything in this repo, `pr-watch.sh --help` included.
+r3d showed that a gated merge needs two things this template cannot establish from the client side. First, it must prove that the target branch's required checks are enforced *for the credential that merges*. Rulesets hide their bypass list from the rules endpoint, and the detail endpoints may omit it, so "unknown" cannot honestly become "no bypass". Second, the merge must be a direct one: `gh pr merge` can enrol a merge queue or turn on auto-merge, so the actual merge happens later and is not tied to the observation. This is the second round on the same class (proving server enforcement for this actor), so the project's two-rounds rule applies (same class twice = stop and narrow the scope). The public v1 therefore drops merging altogether. Any private tool its authors run is separate, is not shipped, and is not described or vouched for by anything in this repo, `pr-watch.sh --help` included.
 
 ### What the public tool does
 
@@ -200,7 +200,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
    - the PR is merged by anyone (reported as "merged outside this tool");
    - the timeout passes.
 5. **Results.** The last board line starts with one of two words:
-   - `WATCH GREEN`, for example: `WATCH GREEN PR 12 at 1a2b3c4d5e6f: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt …)`.
+   - `WATCH GREEN`, for example: `WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt …)`.
    - `WATCH FAIL`, followed by the reason, for example `WATCH FAIL PR 12: merged outside this tool`.
 
    A green result never uses `POSTCONDITION` or `PASS`, and never claims that a merge happened or that one is safe. The negative sentence "this tool did not merge or modify the PR" is required, so the word itself is not banned: only positive merge claims are (r3d2 FIX 6).
@@ -259,7 +259,7 @@ These lines change in the same pull request as the code, so no doc describes beh
 | README:19 | `\| A long job can wake its owner, a PR can be watched \| while a waiter is running, a job registered with pids.sh posts a wake line to its owner when its process is gone; pr-watch.sh posts WATCH GREEN or WATCH FAIL when a pull request's checks settle at a pinned head. It reports, it never merges \|` |
 | README:24 | "`gh` is needed only for `pr-watch.sh`, which you can leave for later." |
 | README:68 | "Quick start. Leave pr-watch.sh and cpu-sentinel.py for later." |
-| README:84, examples/4-seat/sample-board.md:10 | `[10:34 · BOSS] WATCH GREEN PR 12 at 1a2b3c4d5e6f: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)` |
+| README:84, examples/4-seat/sample-board.md:10 | `[10:34 · BOSS] WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)` |
 | README:115 | "`pr-watch.sh` watches one pull request at a pinned head and reports when its checks are green or one fails; it never merges, and a green report is an observation, not a guarantee. Whether an unchecked merge is possible is decided by your branch protection." |
 | PROTOCOL:29 | `\| waiting is done by scripts \| pr-watch.sh polls a pull request's checks at a pinned head and posts the result; an agent should not poll for green itself (convention). The tool never merges. Who may merge, and whether unchecked merges are possible, is your branch protection's job \|` |
 | PROTOCOL:37 | `\| a watched PR \| a finished watch writes $WARROOM_DIR/receipts/watch_<PR>_<time>.md and posts a board line that starts WATCH GREEN or WATCH FAIL and ends with the receipt path; if either cannot be written the run ends with exit 1 \|` |
@@ -301,6 +301,6 @@ These lines change in the same pull request as the code, so no doc describes beh
   - `bin/_common.sh:20` accepts an absolute BOARD, so the identity checks apply to it too, and absolute paths stay supported. Correct the "every protected path is under `$WARROOM_DIR`" sentence.
   - The header says leaf symlinks are refused and stable symlinked parents resolve physically.
   - `flock(1)` availability is a difference between the stock platforms, not a rule.
-- Also (T10, 11-04, PR #10 CI runs 41897175688 and 41898159647): 8 simultaneous `board.sh post` to a missing board must all land on Linux CI.
+- Also (review note from the PR #10 CI runs): 8 simultaneous `board.sh post` to a missing board must all land on Linux CI.
 
-Out of scope here: installer ownership (C699, PRs #11 and #12, merged) and the FIX bundle (C701, PR #9 merged, PR #10 open).
+Out of scope here: installer ownership (PRs #11 and #12, merged) and the FIX bundle (PRs #9 and #10, merged).
