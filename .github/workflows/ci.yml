@@ -13,3 +13,14 @@ jobs:
         run: python3 -m py_compile bin/*.py
       - name: smoke test (throwaway board in a temp dir)
         run: bash tests/smoke.sh
+  # macOS runs only after a merge to main, never on a pull request (macOS minutes cost 10x the Linux ones)
+  macos:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: python compiles
+        run: python3 -m py_compile bin/*.py
+      - name: smoke test (throwaway board in a temp dir)
+        run: bash tests/smoke.sh

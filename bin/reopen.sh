@@ -8,7 +8,10 @@
 #   reopen.sh build [--force]  write the paste sheet $WARROOM_DIR/REOPEN_MESSAGES_<date>.md (one message per seat). It is
 #                              READY only when every seat has banked and has a card written after the request; otherwise
 #                              it refuses, or with --force writes a sheet marked INCOMPLETE DRAFT that says not to close
-#   reopen.sh done             append the ledger row, post the end line, clear the marker
+#   reopen.sh done [--force]   close the reopen: it needs a "reopened" post from every seat since the request, then appends the
+#                              ledger row, posts the end line and clears the marker. With --force it closes anyway; the ledger row
+#                              and the board line then say INCOMPLETE and name the seats that did not come back. If the ledger row
+#                              or the board line cannot be written, it exits 1 and the marker stays
 # A seat "banks" by posting "[HH:MM · SEAT] banked for reopen" after its card is written and its jobs are accounted for.
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"
 M="$W/.reopen-requested"; LEDGER="$W/REOPEN_LEDGER.md"; CARDS="$W/cards"
@@ -22,7 +25,7 @@ case "${1:-status}" in
   arm)
     if [ -f "$M" ]; then echo "already armed: $(stamp)"; exit 0; fi
     S="R-$(date +%Y%m%d-%H%M)"; printf '%s\n%s\n' "$S" "$(date '+%Y-%m-%d %H:%M')" > "$M"
-    "$HERE/board.sh" post "$BOSS_SEAT" "@ALL ACTION: REOPEN REQUESTED $S. Every seat: finish the row you are on, start no new row, write your card (bash $HERE/reopen.sh card SEAT), check that every job you started will outlive the window (verify it; a parent pid of 1 is a hint, not a guarantee) or is listed on your card, then post: banked for reopen."
+    "$HERE/board.sh" post "$BOSS_SEAT" "@ALL ACTION: REOPEN REQUESTED $S. Every seat: finish the row you are on, start no new row, write your card (bash $(printf '%q' "$HERE/reopen.sh") card SEAT), check that every job you started will outlive the window (verify it; a parent pid of 1 is a hint, not a guarantee) or is listed on your card, then post: banked for reopen."
     echo "armed $S" ;;
   status)
     if [ ! -f "$M" ]; then echo "not armed"; exit 0; fi
@@ -73,11 +76,22 @@ EOT
     else "$HERE/board.sh" post "$BOSS_SEAT" "REOPEN READY $s: sheet $out"; fi
     echo "$out" ;;
   done)
+    force=0; [ "${2:-}" = "--force" ] && force=1
     s=$(stamp); [ -n "$s" ] || { echo "not armed"; exit 0; }
-    [ -f "$LEDGER" ] || printf '# Reopen ledger\n| when | id | seats back |\n|---|---|---|\n' > "$LEDGER"
-    echo "| $(date '+%Y-%m-%d %H:%M') | $s | $(seats_with reopened | tr '\n' ' ') |" >> "$LEDGER"
-    "$HERE/board.sh" post "$BOSS_SEAT" "REOPEN DONE $s: ledger $LEDGER"
+    # every seat that was asked to reopen must have posted "reopened" since the request
+    back=" $(seats_with reopened | tr '\n' ' ')"; missing=""
+    for t in $SEATS; do case "$back" in *" $t "*) ;; *) missing="$missing $t" ;; esac; done
+    if [ -n "$missing" ] && [ $force = 0 ]; then
+      echo "not done: no 'reopened' post since $s from:$missing. Wait for them, or close it as incomplete with: reopen.sh done --force" >&2; exit 1
+    fi
+    if [ -n "$missing" ]; then cell="$(seats_with reopened | tr '\n' ' ')· INCOMPLETE (forced), not back:$missing"; end="REOPEN DONE $s INCOMPLETE (forced; not back:$missing): ledger $LEDGER"
+    else cell="$(seats_with reopened | tr '\n' ' ')"; end="REOPEN DONE $s: ledger $LEDGER"; fi
+    if [ ! -f "$LEDGER" ]; then printf '# Reopen ledger\n| when | id | seats back |\n|---|---|---|\n' > "$LEDGER" || { echo "could not write the ledger $LEDGER" >&2; exit 1; }; fi
+    if ! grep -q "^| [^|]* | $s | " "$LEDGER"; then   # a rerun after a failed board post does not add a second row
+      echo "| $(date '+%Y-%m-%d %H:%M') | $s | $cell |" >> "$LEDGER" || { echo "could not write the ledger $LEDGER" >&2; exit 1; }
+    fi
+    "$HERE/board.sh" post "$BOSS_SEAT" "$end" || { echo "could not post the end line; the reopen stays open (run done again once the board is writable)" >&2; exit 1; }
     rm -f "$M"; echo "done" ;;
   -h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) echo "usage: reopen.sh arm|status|card SEAT|build [--force]|done|--help" >&2; exit 2 ;;
+  *) echo "usage: reopen.sh arm|status|card SEAT|build [--force]|done [--force]|--help" >&2; exit 2 ;;
 esac
