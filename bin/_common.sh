@@ -27,20 +27,40 @@ wr_mtime() {
   echo "$_m"
 }
 wr_seat_ok() { case " $SEATS " in *" $1 "*) return 0 ;; esac; return 1; }
-# one writer at a time: mkdir is atomic; a lock older than 10 s is stale and is taken over
+# One writer at a time. mkdir is atomic, and the holder writes its pid into the lock. A lock is taken over only when
+# that pid is gone (or, if the holder died before writing its pid, when the lock is over 10 s old); a live holder is
+# waited for and never evicted, and only the holder can release it. Limits: one machine, a local file system, and a pid
+# that has been reused by another process looks alive.
+wr_reclaim() { # $1 lock directory, $2 the dead owner we saw ("" = no owner written)
+  _d="$1.dead.$$"
+  mv "$1" "$_d" 2>/dev/null || return 0                 # someone else reclaimed it first
+  if [ "$(cat "$_d/owner" 2>/dev/null)" = "$2" ]; then rm -f "$_d/owner"; rmdir "$_d" 2>/dev/null
+  else mv "$_d" "$1" 2>/dev/null; fi                     # it was a new, live lock: put it back
+}
 wr_lock() {
   _k="$1.lock"
   for _i in $(seq 1 100); do
-    mkdir "$_k" 2>/dev/null && return 0
-    [ $(( $(date +%s) - $(wr_mtime "$_k") )) -gt 10 ] && rmdir "$_k" 2>/dev/null
+    if mkdir "$_k" 2>/dev/null; then printf '%s\n' "$$" > "$_k/owner"; return 0; fi
+    _o=$(cat "$_k/owner" 2>/dev/null)
+    if [ -n "$_o" ]; then
+      kill -0 "$_o" 2>/dev/null || wr_reclaim "$_k" "$_o"
+    elif [ $(( $(date +%s) - $(wr_mtime "$_k") )) -gt 10 ]; then
+      wr_reclaim "$_k" ""
+    fi
     sleep 0.1
   done
   return 1
 }
-wr_unlock() { rmdir "$1.lock" 2>/dev/null; }
-# append one already-formatted block to the board under the lock
+wr_unlock() {
+  _k="$1.lock"
+  [ "$(cat "$_k/owner" 2>/dev/null)" = "$$" ] || return 0   # not ours: leave it alone
+  rm -f "$_k/owner"; rmdir "$_k" 2>/dev/null; return 0
+}
+# append one already-formatted block to the board under the lock; fails (and says so) when the board cannot be written
 wr_append() {
   wr_lock "$BOARD_FILE" || { echo "could not lock the board" >&2; return 1; }
-  printf '%s\n' "$1" >> "$BOARD_FILE"
+  _rc=0; printf '%s\n' "$1" >> "$BOARD_FILE" || _rc=1
   wr_unlock "$BOARD_FILE"
+  [ "$_rc" = 0 ] || echo "could not append to $BOARD_FILE" >&2
+  return "$_rc"
 }

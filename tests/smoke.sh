@@ -6,6 +6,13 @@
 #   4. the idle guard names a silent seat once per silence, not once per prompt
 #   5. install.sh refuses a settings file that is not valid JSON and leaves it unchanged
 #   6. a reopen request wakes the other seats; reopen.sh status exits 0 while they bank
+#   7. wake grammar: only a first line "@SEAT ACTION:" from another author wakes (not prose, ACTIONABLE, a second line, the seat's own post)
+#   8. a replaced board of the same length is read again from its start; a waiter missing its session id is refused
+#   9. two arms of one seat at the same moment: exactly one wins, every round
+#  10. a board that cannot be written makes post fail; a job's row is kept until its wake is on the board
+#  11. locks: a live owner is never evicted, a dead owner is reclaimed, a non-owner cannot release
+#  12. the job ledger: concurrent add of one label gives one row; a reused pid (wrong start time) counts as gone
+#  13. merge-daemon (gh stubbed): a check that fails on the second look, or a required check that never appears, merges nothing
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -50,12 +57,114 @@ HOME="$T/home" CLAUDE_CONFIG_DIR="$T/cfg" bash "$ROOT/install.sh" --dir "$T/home
 [ $rc != 0 ] && cmp -s "$T/orig" "$T/cfg/settings.json" && ok "install refuses invalid settings, file unchanged" || bad "install on invalid settings: rc $rc"
 
 # 6. a reopen request wakes the other seats, and status exits 0 while seats are still banking
-: > "$("$B/board.sh" path)"; rm -f "$WARROOM_DIR"/.fires-* "$WARROOM_DIR/.reopen-requested"
+: > "$("$B/board.sh" path)"; rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/.reopen-requested"
 "$B/waiter.sh" W1 sid-w1r > "$T/w1r.out" 2>/dev/null & WP=$!; sleep 2
 "$B/reopen.sh" arm >/dev/null
 if wait_exit $WP 10 && grep -q "REOPEN REQUESTED" "$T/w1r.out"; then ok "reopen request wakes the other seats"; else bad "reopen request did not wake W1"; fi
 "$B/reopen.sh" status >/dev/null; rc=$?
 [ $rc = 0 ] && ok "reopen status exits 0" || bad "reopen status exited $rc"
+
+# 7. wake grammar: first line of a post, "@SEAT ACTION:" or "@ALL ACTION:", author not the seat
+: > "$("$B/board.sh" path)"
+"$B/waiter.sh" W1 sid-g1 > "$T/g1.out" 2>/dev/null & WP=$!; sleep 2
+"$B/board.sh" post BOSS "see @W1 ACTION: this is only quoted mid-line"
+"$B/board.sh" post BOSS "the @W1 ACTIONABLE items are in the doc"
+"$B/board.sh" post BOSS "status line one
+@W1 ACTION: a second line is not a directive"
+"$B/board.sh" post W1 "@W1 ACTION: my own post must not wake me"
+sleep 4
+kill -0 $WP 2>/dev/null && ok "mid-line, ACTIONABLE, second-line and own-post lines do not wake" || bad "grammar: a non-directive woke the seat: $(head -c 200 "$T/g1.out")"
+"$B/board.sh" post BOSS "@W1 ACTION: the real one"
+if wait_exit $WP 10 && grep -q "the real one" "$T/g1.out"; then ok "a first-line directive from another author wakes"; else bad "grammar: the real directive did not wake"; fi
+
+# 8. a replaced board (same length, new file) is read from its start; a missing session id is refused
+BF="$("$B/board.sh" path)"; printf '[00:00 · BOSS] old %s\n' 1 2 3 4 5 > "$BF"
+"$B/waiter.sh" W1 sid-g2 > "$T/g2.out" 2>/dev/null & WP=$!; sleep 2
+printf '[00:00 · BOSS] new %s\n' 1 2 3 4 > "$BF.new"; printf '[00:01 · BOSS] @W1 ACTION: after the swap\n' >> "$BF.new"; mv "$BF.new" "$BF"
+if wait_exit $WP 10 && grep -q "after the swap" "$T/g2.out"; then ok "replaced board of the same length is read again"; else bad "rotation: directive in the replaced board was missed"; fi
+"$B/waiter.sh" W1 >/dev/null 2>&1; r1=$?; "$B/waiter.sh" W1 unknown >/dev/null 2>&1; r2=$?
+[ "$r1$r2" = 22 ] && ok "waiter without a real session id is refused" || bad "session id check: rc $r1 $r2"
+
+# 9. seat claim: two arms at the same moment, five rounds, never both alive
+race=0
+for i in 1 2 3 4 5; do
+  rm -f "$WARROOM_DIR/seats.tsv" "$WARROOM_DIR"/.cursor-*
+  "$B/waiter.sh" BOSS "sid-r$i-a" >/dev/null 2>&1 & p1=$!
+  "$B/waiter.sh" BOSS "sid-r$i-b" >/dev/null 2>&1 & p2=$!
+  sleep 2; live=0; kill -0 $p1 2>/dev/null && live=$((live+1)); kill -0 $p2 2>/dev/null && live=$((live+1))
+  [ $live = 1 ] || race=$((race+1))
+  kill $p1 $p2 2>/dev/null; wait $p1 $p2 2>/dev/null
+done
+[ $race = 0 ] && ok "simultaneous arms of one seat: exactly one wins (5 rounds)" || bad "seat claim race: $race of 5 rounds did not have exactly one live"
+
+# 10. an unwritable board is an error; a job row survives until its wake is on the board
+(export WARROOM_DIR="$T/run2"; mkdir -p "$WARROOM_DIR/board.md"; "$B/board.sh" post BOSS "hello" >/dev/null 2>&1)
+[ $? != 0 ] && ok "post to an unwritable board exits non-zero" || bad "post to an unwritable board reported success"
+export WARROOM_DIR="$T/run2"; sleep 30 & J=$!; "$B/pids.sh" add keep-job $J BOSS >/dev/null; kill $J; wait $J 2>/dev/null
+"$B/pids.sh" check >/dev/null 2>&1
+grep -q '^keep-job' "$WARROOM_DIR/pids.tsv" && ok "job row kept while the wake could not be posted" || bad "job row was dropped without a wake"
+rm -rf "$WARROOM_DIR/board.md"; : > "$WARROOM_DIR/board.md"
+"$B/pids.sh" check >/dev/null 2>&1; "$B/pids.sh" check >/dev/null 2>&1
+n=$(grep -c "job 'keep-job'" "$WARROOM_DIR/board.md")
+[ "$n" = 1 ] && ! grep -q '^keep-job' "$WARROOM_DIR/pids.tsv" && ok "retry wakes once, then drops the row" || bad "retry: $n wake lines"
+export WARROOM_DIR="$T/run"
+
+# 11. locks
+L="$T/lk"; sleep 60 & LP=$!
+mkdir "$L.lock"; echo "$LP" > "$L.lock/owner"; python3 -c 'import os,sys; os.utime(sys.argv[1], (1e9, 1e9))' "$L.lock"
+bash -c '. "$1/bin/_common.sh"; wr_lock "$2"' _ "$ROOT" "$L" >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && [ "$(cat "$L.lock/owner")" = "$LP" ] && ok "live owner's old lock is not stolen" || bad "live lock was taken (rc $rc)"
+bash -c '. "$1/bin/_common.sh"; wr_unlock "$2"' _ "$ROOT" "$L" >/dev/null 2>&1
+[ "$(cat "$L.lock/owner" 2>/dev/null)" = "$LP" ] && ok "a non-owner cannot release a lock" || bad "non-owner released the lock"
+kill $LP 2>/dev/null; wait $LP 2>/dev/null
+bash -c '. "$1/bin/_common.sh"; wr_lock "$2" && [ "$(cat "$2.lock/owner")" = "$$" ] && wr_unlock "$2" && [ ! -d "$2.lock" ]' _ "$ROOT" "$L" >/dev/null 2>&1; rc=$?
+[ $rc = 0 ] && ok "dead owner's lock is reclaimed, then released by its new owner" || bad "dead lock not reclaimed (rc $rc)"
+
+# 12. job ledger: one row per label under concurrent add; a reused pid counts as gone
+: > "$("$B/board.sh" path)"; : > "$WARROOM_DIR/pids.tsv"
+sleep 30 & J=$!; aps=""
+for _ in 1 2 3 4; do "$B/pids.sh" add dup-job $J BOSS >/dev/null 2>&1 & aps="$aps $!"; done; wait $aps 2>/dev/null
+n=$(grep -c '^dup-job' "$WARROOM_DIR/pids.tsv")
+[ "$n" = 1 ] && ok "concurrent add of one label leaves one row" || bad "concurrent add: $n rows"
+awk -F'\t' 'BEGIN{OFS="\t"} {$4="Thu Jan  1 00:00:00 1970"; print}' "$WARROOM_DIR/pids.tsv" > "$T/pids.mod" && cp "$T/pids.mod" "$WARROOM_DIR/pids.tsv"
+"$B/pids.sh" check >/dev/null 2>&1
+grep -q "job 'dup-job'" "$("$B/board.sh" path)" && ok "a pid with a different start time counts as gone" || bad "reused pid was treated as the same job"
+kill $J 2>/dev/null; wait $J 2>/dev/null
+
+# 13. merge-daemon with a stubbed gh
+SD="$T/stub"; mkdir -p "$SD"; export GH_STUB_DIR="$SD"; SHA=$(printf 'a%.0s' $(seq 1 40))
+cat > "$SD/gh" <<'STUB'
+#!/usr/bin/env bash
+d=$GH_STUB_DIR
+case "$*" in
+  *"pr merge"*) touch "$d/merged"; exit 0 ;;
+  *mergeCommit*) echo "feedface"; exit 0 ;;
+  *statusCheckRollup*)
+    if [ -e "$d/merged" ]; then cat "$d/view.merged"; exit 0; fi
+    n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/count"
+    if [ $n -le 1 ] || [ ! -e "$d/view.2" ]; then cat "$d/view.1"; else cat "$d/view.2"; fi ;;
+esac
+STUB
+chmod +x "$SD/gh"
+mk() { # mk STATE NAME CONCLUSION...
+  python3 - "$SHA" "$@" <<'PY'
+import json, sys
+sha, state = sys.argv[1], sys.argv[2]; rest = sys.argv[3:]
+checks = [{"__typename": "CheckRun", "name": rest[i], "status": "COMPLETED", "conclusion": rest[i+1]} for i in range(0, len(rest), 2)]
+print(json.dumps({"state": state, "headRefOid": sha, "title": "a title", "statusCheckRollup": checks}))
+PY
+}
+mk MERGED build SUCCESS > "$SD/view.merged"
+runmd() { rm -f "$SD/merged" "$SD/count"; PATH="$SD:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 "$@" >/dev/null 2>&1; }
+mk OPEN build SUCCESS > "$SD/view.1"; mk OPEN build FAILURE > "$SD/view.2"
+runmd --require build; rc=$?
+[ $rc = 1 ] && [ ! -e "$SD/merged" ] && ok "merge-daemon: a check that fails on the confirming look merges nothing" || bad "merge-daemon merged or passed after a late failure (rc $rc)"
+rm -f "$SD/view.2"; mk OPEN lint SUCCESS > "$SD/view.1"; runmd --require build; rc=$?
+[ $rc = 1 ] && [ ! -e "$SD/merged" ] && ok "merge-daemon: a required check that never appears merges nothing" || bad "merge-daemon merged without the required check (rc $rc)"
+mk OPEN build SUCCESS lint NEUTRAL > "$SD/view.1"; runmd --require build; rc=$?
+[ $rc = 0 ] && [ -e "$SD/merged" ] && ok "merge-daemon: green on two looks with the required check merges, pinned" || bad "merge-daemon did not merge a green PR (rc $rc)"
+runmd --head "${SHA%a}b"; rc=$?
+[ $rc = 1 ] && [ ! -e "$SD/merged" ] && ok "merge-daemon: a branch that is not at the pinned head merges nothing" || bad "merge-daemon ignored the pinned head (rc $rc)"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
