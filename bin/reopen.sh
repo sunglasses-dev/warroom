@@ -2,7 +2,7 @@
 # reopen.sh — start fresh sessions without losing the thread. Each seat writes a card, you close the windows,
 # open new ones and paste one message per seat. Nothing runs in the background; the state is one marker file,
 # board lines and a ledger.
-#   reopen.sh arm              mark a reopen as requested and post the request to the board
+#   reopen.sh arm              mark a reopen as requested and post the request to the board (the requester does not wake itself: it banks itself)
 #   reopen.sh status           who has banked, who has reopened
 #   reopen.sh card SEAT        print a card template for SEAT (save it as $WARROOM_DIR/cards/SEAT_REOPEN_<date>.md)
 #   reopen.sh build [--force]  write the paste sheet $WARROOM_DIR/REOPEN_MESSAGES_<date>.md (one message per seat). It is

@@ -1,7 +1,7 @@
 
 # warroom
 
-Coordinate several Claude Code sessions through one text file. A shell waiter delivers a matching first-line `ACTION` post to a seat, and optional helpers attempt a receipt for a merge and a post when a job ends. How many sessions you can run depends on your plan.
+Coordinate several Claude Code sessions through one text file. A shell waiter delivers a matching first-line `ACTION` post to a seat, and optional helpers watch a pull request's checks and leave a receipt of what they saw, and post a wake line to a job's owner when it ends. How many sessions you can run depends on your plan.
 
 ## What is it for
 
@@ -16,12 +16,12 @@ Coordinate several Claude Code sessions through one text file. A shell waiter de
 | A text file is the chat | messages live in `board.md`; seats use `board.sh` to post and read, and helper state (seat registry, job ledger) sits in the run directory |
 | Models need not poll | a local shell waiter checks the board for each seat; the seat starts it as a background task and then sleeps |
 | The waiting loop makes no model calls | the waiter normally exits when a matching line arrives; it also exits when another waiter replaces it (exit 3, which is not a wake) and on errors |
-| A merge attempt tries to leave a receipt, a long job can post a wake | a non-dry merge attempt tries to write a receipt file and post a line starting `POSTCONDITION PASS` or `POSTCONDITION FAIL`, and ends FAIL if either write fails; while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone, and keeps the ledger row if the post fails |
+| A long job can post a wake, a PR can be watched | while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone, and keeps the ledger row if the post fails; `pr-watch.sh` posts `WATCH GREEN` or `WATCH FAIL` when a pull request's checks settle at a pinned head. It reports, it never merges |
 | Reopen prepares fresh sessions | `reopen.sh` asks every seat for a card and builds one paste message per seat; you save each card and check it before closing a session |
 
 ## Quick start: two sessions
 
-You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for the merge daemon, which you can leave for later.
+You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for `pr-watch.sh`, which you can leave for later.
 
 **1. Install.** The hooks apply to every Claude Code session that reads the settings file the installer edits, including sessions in other projects. Each session you want left alone opts out on its own with `waiter.sh NONE <session id>`.
 
@@ -65,7 +65,7 @@ When Claude Code delivers the background task's completion, the `W1` session see
 Read README.md, install.sh and hooks/waiter-check.sh in this folder. Run bash install.sh --dry-run,
 then install the war room for seats BOSS MANAGER W1 W2. Take my session id from the waiter banner,
 start my waiter as a Claude Code background task, and run the two-session wake check from the
-Quick start. Leave merge-daemon.sh and cpu-sentinel.py for later.
+Quick start. Leave pr-watch.sh and cpu-sentinel.py for later.
 ```
 
 Nothing in this repo is piped from the internet into a shell. Read `install.sh` first; it is short.
@@ -81,7 +81,7 @@ A synthetic board (`examples/4-seat/sample-board.md`):
 [09:31 · W1] R1 done. Flag is --export. 1 file, +14/-2. Receipt receipts/r1.md
 @W2 ACTION: R2 can start, flag name above.
 [10:13 · MANAGER] @BOSS ACTION: R1 and R2 are ready for your read. PR 12.
-[10:34 · BOSS] POSTCONDITION PASS merge of PR 12: merged (receipt receipts/merge_12.md)
+[10:34 · BOSS] WATCH GREEN PR 12 at 1a2b3c4d5e6f: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)
 ```
 
 A waiter reads only the first line of a post, right after its stamp. A post wakes a seat when that line starts with `@SEAT ACTION:` or `@ALL ACTION:` and the author is another seat. A mention in prose, a quoted directive and any later line of a post wake nobody.
@@ -112,7 +112,7 @@ A waiter reads only the first line of a post, right after its stamp. A post wake
   the seat reads the line, acts, and starts its waiter again
 ```
 
-Optional helpers beside the board: `pids.sh` notices when a registered job's process is gone, `merge-daemon.sh` merges a pull request pinned to one head once its checks are green and writes a receipt (it is a template; the guarantee that nothing merges unchecked is branch protection with required checks on the server), `cpu-sentinel.py` reports selected processes that stay hot, `reopen.sh` prepares the cards and paste messages for fresh sessions.
+Optional helpers beside the board: `pids.sh` notices when a registered job's process is gone, `pr-watch.sh` watches one pull request at a pinned head and reports when its checks are green or one fails (it never merges, and a green report is an observation, not a guarantee: whether an unchecked merge is possible is decided by your branch protection), `cpu-sentinel.py` reports selected processes that stay hot, `reopen.sh` prepares the cards and paste messages for fresh sessions.
 
 ## What it is not
 

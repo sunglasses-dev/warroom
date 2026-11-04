@@ -12,7 +12,7 @@
 #  10. a board that cannot be written makes post fail; a job's row is kept until its wake is on the board
 #  11. locks: a live owner is never evicted, a dead owner is reclaimed, a non-owner cannot release
 #  12. the job ledger: concurrent add of one label gives one row; a reused pid (wrong start time) counts as gone
-#  13. merge-daemon (gh stubbed): a check that fails on the second look, or a required check that never appears, merges nothing
+#  13. pr-watch (gh stubbed): only `gh pr view` is ever called, a green needs every row green, and the receipt holds the response that produced it
 #  14-16. warroom.env is data: command text refused, the current folder ignored, shell and cpu-sentinel.py agree
 #  17-20. install.sh: refuses command text in --dir, survives an interrupted write, re-points a moved clone, keeps config
 #  21. every hook with a bad warroom.env exits 1 (shown, prompt goes through), never 2 (Claude Code blocks the prompt)
@@ -25,9 +25,8 @@
 #  35. pids.sh add refuses pid 0 and a pid whose start time cannot be read
 #  36. cpu-sentinel reads the four-column ledger (job policy, owner alerted once); a row with a reused pid is ignored
 #  37. cpu-sentinel --dry-run changes nothing; a failed alert post is retried until it lands, then not repeated
-#  38. merge-daemon: an option without a value exits 2 (no spin); a dry run writes nothing on any outcome
-#  39. merge-daemon readback: merged by this run / merged by another account / accepted but not merged / refused because already merged
-#  40. leak-check: a bad denylist pattern or an unreadable file is an error (exit 2), run-state files in the tree are a hit
+#  38. pr-watch: an option without a value exits 2 (no spin)
+#  39. leak-check: a bad denylist pattern or an unreadable file is an error (exit 2), run-state files in the tree are a hit
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -149,40 +148,103 @@ awk -F'\t' 'BEGIN{OFS="\t"} {$4="Thu Jan  1 00:00:00 1970"; print}' "$WARROOM_DI
 grep -q "job 'dup-job'" "$("$B/board.sh" path)" && ok "a pid with a different start time counts as gone" || bad "reused pid was treated as the same job"
 kill $J 2>/dev/null; wait $J 2>/dev/null
 
-# 13. merge-daemon with a stubbed gh
+# 13. pr-watch (gh stubbed, no network): it only reads, reports an observation, and a green needs every row green
 SD="$T/stub"; mkdir -p "$SD"; export GH_STUB_DIR="$SD"; SHA=$(printf 'a%.0s' $(seq 1 40))
 cat > "$SD/gh" <<'STUB'
 #!/usr/bin/env bash
-d=$GH_STUB_DIR
-case "$*" in
-  *"pr merge"*) touch "$d/merged"; exit 0 ;;
-  *mergeCommit*) echo "feedface"; exit 0 ;;
-  *statusCheckRollup*)
-    if [ -e "$d/merged" ]; then cat "$d/view.merged"; exit 0; fi
+# logs every call; the Nth `pr view` serves resp.N (the last file repeats); resp.fail.N makes that call fail
+d=$GH_STUB_DIR; echo "$*" >> "$d/calls.log"
+case "$1 $2" in
+  "pr view")
     n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/count"
-    if [ $n -le 1 ] || [ ! -e "$d/view.2" ]; then cat "$d/view.1"; else cat "$d/view.2"; fi ;;
+    [ -e "$d/resp.fail.$n" ] && exit 1
+    f="$d/resp.$n"; [ -e "$f" ] || f=$(ls "$d"/resp.[0-9]* | sort -t. -k2 -n | tail -1)
+    cat "$f" ;;
+  *) exit 0 ;;
 esac
 STUB
 chmod +x "$SD/gh"
-mk() { # mk STATE NAME CONCLUSION...
-  python3 - "$SHA" "$@" <<'PY'
+mkr() { # mkr STATE HEAD REPO BASE ROW...   row = run:NAME:STATUS:CONCLUSION[:WORKFLOW] | ctx:NAME:STATE | ROWS=null
+  python3 - "$@" <<'PY'
 import json, sys
-sha, state = sys.argv[1], sys.argv[2]; rest = sys.argv[3:]
-checks = [{"__typename": "CheckRun", "name": rest[i], "status": "COMPLETED", "conclusion": rest[i+1]} for i in range(0, len(rest), 2)]
-print(json.dumps({"state": state, "headRefOid": sha, "title": "a title", "statusCheckRollup": checks}))
+state, head, repo, base = sys.argv[1:5]; rows = []; nullrows = False
+for r in sys.argv[5:]:
+    p = r.split(":")
+    if r == "ROWS=null": nullrows = True
+    elif p[0] == "run":
+        c = {"__typename": "CheckRun", "name": p[1], "status": p[2], "conclusion": p[3] or None}
+        if len(p) > 4: c["workflowName"] = p[4]
+        rows.append(c)
+    else: rows.append({"__typename": "StatusContext", "context": p[1], "state": p[2]})
+d = {"state": state or None, "headRefOid": head, "baseRefName": base, "url": "https://github.com/%s/pull/7" % repo, "statusCheckRollup": None if nullrows else rows}
+print(json.dumps({k: v for k, v in d.items() if v is not None or k == "statusCheckRollup"}))
 PY
 }
-mk MERGED build SUCCESS > "$SD/view.merged"
-runmd() { rm -f "$SD/merged" "$SD/count"; PATH="$SD:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 "$@" >/dev/null 2>&1; }
-mk OPEN build SUCCESS > "$SD/view.1"; mk OPEN build FAILURE > "$SD/view.2"
-runmd --require build; rc=$?
-[ $rc = 1 ] && [ ! -e "$SD/merged" ] && ok "merge-daemon: a check that fails on the confirming look merges nothing" || bad "merge-daemon merged or passed after a late failure (rc $rc)"
-rm -f "$SD/view.2"; mk OPEN lint SUCCESS > "$SD/view.1"; runmd --require build; rc=$?
-[ $rc = 1 ] && [ ! -e "$SD/merged" ] && ok "merge-daemon: a required check that never appears merges nothing" || bad "merge-daemon merged without the required check (rc $rc)"
-mk OPEN build SUCCESS lint NEUTRAL > "$SD/view.1"; runmd --require build; rc=$?
-[ $rc = 0 ] && [ -e "$SD/merged" ] && ok "merge-daemon: green on two looks with the required check merges, pinned" || bad "merge-daemon did not merge a green PR (rc $rc)"
-runmd --head "${SHA%a}b"; rc=$?
-[ $rc = 1 ] && [ ! -e "$SD/merged" ] && ok "merge-daemon: a branch that is not at the pinned head merges nothing" || bad "merge-daemon ignored the pinned head (rc $rc)"
+BD="$("$B/board.sh" path)"
+# runw RESP... -- [pr-watch args]: serve the responses in order, run pr-watch, leave the new board lines in $NEW and rc in $rc
+runw() { rm -f "$SD"/resp.* "$SD/count" "$SD/calls.log"; i=1
+  while [ "${1:-}" != "--" ]; do printf '%s\n' "$1" > "$SD/resp.$i"; i=$((i+1)); shift; done; shift
+  n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 1 "$@" >/dev/null 2>&1; rc=$?
+  NEW=$(tail -n +$((n0+1)) "$BD"); touch "$SD/calls.log"
+  [ -z "$(grep -v '^pr view ' "$SD/calls.log")" ] || NOMUT=bad; }
+NOMUT=ok
+G=$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS:ci)
+stops() { # stops "name" RESP... -- args: the run must end with exit 1, one WATCH FAIL line and no WATCH GREEN
+  nm=$1; shift; runw "$@"
+  if [ $rc = 1 ] && echo "$NEW" | grep -q 'WATCH FAIL' && ! echo "$NEW" | grep -q 'WATCH GREEN'; then ok "pr-watch stops: $nm"; else bad "pr-watch did not stop: $nm (rc $rc: $NEW)"; fi; }
+# green: exit 0, exactly one WATCH GREEN line, no WATCH FAIL; a check named PASS or guarantee must not trip the wording test
+runw "$(mkr OPEN "$SHA" o/r main run:PASS:COMPLETED:SUCCESS:ci run:guarantee:COMPLETED:NEUTRAL ctx:legacy:SUCCESS)" -- --require PASS
+LINE=$(echo "$NEW" | grep 'WATCH GREEN'); REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
+if [ $rc = 0 ] && [ "$(echo "$NEW" | grep -c 'WATCH GREEN')" = 1 ] && ! echo "$NEW" | grep -q 'WATCH FAIL'; then ok "pr-watch: a green response gives exit 0 and exactly one WATCH GREEN line"; else bad "pr-watch green (rc $rc: $NEW)"; fi
+case "$LINE" in *"observed, not a gate; this tool did not merge or modify the PR"*"$REC)") ok "pr-watch: the green line says observed, not a gate, and ends with the receipt path" ;; *) bad "pr-watch green line: $LINE" ;; esac
+grep -q 'observed, not a gate' "$REC" && grep -q 'This tool did not merge or modify the PR' "$REC" && ok "pr-watch: the receipt says observed, not a gate, and that it did not merge" || bad "pr-watch receipt wording"
+grep -q '  - legacy · SUCCESS · not reported' "$REC" && ok "pr-watch: a check with no workflow is written 'not reported' and is still green" || bad "pr-watch: missing workflow field"
+FIXED=$( { echo "$LINE" | sed 's/(receipt .*//'; grep -v '^  - \|required names' "$REC"; "$B/pr-watch.sh" --help; } | sed 's/not a guarantee//g; s/not a gate//g; s/did not merge//g; s/never merges//g')
+echo "$FIXED" | grep -Eqi 'POSTCONDITION|PASS|safe to merge|guarantee|merge is safe' && bad "pr-watch wording claims a merge or a gate: $(echo "$FIXED" | grep -Ei 'POSTCONDITION|PASS|safe to merge|guarantee|merge is safe' | head -2)" || ok "pr-watch: no template claims a merge, a safe merge or a gate"
+"$B/pr-watch.sh" --help | grep -qi 'private' && bad "pr-watch --help names a private tool" || ok "pr-watch --help says nothing about any private tool"
+# stops: each ends WATCH FAIL with exit 1 and no green line
+stops "head is not the pinned one" "$(mkr OPEN "${SHA%a}b" o/r main run:build:COMPLETED:SUCCESS)" --
+stops "a required check is red" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:FAILURE)" -- --require build
+stops "a required check never appears" "$(mkr OPEN "$SHA" o/r main run:lint:COMPLETED:SUCCESS)" -- --require build
+stops "zero checks" "$(mkr OPEN "$SHA" o/r main)" --
+stops "the PR is closed" "$(mkr CLOSED "$SHA" o/r main run:build:COMPLETED:SUCCESS)" --
+stops "the PR was merged elsewhere" "$(mkr MERGED "$SHA" o/r main run:build:COMPLETED:SUCCESS)" --
+echo "$NEW" | grep -q 'merged outside this tool' && ok "pr-watch: a merge by someone else is reported as such" || bad "pr-watch: merged elsewhere not named: $NEW"
+stops "a non-required check is red" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:extra:COMPLETED:FAILURE)" -- --require build
+stops "a non-required check stays pending" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:extra:IN_PROGRESS:)" -- --require build
+stops "same name, SUCCESS then FAILURE" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:build:COMPLETED:FAILURE)" -- --require build
+stops "same name, FAILURE then SUCCESS" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:FAILURE run:build:COMPLETED:SUCCESS)" -- --require build
+stops "same name, SUCCESS then PENDING" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:build:QUEUED:)" -- --require build
+stops "same name, PENDING then SUCCESS" "$(mkr OPEN "$SHA" o/r main run:build:QUEUED: run:build:COMPLETED:SUCCESS)" -- --require build
+stops "a legacy status context is FAILURE" "$(mkr OPEN "$SHA" o/r main ctx:ci:FAILURE)" --
+stops "a legacy status context is PENDING" "$(mkr OPEN "$SHA" o/r main ctx:ci:PENDING)" --
+stops "the state is missing" "$(mkr "" "$SHA" o/r main run:build:COMPLETED:SUCCESS)" --
+stops "the checks list is null" "$(mkr OPEN "$SHA" o/r main ROWS=null)" --
+stops "a finished check has no result" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:)" --
+stops "a check stays pending until the timeout" "$(mkr OPEN "$SHA" o/r main run:build:IN_PROGRESS:)" --
+# gh failing on the second call after a pending first one: no green, and the receipt marks the current fields unavailable
+rm -f "$SD"/resp.* "$SD/count"; mkr OPEN "$SHA" o/r main run:early:IN_PROGRESS: > "$SD/resp.1"; : > "$SD/resp.fail.2"; : > "$SD/resp.fail.3"; : > "$SD/resp.fail.4"
+n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 2 >/dev/null 2>&1; rc=$?
+NEW=$(tail -n +$((n0+1)) "$BD"); REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
+[ $rc = 1 ] && ! echo "$NEW" | grep -q 'WATCH GREEN' && grep -q 'current fields: unavailable' "$REC" && grep -q 'earlier evidence, observed at .*, not current' "$REC" \
+  && ok "pr-watch: after a gh failure the receipt marks current fields unavailable and dates the earlier evidence" || bad "pr-watch gh-failure receipt (rc $rc)"
+# receipt: exactly the response that produced the result, never an earlier or mixed one; pending -> green with the head fixed
+runw "$(mkr OPEN "$SHA" first/repo develop run:alpha:IN_PROGRESS::ci)" "$(mkr OPEN "$SHA" second/repo release run:beta:COMPLETED:SUCCESS ctx:gamma:SUCCESS)" -- ; REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
+if [ $rc = 0 ] && grep -q 'second/repo' "$REC" && grep -q 'base branch (as GitHub reported it): release' "$REC" && grep -q '  - beta · SUCCESS · not reported' "$REC" \
+   && ! grep -q 'first/repo\|develop\|alpha' "$REC"; then ok "pr-watch: the receipt holds exactly the response that produced the green"; else bad "pr-watch receipt mixed responses (rc $rc)"; fi
+runw "$(mkr OPEN "$SHA" first/repo develop run:build:IN_PROGRESS:)" "$(mkr OPEN "${SHA%a}c" second/repo release run:build:COMPLETED:SUCCESS)" -- ; REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
+if [ $rc = 1 ] && grep -q "pinned head: $SHA" "$REC" && grep -q "observed head: ${SHA%a}c" "$REC"; then ok "pr-watch: head drift records both the pinned and the observed head"; else bad "pr-watch drift receipt (rc $rc)"; fi
+# the receipt or the board line cannot be written: exit 1, no green line
+chmod 500 "$WARROOM_DIR/receipts"; runw "$G" --; chmod 700 "$WARROOM_DIR/receipts"
+[ $rc = 1 ] && ! echo "$NEW" | grep -q 'WATCH GREEN' && ok "pr-watch: a receipt that cannot be written ends exit 1 with no green line" || bad "pr-watch wrote green without a receipt (rc $rc: $NEW)"
+rm -f "$SD"/resp.* "$SD/count"; printf '%s\n' "$G" > "$SD/resp.1"
+(export WARROOM_DIR="$T/run3"; mkdir -p "$WARROOM_DIR/board.md"; PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 2 >/dev/null 2>&1)
+[ $? = 1 ] && ok "pr-watch: a board line that cannot be posted ends exit 1" || bad "pr-watch ignored a failed board post"
+"$B/pr-watch.sh" 7 >/dev/null 2>&1; [ $? = 2 ] && ok "pr-watch: usage error (no --head) is exit 2" || bad "pr-watch usage exit code"
+# no write to GitHub: every run above called only `pr view`; the script has no other gh subcommand; a stub-logged merge is caught
+[ "$NOMUT" = ok ] && ok "pr-watch: across every run the gh log holds only 'pr view' calls" || bad "pr-watch called gh with something other than 'pr view'"
+[ "$(grep -c 'gh ' "$B/pr-watch.sh" | tr -d ' ')" -ge 1 ] && ! grep -E 'gh +(pr +(merge|review|close|comment|edit|ready)|api|auto-merge)' "$B/pr-watch.sh" | grep -v '^#' | grep -q . && ok "pr-watch.sh holds no gh write subcommand" || bad "pr-watch.sh mentions a gh write subcommand"
+echo "pr merge 7" >> "$SD/calls.log"; [ -n "$(grep -v '^pr view ' "$SD/calls.log")" ] && ok "pr-watch: the no-mutation check catches a logged 'pr merge' (negative control)" || bad "no-mutation check is blind"
 
 # 14. config is data, never code: a $(...) in warroom.env is refused and does not run
 printf 'WARROOM_DIR="$(touch %s/m-env)"\n' "$T" > "$T/bad.env"
@@ -410,45 +472,12 @@ n=$(grep -c "@BOSS ACTION: process $BL " "$RUN_DRY/bd")
 [ "$n" = 1 ] && ok "sentinel: a failed alert post is retried on the next run, then not repeated" || bad "sentinel alert retry: $n lines"
 kill $BL 2>/dev/null; wait $BL 2>/dev/null
 
-# 38. merge-daemon: an option without a value exits 2 instead of spinning; a dry run writes nothing, pass or fail
-"$B/merge-daemon.sh" 7 --head >/dev/null 2>&1 & MP=$!
+# 38. pr-watch: an option without a value exits 2 instead of spinning
+"$B/pr-watch.sh" 7 --head >/dev/null 2>&1 & MP=$!
 if wait_exit $MP 5; then wait $MP; rc=$?; else kill $MP 2>/dev/null; wait $MP 2>/dev/null; rc=spin; fi
-[ "$rc" = 2 ] && ok "merge-daemon: an option with no value exits 2" || bad "merge-daemon with a missing option value: $rc"
-nrec() { ls "$WARROOM_DIR/receipts" 2>/dev/null | wc -l | tr -d ' '; }
-nboard() { wc -l < "$("$B/board.sh" path)" | tr -d ' '; }
-mk OPEN build FAILURE > "$SD/view.1"; rm -f "$SD/view.2" "$SD/merged" "$SD/count"; r0=$(nrec); b0=$(nboard)
-PATH="$SD:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 --require build --dry-run >/dev/null 2>&1; rc=$?
-[ $rc = 1 ] && [ "$(nrec)" = "$r0" ] && [ "$(nboard)" = "$b0" ] && ok "merge-daemon --dry-run: a failing PR ends FAIL and writes no receipt or board line" || bad "failed dry run: rc $rc, receipts $r0->$(nrec), board $b0->$(nboard)"
-mk OPEN build SUCCESS > "$SD/view.1"; rm -f "$SD/merged" "$SD/count"
-PATH="$SD:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 --require build --dry-run >/dev/null 2>&1; rc=$?
-[ $rc = 0 ] && [ ! -e "$SD/merged" ] && [ "$(nrec)" = "$r0" ] && [ "$(nboard)" = "$b0" ] && ok "merge-daemon --dry-run: a green PR passes, merges nothing, writes nothing" || bad "green dry run: rc $rc, receipts $r0->$(nrec), board $b0->$(nboard)"
+[ "$rc" = 2 ] && ok "pr-watch: an option with no value exits 2" || bad "pr-watch with a missing option value: $rc"
 
-# 39. merge-daemon readback: four outcomes that must not be told apart by "merged" alone
-S2="$T/stub2"; mkdir -p "$S2"; export GH_STUB_DIR="$S2"
-cat > "$S2/gh" <<'STUB'
-#!/usr/bin/env bash
-d=$GH_STUB_DIR
-case "$*" in
-  *"pr merge"*) if [ -e "$d/refuse" ]; then touch "$d/ext"; echo "Pull request is already merged" >&2; exit 1; fi
-                [ -e "$d/queued" ] || touch "$d/merged"; exit 0 ;;
-  *"api user"*) cat "$d/me" 2>/dev/null; exit 0 ;;
-  *mergeCommit*) printf 'feedface\t%s\n' "$(cat "$d/mergedby" 2>/dev/null)"; exit 0 ;;
-  *statusCheckRollup*) if [ -e "$d/merged" ] || [ -e "$d/ext" ]; then cat "$d/view.merged"; else cat "$d/view.1"; fi ;;
-esac
-STUB
-chmod +x "$S2/gh"; mk OPEN build SUCCESS > "$S2/view.1"; mk MERGED build SUCCESS > "$S2/view.merged"
-outcome() { # outcome FLAGS... : run once on a clean stub, print the last POSTCONDITION line and the exit code
-  rm -f "$S2/merged" "$S2/ext" "$S2/refuse" "$S2/queued" "$S2/me" "$S2/mergedby"; : > "$("$B/board.sh" path)"
-  for f in "$@"; do case "$f" in me=*) echo "${f#me=}" > "$S2/me" ;; by=*) echo "${f#by=}" > "$S2/mergedby" ;; *) touch "$S2/$f" ;; esac; done
-  PATH="$S2:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 --require build >/dev/null 2>&1; echo "rc=$? $(grep POSTCONDITION "$("$B/board.sh" path)" | tail -1)"; }
-o=$(outcome me=ownerlogin by=ownerlogin); case "$o" in "rc=0 "*"POSTCONDITION PASS"*"merged by this run (invocation"*) ok "merge readback: merged by this run's account is reported as such" ;; *) bad "own merge: $o" ;; esac
-o=$(outcome me=ownerlogin by=otherlogin); case "$o" in "rc=1 "*"POSTCONDITION FAIL"*"NOT merged by this run's account"*) ok "merge readback: merged by another account is not a pass" ;; *) bad "other account: $o" ;; esac
-o=$(outcome queued); case "$o" in "rc=1 "*"POSTCONDITION FAIL"*"still 'OPEN'"*) ok "merge readback: accepted but still open (queue/auto-merge) is not a pass" ;; *) bad "queued: $o" ;; esac
-o=$(outcome refuse); case "$o" in "rc=1 "*"POSTCONDITION FAIL"*"already MERGED by someone else"*) ok "merge readback: refused because already merged is reported as another actor's merge" ;; *) bad "refused/ext: $o" ;; esac
-o=$(outcome); case "$o" in "rc=0 "*"POSTCONDITION PASS"*"does not prove this run did it"*) ok "merge readback: an unreadable merging account passes with the limit stated" ;; *) bad "unreadable merger: $o" ;; esac
-export GH_STUB_DIR="$SD"
-
-# 40. leak-check: scan errors are errors, run-state files in the tree are hits
+# 39. leak-check: scan errors are errors, run-state files in the tree are hits
 LK="$T/lk"; mkdir -p "$LK/tree"; printf 'nothing here\n' > "$LK/tree/a.txt"; printf '(unbalanced\n' > "$LK/bad.deny"
 bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r0=$?
 LEAKCHECK_DENYLIST="$LK/bad.deny" bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r1=$?
