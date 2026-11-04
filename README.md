@@ -33,7 +33,7 @@ bash install.sh               # writes warroom.env and the run directory, prints
 
 It names the settings file the block belongs in (`$CLAUDE_CONFIG_DIR/settings.json`, or `settings.json` in the `.claude` folder in your home folder) and says what to do for the state that file is in now. Then:
 
-- (a) Save a copy of the settings file. `install.sh` prints the `cp` command.
+- (a) Save a copy of the settings file. When the file exists, `install.sh` prints the `cp` command; with no file yet there is nothing to copy.
 - (b) Add the block. No file yet: create it with the block as its whole content. No `"hooks"` key: add the block's `"hooks"` property and keep every other one. A `"hooks"` key already there: keep every event, group and entry in it, add only the missing entries as a new group at the end of that event's list, and never add a second `"hooks"` key. A file that does not parse: repair it first, do not paste into it.
 - (c) Check that the file still parses, and compare it with the copy.
 - (d) Run `bash install.sh --check`. It lists where each of the four commands appears in that one file: exit 0 when all four are found, 1 when some are missing, 2 when it cannot read the file (it says why). It checks text, not that the hooks run; Quick start step 4 is the real test.

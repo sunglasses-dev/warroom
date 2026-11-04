@@ -7,9 +7,10 @@
 #   1. writes warroom.env ($WARROOM_ENV, else ~/.warroom/warroom.env). An existing one is kept and used; if --seats or
 #      --dir ask for something else it stops and says so. --replace-config backs the old file up and writes a new one.
 #   2. creates the run directory, and the board if it is missing (an existing board is left as it is)
-#   3. prints four hook entries as one JSON block, the settings file they belong in, and how to add them for the state
-#      that file is in now. install.sh never writes that file: you (or your Claude Code session) edit it.
-#   4. prints one first message per seat to paste into that seat's session
+#   3. prints one first message per seat to paste into that seat's session
+#   4. prints four hook entries as one JSON block, last, so it ends the output: the settings file they belong in, and
+#      how to add them for the state that file is in now. install.sh never writes that file: you (or your Claude Code
+#      session) edit it.
 # Steps 1 and 2 are separate writes. Both refuse to run when a destination is the settings file, or links to it.
 # Settings live in $CLAUDE_CONFIG_DIR/settings.json, or $HOME/.claude/settings.json when that variable is not set.
 # Seats: [A-Z][A-Z0-9_]{0,15}; ALL, NONE, GUARD are reserved. DIR: an absolute path of letters, digits, space, _ . / ~ -
@@ -239,7 +240,18 @@ if [ $MODE = uninstall ]; then
   echo "2. optional, only after every seat session and background job has stopped: delete the config and the run"
   echo "   directory. This deletes the board, its whole history, the state files and any receipts in that directory."
   echo "   Look inside it first; nothing you need should be in it. install.sh will not run this for you."
-  set --; [ ! -e "$ENVF" ] || set -- "$ENVF"; [ ! -e "$U_DIR" ] || set -- "$@" "$U_DIR"
+  # the default config folder (~/.warroom) holding only warroom.env and its backups is listed as the folder, so no empty
+  # folder is left behind; a WARROOM_ENV the user chose is listed as that one file
+  U_ENV=$ENVF; ED=$(dirname "$ENVF")
+  if [ -z "${WARROOM_ENV:-}" ] && [ -f "$ENVF" ] && [ ! -L "$ENVF" ] && [ ! -L "$ED" ]; then
+    only=1
+    for f in "$ED"/* "$ED"/.[!.]* "$ED"/..?*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      case "${f##*/}" in warroom.env|warroom.env.bak-*) { [ -f "$f" ] && [ ! -L "$f" ]; } || only=0 ;; *) only=0 ;; esac
+    done
+    [ $only = 0 ] || U_ENV=$ED
+  fi
+  set --; [ ! -e "$ENVF" ] || set -- "$U_ENV"; [ ! -e "$U_DIR" ] || set -- "$@" "$U_DIR"
   if [ $# = 0 ]; then echo "   nothing to delete: $ENVF and $U_DIR do not exist"
   else printf '   rm -r --'; printf ' %q' "$@"; echo; fi
   exit 0
@@ -286,16 +298,17 @@ fi
 echo "2. run directory: $DIR_USE"
 if [ $DRY = 1 ]; then echo "   [dry-run] would create it, and board.md if it is missing"
 else mkdir -p "$DIR_USE"; [ -e "$BOARD_F" ] || : >> "$BOARD_F"; fi
-echo "3. hooks: they belong in $SET. install.sh does not write that file; you or your Claude Code session edit it."
-hooks advise "$SET"
-copy_cmd
-block
-echo "   Then run: bash $(q "$HERE/install.sh") --check"
-
-echo "4. first message for each seat (paste it as the first message of that seat's session):"
+echo "3. first message for each seat (paste it as the first message of that seat's session):"
 for s in $SEATS_USE; do
   echo
   echo "   You are $s. This session shows a [WAITER NOT ARMED] line that ends with your session id. As a background job, run: bash $(q "$HERE/bin/waiter.sh") $s <that session id>. Then read $(q "$HERE/docs/PROTOCOL.md") and post your first line with: bash $(q "$HERE/bin/board.sh") post $s \"online\""
 done
 echo
-echo "Done. Nothing was run in the background, and $SET was not written. To undo: bash $(q "$HERE/install.sh") --uninstall (it prints the steps)."
+# the block comes last, so it ends the output and nobody has to scroll up past the seat messages to find it
+echo "4. hooks: they belong in $SET. install.sh does not write that file; you or your Claude Code session edit it."
+hooks advise "$SET"
+copy_cmd
+block
+echo "   Then run: bash $(q "$HERE/install.sh") --check"
+if [ $DRY = 1 ]; then echo "Dry run: nothing was written. Run it again without --dry-run to write steps 1 and 2."
+else echo "Done. Nothing was run in the background, and $SET was not written. To undo: bash $(q "$HERE/install.sh") --uninstall (it prints the steps)."; fi
