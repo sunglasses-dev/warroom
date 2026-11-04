@@ -13,5 +13,5 @@ seat=$(awk -F'\t' -v s="$SID" '$1==s {print $2}' "$W/seats.tsv" 2>/dev/null | ta
 [ -n "$seat" ] && [ "$seat" != NONE ] || exit 0
 n=$(wc -l < "$BOARD_FILE" | tr -d ' '); last=$(wr_cursor_get "$W/.anchor-$seat" "$BOARD_FILE" 31536000); [ "$last" = none ] && last=0
 new=$((n-last)); [ "$new" -gt 0 ] || exit 0
-echo "[BOARD] $new new line(s) since your last read. Read them with: bash $HERE/../bin/board.sh tail $seat"
+echo "[BOARD] $new new line(s) since your last read. Read them with: bash $(printf '%q' "$(cd "$HERE/../bin" && pwd)/board.sh") tail $seat"
 sed -n "$((last+1)),${n}p" "$BOARD_FILE" | grep -E "@${seat} |@ALL " | tail -3 | cut -c1-300

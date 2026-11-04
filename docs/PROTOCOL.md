@@ -36,11 +36,11 @@ Seat names are set in `warroom.env` and default to `BOSS MANAGER W1 W2`; the exa
 |---|---|
 | a watched PR | a finished watch writes `$WARROOM_DIR/receipts/watch_<PR>_<time>_<pid>.md` and posts a board line that starts `WATCH GREEN` or `WATCH FAIL` and ends with the receipt path; if either cannot be written the run ends with exit 1 |
 | a long job | register it with `pids.sh add LABEL PID SEAT` (`add` refuses pid 0 and a process whose start time it cannot read). While any waiter is running, its check notices the process is gone (or that its pid now belongs to a process that started at a different time) and posts a wake line to the owner. The post comes before the row is removed and is retried if it fails, so a crash between the two can post it twice; if the ledger cannot be written the command exits non-zero and leaves the old ledger, so a job can be missing from it or a wake can repeat. The owner needs a waiter of their own. `pids.sh done` removes the row without a wake |
-| a reopen | one card per seat, saved by you in `$WARROOM_DIR/cards/` (`reopen.sh card SEAT` prints a template, it does not save it); `reopen.sh done` adds a ledger row in `REOPEN_LEDGER.md` listing the seats whose reopened post it finds |
+| a reopen | one card per seat, saved by you in `$WARROOM_DIR/cards/` (`reopen.sh card SEAT` prints a template, it does not save it); `reopen.sh done` adds a ledger row in `REOPEN_LEDGER.md` listing the seats whose reopened post it finds, and refuses until every seat has posted one (`done --force` closes it and labels the row and the end line INCOMPLETE) |
 
 ## Reopen
 
-(convention) `reopen.sh arm` → each seat finishes its row, writes and saves its card and posts `banked for reopen` → `reopen.sh build` writes the paste sheet → you check the cards, open new sessions and paste one message each → `reopen.sh done`. The scripts do not check that a card exists, is current, or that a seat came back.
+(convention) `reopen.sh arm` → each seat finishes its row, writes and saves its card and posts `banked for reopen` → `reopen.sh build` writes the paste sheet → you check the cards, open new sessions and paste one message each → `reopen.sh done`. `build` checks that every seat banked and has a current card; `done` checks that every seat posted `reopened`. Neither reads what a card says.
 
 ## Not covered in v0.1
 

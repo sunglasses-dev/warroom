@@ -559,6 +559,33 @@ case "$bn" in *'sp\ dir/bin/waiter.sh'*) q1=1 ;; *) q1=0 ;; esac
 case "$cd_" in *'sp\ dir/bin/waiter.sh'*) q2=1 ;; *) q2=0 ;; esac
 [ "$q1$q2" = 11 ] && ok "banner and reopen card print a quoted waiter command for a path with a space" || bad "quoting: banner $q1, card $q2"
 
+# 32b. reopen done needs every seat back, or is labeled forced and incomplete; a ledger or board line that cannot be written keeps the reopen open
+LG="$WARROOM_DIR/REOPEN_LEDGER.md"; : > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested" "$LG"
+"$B/reopen.sh" arm >/dev/null
+"$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
+[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && [ ! -e "$LG" ] && ! grep -q 'REOPEN DONE' "$BF" && ok "reopen done refuses while no seat has posted reopened" || bad "reopen done with nobody back: rc $rc"
+"$B/board.sh" post BOSS "reopened" >/dev/null; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
+[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && ! grep -q 'REOPEN DONE' "$BF" && ok "reopen done refuses while one seat is still missing" || bad "reopen done with W1 missing: rc $rc"
+"$B/reopen.sh" "done" --force >/dev/null 2>&1; rc=$?
+[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && grep -q 'INCOMPLETE (forced), not back: W1' "$LG" && grep -q 'REOPEN DONE .* INCOMPLETE (forced; not back: W1)' "$BF" && ok "reopen done --force closes it, labeled INCOMPLETE with the missing seat" || bad "reopen done --force: rc $rc"
+"$B/reopen.sh" arm >/dev/null; sleep 1; for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
+"$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
+[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -c 'INCOMPLETE' "$LG")" = 1 ] && tail -1 "$BF" | grep -q 'REOPEN DONE R-[0-9-]*: ledger' && ok "reopen done with every seat back writes a plain ledger row and end line" || bad "reopen done with all back: rc $rc"
+"$B/reopen.sh" arm >/dev/null; sleep 1; for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
+printf '# Reopen ledger\n| when | id | seats back |\n|---|---|---|\n' > "$LG"   # a fresh ledger: ids repeat within one minute, a row with this id would mean "already recorded"
+chmod 444 "$LG"; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?; chmod 644 "$LG"
+[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && ! tail -1 "$BF" | grep -q 'REOPEN DONE' && ok "reopen done: a ledger that cannot be written exits 1, keeps the marker, posts no end line" || bad "reopen done with a read-only ledger: rc $rc"
+chmod 444 "$BF"; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?; chmod 644 "$BF"
+[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && ok "reopen done: an end line that cannot be posted exits 1 and keeps the marker" || bad "reopen done with a read-only board: rc $rc"
+"$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
+[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -c '^| 20' "$LG")" = 1 ] && ok "reopen done: running it again after the fault closes it" || bad "reopen done rerun: rc $rc"
+# generated commands are quoted for a path with a space: the reopen request line and the board-tail hook
+rm -f "$WARROOM_DIR/.reopen-requested"; : > "$BF"; bash "$T/sp dir/bin/reopen.sh" arm >/dev/null 2>&1
+grep -q 'bash [^ ]*sp\\ dir/bin/reopen.sh card SEAT' "$BF" && ok "the reopen request prints a quoted reopen.sh command for a path with a space" || bad "reopen arm command not quoted: $(head -c 300 "$BF")"
+rm -f "$WARROOM_DIR/.reopen-requested"; printf 'sid-tail\tW1\n' > "$WARROOM_DIR/seats.tsv"; rm -f "$WARROOM_DIR"/.anchor-*; printf '[00:00 · BOSS] @W1 ACTION: x\n' > "$BF"
+bt=$(printf '{"session_id": "sid-tail"}' | bash "$T/sp dir/hooks/board-tail.sh" 2>&1)
+case "$bt" in *'sp\ dir/bin/board.sh tail W1'*) ok "the board-tail hook prints a quoted board.sh command for a path with a space" ;; *) bad "board-tail command not quoted: $bt" ;; esac
+
 # 33. a missing board is created with >> (never truncates); an uncreatable one is an error, not silence
 # Only the creation step is raced here (scripts source _common.sh, then append): going through board.sh post would also
 # race the board lock, and that lock starves under 8-way contention on Ubuntu CI ("could not lock the board"); that is a separate lock problem, not board creation.
