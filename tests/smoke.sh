@@ -315,15 +315,18 @@ PY
 }
 BD="$("$B/board.sh" path)"
 # runw RESP... -- [pr-watch args]: serve the responses in order, run pr-watch, leave the new board lines in $NEW and rc in $rc
+# The wait is RUNW_TIMEOUT whole seconds (default 3). pr-watch.sh sets its deadline from a whole-second clock read, so a
+# timeout of 1 can end the run when the first look merely crosses a second boundary, before the second look is made;
+# cases that need a second look (pending, then something else) therefore keep the default, and stops() sets 1.
 runw() { rm -f "$SD"/resp.* "$SD/count" "$SD/calls.log"; i=1
   while [ "${1:-}" != "--" ]; do printf '%s\n' "$1" > "$SD/resp.$i"; i=$((i+1)); shift; done; shift
-  n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 1 "$@" >/dev/null 2>&1; rc=$?
+  n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout "${RUNW_TIMEOUT:-3}" "$@" >/dev/null 2>&1; rc=$?
   NEW=$(tail -n +$((n0+1)) "$BD"); touch "$SD/calls.log"
   [ -z "$(grep -v '^pr view ' "$SD/calls.log")" ] || NOMUT=bad; }
 NOMUT=ok
 G=$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS:ci)
 stops() { # stops "name" RESP... -- args: the run must end with exit 1, one WATCH FAIL line and no WATCH GREEN
-  nm=$1; shift; runw "$@"
+  nm=$1; shift; RUNW_TIMEOUT=1 runw "$@"
   if [ $rc = 1 ] && echo "$NEW" | grep -q 'WATCH FAIL' && ! echo "$NEW" | grep -q 'WATCH GREEN'; then ok "pr-watch stops: $nm"; else bad "pr-watch did not stop: $nm (rc $rc: $NEW)"; fi; }
 # green: exit 0, exactly one WATCH GREEN line, no WATCH FAIL; a check named PASS or guarantee must not trip the wording test
 runw "$(mkr OPEN "$SHA" o/r main run:PASS:COMPLETED:SUCCESS:ci run:guarantee:COMPLETED:NEUTRAL ctx:legacy:SUCCESS)" -- --require PASS
@@ -356,8 +359,9 @@ stops "the checks list is null" "$(mkr OPEN "$SHA" o/r main ROWS=null)" --
 stops "a finished check has no result" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:)" --
 stops "a check stays pending until the timeout" "$(mkr OPEN "$SHA" o/r main run:build:IN_PROGRESS:)" --
 # gh failing on the second call after a pending first one: no green, and the receipt marks the current fields unavailable
+# (3 s, not more: the stub repeats the pending response after look 4, so a longer wait could end on a pending look; with 3 the run ends on look 3 or 4, both failed)
 rm -f "$SD"/resp.* "$SD/count"; mkr OPEN "$SHA" o/r main run:early:IN_PROGRESS: > "$SD/resp.1"; : > "$SD/resp.fail.2"; : > "$SD/resp.fail.3"; : > "$SD/resp.fail.4"
-n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 2 >/dev/null 2>&1; rc=$?
+n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 3 >/dev/null 2>&1; rc=$?
 NEW=$(tail -n +$((n0+1)) "$BD"); REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
 [ $rc = 1 ] && ! echo "$NEW" | grep -q 'WATCH GREEN' && grep -q 'current fields: unavailable' "$REC" && grep -q 'earlier evidence, observed at .*, not current' "$REC" \
   && ok "pr-watch: after a gh failure the receipt marks current fields unavailable and dates the earlier evidence" || bad "pr-watch gh-failure receipt (rc $rc)"
