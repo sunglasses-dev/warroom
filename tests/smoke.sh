@@ -5,6 +5,7 @@
 #   3. a registered job that dies wakes its owner once, and its row is dropped, also when several seats check at once
 #   4. the idle guard names a silent seat once per silence, not once per prompt
 #   5. install.sh refuses a settings file that is not valid JSON and leaves it unchanged
+#   6. a reopen request wakes the other seats; reopen.sh status exits 0 while they bank
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -47,6 +48,14 @@ n=$(grep -c "GUARD\] @W1 ACTION" "$("$B/board.sh" path)")
 mkdir -p "$T/cfg" "$T/home"; printf '{"model": "x",}\n' > "$T/cfg/settings.json"; cp "$T/cfg/settings.json" "$T/orig"
 HOME="$T/home" CLAUDE_CONFIG_DIR="$T/cfg" bash "$ROOT/install.sh" --dir "$T/home/run" >/dev/null 2>&1; rc=$?
 [ $rc != 0 ] && cmp -s "$T/orig" "$T/cfg/settings.json" && ok "install refuses invalid settings, file unchanged" || bad "install on invalid settings: rc $rc"
+
+# 6. a reopen request wakes the other seats, and status exits 0 while seats are still banking
+: > "$("$B/board.sh" path)"; rm -f "$WARROOM_DIR"/.fires-* "$WARROOM_DIR/.reopen-requested"
+"$B/waiter.sh" W1 sid-w1r > "$T/w1r.out" 2>/dev/null & WP=$!; sleep 2
+"$B/reopen.sh" arm >/dev/null
+if wait_exit $WP 10 && grep -q "REOPEN REQUESTED" "$T/w1r.out"; then ok "reopen request wakes the other seats"; else bad "reopen request did not wake W1"; fi
+"$B/reopen.sh" status >/dev/null; rc=$?
+[ $rc = 0 ] && ok "reopen status exits 0" || bad "reopen status exited $rc"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail

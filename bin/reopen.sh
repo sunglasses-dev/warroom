@@ -20,13 +20,13 @@ case "${1:-status}" in
   arm)
     if [ -f "$M" ]; then echo "already armed: $(stamp)"; exit 0; fi
     S="R-$(date +%Y%m%d-%H%M)"; printf '%s\n%s\n' "$S" "$(date '+%Y-%m-%d %H:%M')" > "$M"
-    "$HERE/board.sh" post "$BOSS_SEAT" "REOPEN REQUESTED $S. Every seat: finish the row you are on, start no new row, write your card (bash $HERE/reopen.sh card SEAT), check that every job you started survives the window closing (its parent pid is 1) or is listed on your card, then post: banked for reopen."
+    "$HERE/board.sh" post "$BOSS_SEAT" "@ALL ACTION: REOPEN REQUESTED $S. Every seat: finish the row you are on, start no new row, write your card (bash $HERE/reopen.sh card SEAT), check that every job you started survives the window closing (its parent pid is 1) or is listed on your card, then post: banked for reopen."
     echo "armed $S" ;;
   status)
     if [ ! -f "$M" ]; then echo "not armed"; exit 0; fi
     b=$(seats_with "banked for reopen" | tr '\n' ' '); n=$(seats_with "banked for reopen" | wc -l | tr -d ' ')
     set -- $SEATS; echo "armed $(stamp) since $(sed -n 2p "$M") · banked $n/$#: $b"
-    r=$(seats_with "reopened" | tr '\n' ' '); [ -n "$r" ] && echo "reopened: $r" ;;
+    r=$(seats_with "reopened" | tr '\n' ' '); if [ -n "$r" ]; then echo "reopened: $r"; fi ;;
   card)
     s=${2:?usage: reopen.sh card SEAT}; wr_seat_ok "$s" || { echo "unknown seat '$s' (seats: $SEATS)" >&2; exit 2; }
     cat <<EOT
