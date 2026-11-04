@@ -194,7 +194,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
 
 1. **It only reads.** The only GitHub call it makes is `gh pr view` (repo, state, head, base, checks). It never calls `gh pr merge`, `gh api` with a method, or any other write. It cannot merge, approve, enqueue or enable auto-merge.
 2. **One look per poll.** Each look is one `gh pr view` response, and that response is the unit of observation. The tool records when the response arrived and reports "the returned PR data showed …". It does not claim the response is one atomic moment on the server (the old `merge-daemon.sh:5` claim is not carried over). The "second confirming look" is removed: it was an observation dressed as a gate (r3d2 FIX 6).
-3. **Green rule (unchanged).** A check counts as green when it is SUCCESS, NEUTRAL or SKIPPED. A finished check with any other result is red. **Every** row of the response is judged, required or not, and rows are never merged into a map keyed by name: if two rows share a name and either one is red or pending, that name is red or pending. Legacy status contexts follow the same rule on their state. A missing or null field makes the look not green. Every `--require` name must appear and be green. Zero checks counts as pending, so a PR with no checks times out and is never reported green.
+3. **Green rule (unchanged).** A check counts as green when it is SUCCESS, NEUTRAL or SKIPPED. A finished check with any other result is red. **Every** row of the response is judged, required or not, and rows are never merged into a map keyed by name: if two rows share a name and either one is red or pending, that name is red or pending. A legacy status context is green only on SUCCESS (NEUTRAL and SKIPPED apply to check runs only); PENDING and EXPECTED keep waiting; any other state is red. A check row that lacks a field the verdict needs (its name, status, conclusion or state) makes that look unreadable: the look is not green and the watch keeps polling until the timeout; a missing workflow name, base branch or repository only reads `not reported` in the receipt. Every `--require` name must appear and be green; names are compared exactly as GitHub returned them (only the receipt's display text has control characters replaced). Zero checks counts as pending, so a PR with no checks times out and is never reported green.
 4. **Stops when:**
    - the head is not `--head`;
    - a check is red;
@@ -212,7 +212,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
    - the time the response arrived;
    - each check's name, result and workflow name as reported, with `not reported` where the response has none (legacy status contexts often have none). Name matching does not authenticate which provider ran a check;
    - the required names;
-   - all of these taken from the one response that produced the result, never mixed from earlier polls;
+   - the checks, the head, the base branch and the repository taken from the one response that produced the result, never mixed from earlier polls. The pinned head and the required names are the inputs the caller gave, and the receipt's `observed at` time is the local clock when that response arrived;
    - the sentence: "The returned PR data showed the checks below at the time above. This tool did not merge or modify the PR. Whether a merge can skip these checks is decided by the branch protection on the base branch, which this tool does not read."
 7. **Exit codes:** 0 = green seen, 1 = stopped or timed out, 2 = usage error. A receipt or board line that cannot be written makes the run exit 1, as before.
 
@@ -227,7 +227,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
 | # | invariant | why it holds |
 |---|---|---|
 | W1 | the tool makes no write to GitHub | the only `gh` subcommand in the script is `pr view`; a smoke grep and a gh stub that fails on any other subcommand both check this |
-| W2 | `WATCH GREEN` is posted only after one response that showed: the PR open, the head equal to `--head`, every check row green, every required name present, and at least one check | `judge` evaluates every row (no name-keyed map) and returns ready only in that case. Every other path ends in `WATCH FAIL` or keeps waiting |
+| W2 | `WATCH GREEN` is posted only after one response that showed: the PR open, the head equal to `--head`, every check row green, every required name present (compared exactly), and at least one check | `judge` evaluates every row (no name-keyed map) and returns ready only in that case. Every other path ends in `WATCH FAIL` or keeps waiting |
 | W3 | no output claims that this tool merged anything, that a merge is safe, or that the result is a gate (a report that a PR was merged outside this tool is allowed) | the help text, receipt and board line come from fixed templates. The test checks the template text with check names and other response data replaced by placeholders, so a check named `PASS` or `guarantee` cannot fail it. The negative phrases "not a gate", "not a guarantee" and "did not merge" are allowed (r3d2 FIX 6) |
 
 ### Acceptance tests for Part B (gh stubbed, no network)
