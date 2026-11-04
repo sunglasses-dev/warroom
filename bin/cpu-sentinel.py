@@ -61,6 +61,8 @@ def load_config():
         k, v = m.groups()
         if k not in KEYS:
             die(f'warroom.env line {n} ({path}): unknown key {k} (known: {" ".join(KEYS)})')
+        if k in out:
+            die(f'warroom.env line {n} ({path}): {k} is set twice; keep one line')
         if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'':
             v = v[1:-1]
         v = check_value(v)

@@ -16,6 +16,8 @@
 #  14-16. warroom.env is data: command text refused, the current folder ignored, shell and cpu-sentinel.py agree
 #  17-20. install.sh: refuses command text in --dir, survives an interrupted write, re-points a moved clone, keeps config
 #  21. every hook with a bad warroom.env exits 1 (shown, prompt goes through), never 2 (Claude Code blocks the prompt)
+#  22-26. install.sh changes only entries it wrote (manifest), keeps matcher scopes, validates an existing config;
+#         a key set twice is refused by both readers; two installers at once give one result
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -203,14 +205,16 @@ cp "$T/i11/cfg/settings.json" "$T/i11/orig"
 [ $rc != 0 ] && cmp -s "$T/i11/orig" "$T/i11/cfg/settings.json" && ok "interrupted settings write leaves the file intact, install fails" \
   || bad "interrupted write: rc $rc, file $(cmp -s "$T/i11/orig" "$T/i11/cfg/settings.json" && echo same || echo CHANGED)"
 
-# 19. reinstall: a moved clone's entries are pointed here, never doubled; a second run changes nothing
-mkdir -p "$T/i12/cfg" "$T/i12/home"
+# 19. reinstall: an entry this installer wrote (listed in its manifest) from a clone that has moved is pointed here,
+#     never doubled, and a second run changes nothing
+mkdir -p "$T/i12/cfg" "$T/i12/home/.warroom"
 printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash /gone/clone/hooks/board-tail.sh"}]}]}}\n' > "$T/i12/cfg/settings.json"
+python3 -c 'import json,os,sys; json.dump({"version": 1, "settings": {os.path.realpath(sys.argv[1]): [{"event": "UserPromptSubmit", "matcher": None, "command": "bash /gone/clone/hooks/board-tail.sh", "script": "board-tail.sh"}]}}, open(sys.argv[2], "w"))' "$T/i12/cfg/settings.json" "$T/i12/home/.warroom/installed-hooks.json"
 env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" --dir "$T/i12/run" >/dev/null 2>&1
 env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" >"$T/i12/out2" 2>&1
 n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["hooks"]; print(sum(len(g["hooks"]) for e in d.values() for g in e), sum("/gone/" in h["command"] for e in d.values() for g in e for h in g["hooks"]))' "$T/i12/cfg/settings.json")
 nb=0; for f in "$T"/i12/cfg/settings.json.warroom-bak-*; do [ -e "$f" ] && nb=$((nb + 1)); done
-[ "$n" = "4 0" ] && [ "$nb" = 1 ] && grep -q "nothing to change" "$T/i12/out2" && ok "moved clone re-pointed, second run changes nothing" || bad "reinstall: entries/old '$n', backups $nb"
+[ "$n" = "4 0" ] && [ "$nb" = 1 ] && grep -q "nothing to change" "$T/i12/out2" && ok "moved clone (in the manifest) re-pointed, second run changes nothing" || bad "reinstall: entries/old '$n', backups $nb"
 
 # 20. reinstall with other seats than the existing config is refused, not silently ignored
 env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" --seats "X1 X2" >/dev/null 2>&1; rc=$?
@@ -221,6 +225,37 @@ hr=""; for h in board-guard board-tail waiter-check; do
   printf '{"session_id": "sid-h21"}' | WARROOM_ENV="$T/bad.env" bash "$ROOT/hooks/$h.sh" >/dev/null 2>&1; hr="$hr $h=$?"
 done
 [ "$hr" = " board-guard=1 board-tail=1 waiter-check=1" ] && [ ! -e "$T/m-env" ] && ok "hooks exit 1, not 2, on a bad warroom.env" || bad "hook exit codes on a bad config:$hr"
+
+# 22. a hook entry the installer did not write is left alone, even when its file name matches and its path is gone
+mkdir -p "$T/i22/cfg" "$T/i22/home"
+printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash /missing/other-tool/hooks/board-tail.sh"}]}]}}\n' > "$T/i22/cfg/settings.json"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i22/home" CLAUDE_CONFIG_DIR="$T/i22/cfg" bash "$ROOT/install.sh" --dir "$T/i22/run" >"$T/i22/out" 2>&1; rc=$?
+n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["hooks"]; print(sum("/missing/other-tool/" in h["command"] for e in d.values() for g in e for h in g["hooks"]), sum(len(g["hooks"]) for e in d.values() for g in e))' "$T/i22/cfg/settings.json")
+[ $rc = 0 ] && [ "$n" = "1 5" ] && grep -q "left alone" "$T/i22/out" && ok "an entry the installer did not write is kept as it was" || bad "foreign hook: rc $rc, kept/total '$n'"
+
+# 23. our own entry under two matcher scopes (startup, resume) keeps both scopes
+mkdir -p "$T/i23/cfg" "$T/i23/home"
+python3 -c 'import json,shlex,sys; c="bash "+shlex.quote(sys.argv[2]+"/hooks/waiter-check.sh"); json.dump({"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": c}]}, {"matcher": "resume", "hooks": [{"type": "command", "command": c}]}]}}, open(sys.argv[1], "w"))' "$T/i23/cfg/settings.json" "$ROOT"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i23/home" CLAUDE_CONFIG_DIR="$T/i23/cfg" bash "$ROOT/install.sh" --dir "$T/i23/run" >/dev/null 2>&1; rc=$?
+m=$(python3 -c 'import json,sys; print(" ".join(sorted(g.get("matcher","-") for g in json.load(open(sys.argv[1]))["hooks"]["SessionStart"])))' "$T/i23/cfg/settings.json")
+[ $rc = 0 ] && [ "$m" = "resume startup" ] && ok "two matcher scopes of one entry are both kept" || bad "matcher scopes after install: rc $rc, '$m'"
+
+# 24. an existing warroom.env whose seats break the rules stops the install before anything is written
+mkdir -p "$T/i24/cfg" "$T/i24/home/.warroom"; printf 'SEATS="ALL"\n' > "$T/i24/home/.warroom/warroom.env"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i24/home" CLAUDE_CONFIG_DIR="$T/i24/cfg" bash "$ROOT/install.sh" >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && [ ! -e "$T/i24/cfg/settings.json" ] && [ ! -e "$T/i24/home/warroom-run" ] && ok "install refuses an existing config with reserved seats" || bad "existing SEATS=ALL: rc $rc"
+
+# 25. a key set twice in warroom.env is refused by the shell scripts and by cpu-sentinel.py alike
+printf 'WARROOM_DIR="%s"\nWARROOM_DIR="%s"\n' "$T/dup-first" "$T/dup-last" > "$T/dup.env"
+env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" bash -c '. "$1/bin/_common.sh"' _ "$ROOT" >/dev/null 2>&1; r1=$?
+env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" python3 "$B/cpu-sentinel.py" --config >/dev/null 2>&1; r2=$?
+[ $r1 != 0 ] && [ $r2 != 0 ] && [ ! -e "$T/dup-first" ] && [ ! -e "$T/dup-last" ] && ok "a key set twice is refused by both readers" || bad "duplicate key: shell rc $r1, sentinel rc $r2"
+
+# 26. two installers at the same moment: both finish, the settings hold each entry once and the manifest lists them
+mkdir -p "$T/i26/cfg" "$T/i26/home"; printf '{"model": "x"}\n' > "$T/i26/cfg/settings.json"
+for i in 1 2; do env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i26/home" CLAUDE_CONFIG_DIR="$T/i26/cfg" bash "$ROOT/install.sh" --dir "$T/i26/run" >"$T/i26/o$i" 2>&1 & done; wait
+n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2])); print(d["model"], sum(len(g["hooks"]) for e in d["hooks"].values() for g in e), sum(len(v) for v in m["settings"].values()))' "$T/i26/cfg/settings.json" "$T/i26/home/.warroom/installed-hooks.json" 2>/dev/null)
+[ "$n" = "x 4 4" ] && ok "two installers at once: one result, manifest matches" || bad "concurrent install: '$n' ($(cat "$T/i26/o1" "$T/i26/o2" | grep -i -m1 -E 'could not|changed|another'))"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
