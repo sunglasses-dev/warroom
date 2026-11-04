@@ -622,6 +622,9 @@ if [ "$(id -u)" != 0 ]; then
 fi
 : > "$LK/tree/pids.tsv"; bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r3=$?
 [ $r3 = 1 ] && ok "leak-check: a run-state file inside the tree is a hit" || bad "leak-check on a tree holding pids.tsv: rc $r3"
+rm -f "$LK/tree/pids.tsv"; : > "$LK/tree/board.md.flock"; bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r4=$?
+[ $r4 = 1 ] && ok "leak-check: a lock sidecar (board.md.flock) inside the tree is a hit" || bad "leak-check on a tree holding board.md.flock: rc $r4"
+git -C "$ROOT" check-ignore -q board.md.flock && ok "a lock sidecar is ignored by git" || bad ".gitignore does not cover *.flock"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
