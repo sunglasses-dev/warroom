@@ -10,13 +10,14 @@ case "${1:-}" in -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 IN=$(cat 2>/dev/null)
 SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)
 [ -n "$SID" ] || exit 0
+WAIT=$(printf '%q' "$(cd "$HERE/../bin" && pwd)/waiter.sh")      # printed commands are shell-quoted: a path may hold spaces
 REG="$W/seats.tsv"; touch "$REG"
 row=$(awk -F'\t' -v s="$SID" '$1==s' "$REG" | tail -1)
 if [ -n "$row" ]; then
   seat=$(printf '%s' "$row" | cut -f2); pid=$(printf '%s' "$row" | cut -f3)
   [ "$seat" = NONE ] && exit 0
   kill -0 "$pid" 2>/dev/null && exit 0
-  echo "[WAITER ENDED] your $seat waiter (pid $pid) fired or died. Act on any '@$seat ACTION' line on the board, then re-arm it now as a background job: bash $HERE/../bin/waiter.sh $seat $SID"
+  echo "[WAITER ENDED] your $seat waiter (pid $pid) fired or died. Act on any '@$seat ACTION' line on the board, then re-arm it now as a background job: bash $WAIT $seat $(printf '%q' "$SID")"
   exit 0
 fi
-echo "[WAITER NOT ARMED] this session has no board trigger, so nothing wakes it when a line says '@<seat> ACTION'. First action, before other work, as a background job: bash $HERE/../bin/waiter.sh <one of: $SEATS> $SID   (or: waiter.sh NONE $SID to opt out)"
+echo "[WAITER NOT ARMED] this session has no board trigger, so nothing wakes it when a line says '@<seat> ACTION'. First action, before other work, as a background job: bash $WAIT <one of: $SEATS> $(printf '%q' "$SID")   (or: waiter.sh NONE $(printf '%q' "$SID") to opt out)"

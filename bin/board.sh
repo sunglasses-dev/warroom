@@ -29,7 +29,11 @@ EOT
     wr_lock "$a" || { echo "could not lock the anchor for $seat" >&2; exit 1; }     # two tails never write an older line over a newer one
     g=$(wr_generation "$BOARD_FILE"); n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
     last=$(wr_cursor_get "$a" "$BOARD_FILE" 31536000); [ "$last" = none ] && last=0
-    sed -n "$((last+1)),${n}p" "$BOARD_FILE"; wr_cursor_put "$a" "$g" "$n"; wr_unlock "$a" ;;
+    # print what is new and checksum the last line exactly as printed (the anchor remembers where, and what, it read)
+    chunk="$a.chunk.$$"; sed -n "$((last+1)),${n}p" "$BOARD_FILE" > "$chunk"
+    if [ -s "$chunk" ]; then sum=$(tail -n 1 "$chunk" | wr_sum); else sum=$(wr_linesum "$BOARD_FILE" "$n"); fi
+    cat "$chunk"; rm -f "$chunk"
+    wr_cursor_put "$a" "$g" "$n" "$sum"; wr_unlock "$a" ;;
   read) n=${2:-20}; tail -n "$n" "$BOARD_FILE" ;;
   path) echo "$BOARD_FILE" ;;
   -h|--help|help|"") sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
