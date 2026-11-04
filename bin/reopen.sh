@@ -5,7 +5,9 @@
 #   reopen.sh arm              mark a reopen as requested and post the request to the board
 #   reopen.sh status           who has banked, who has reopened
 #   reopen.sh card SEAT        print a card template for SEAT (save it as $WARROOM_DIR/cards/SEAT_REOPEN_<date>.md)
-#   reopen.sh build            write the paste sheet $WARROOM_DIR/REOPEN_MESSAGES_<date>.md (one message per seat)
+#   reopen.sh build [--force]  write the paste sheet $WARROOM_DIR/REOPEN_MESSAGES_<date>.md (one message per seat). It is
+#                              READY only when every seat has banked and has a card written after the request; otherwise
+#                              it refuses, or with --force writes a sheet marked INCOMPLETE DRAFT that says not to close
 #   reopen.sh done             append the ledger row, post the end line, clear the marker
 # A seat "banks" by posting "[HH:MM · SEAT] banked for reopen" after its card is written and its jobs are accounted for.
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"
@@ -20,7 +22,7 @@ case "${1:-status}" in
   arm)
     if [ -f "$M" ]; then echo "already armed: $(stamp)"; exit 0; fi
     S="R-$(date +%Y%m%d-%H%M)"; printf '%s\n%s\n' "$S" "$(date '+%Y-%m-%d %H:%M')" > "$M"
-    "$HERE/board.sh" post "$BOSS_SEAT" "@ALL ACTION: REOPEN REQUESTED $S. Every seat: finish the row you are on, start no new row, write your card (bash $HERE/reopen.sh card SEAT), check that every job you started survives the window closing (its parent pid is 1) or is listed on your card, then post: banked for reopen."
+    "$HERE/board.sh" post "$BOSS_SEAT" "@ALL ACTION: REOPEN REQUESTED $S. Every seat: finish the row you are on, start no new row, write your card (bash $HERE/reopen.sh card SEAT), check that every job you started will outlive the window (verify it; a parent pid of 1 is a hint, not a guarantee) or is listed on your card, then post: banked for reopen."
     echo "armed $S" ;;
   status)
     if [ ! -f "$M" ]; then echo "not armed"; exit 0; fi
@@ -34,27 +36,41 @@ case "${1:-status}" in
 Seat: $s. The session name changes on reopen: list your peers first.
 ## My rows (board truth, verify live)
 - <row> · head/sha <...> · waits on <...> · next step <...>
-## Background jobs I own (parent pid 1 survives a closed window; anything else is re-started from here)
+## Background jobs I own (verified to outlive a closed window, or re-started from here; say how I verified)
 - <pid> <command> · parent <pid> · receipt <path>
 ## Work not saved anywhere else
 - <patch path + checksum, or branch + head>
 ## First actions on reopen
-0. Arm the waiter first: bash $HERE/waiter.sh $s <session id> (background job). Nothing else before that.
+0. Arm the waiter first: bash $(printf '%q' "$HERE/waiter.sh") $s <session id> (background job). Nothing else before that.
 1. Read the board past my bank line; verify every pid and sha above live.
 2. Post "reopened", then continue the row.
 EOT
     mkdir -p "$CARDS"; echo "save it to: $CARDS/${s}_REOPEN_$(date +%Y-%m-%d).md" >&2 ;;
   build)
+    force=0; [ "${2:-}" = "--force" ] && force=1
     s=$(stamp); [ -n "$s" ] || { echo "not armed" >&2; exit 1; }
+    # READY needs, for every seat: it has banked, and a card exists that is newer than the request marker
+    banked=" $(seats_with "banked for reopen" | tr '\n' ' ')"; missing=""
+    for t in $SEATS; do c=$(card_of "$t")
+      case "$banked" in *" $t "*) b=1 ;; *) b=0 ;; esac
+      if [ "$b" = 0 ] || [ -z "$c" ] || [ ! "$c" -nt "$M" ]; then missing="$missing $t"; fi
+    done
+    if [ -n "$missing" ] && [ $force = 0 ]; then
+      echo "not ready: no banked line or no current card for:$missing (cards newer than the request in $CARDS). Closing windows now would lose work. Fix that, or use: reopen.sh build --force (writes an INCOMPLETE DRAFT)" >&2; exit 1
+    fi
     out="$W/REOPEN_MESSAGES_$(date +%Y-%m-%d).md"
     { echo "# Reopen messages — $(date +%Y-%m-%d) ($s)"; echo
-      echo "Close every window. Open one new session per seat and paste its message."; echo
+      if [ -n "$missing" ]; then echo "INCOMPLETE DRAFT: do NOT close any window yet. No banked line or no current card for:$missing."
+      else echo "Close every window. Open one new session per seat and paste its message."; fi
+      echo
       for t in $SEATS; do c=$(card_of "$t")
         echo "## $t"; echo '```'
-        echo "You are $t. First arm your waiter (bash $HERE/waiter.sh $t <session id>, as a background job). Then read ${c:-<no card found>} and the board past your bank line. Verify every pid and sha on the card live, post: reopened, and continue your row."
+        case "$missing" in *" $t"*) cardtxt="<no current card for $t: write it first>" ;; *) cardtxt=$c ;; esac
+        echo "You are $t. First arm your waiter (bash $(printf '%q' "$HERE/waiter.sh") $t <session id>, as a background job). Then read $cardtxt and the board past your bank line. Verify every pid and sha on the card live, post: reopened, and continue your row."
         echo '```'; echo
       done; } > "$out"
-    "$HERE/board.sh" post "$BOSS_SEAT" "REOPEN READY $s: sheet $out"
+    if [ -n "$missing" ]; then "$HERE/board.sh" post "$BOSS_SEAT" "REOPEN DRAFT $s (not ready, missing:$missing): sheet $out"
+    else "$HERE/board.sh" post "$BOSS_SEAT" "REOPEN READY $s: sheet $out"; fi
     echo "$out" ;;
   done)
     s=$(stamp); [ -n "$s" ] || { echo "not armed"; exit 0; }
@@ -63,5 +79,5 @@ EOT
     "$HERE/board.sh" post "$BOSS_SEAT" "REOPEN DONE $s: ledger $LEDGER"
     rm -f "$M"; echo "done" ;;
   -h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) echo "usage: reopen.sh arm|status|card SEAT|build|done|--help" >&2; exit 2 ;;
+  *) echo "usage: reopen.sh arm|status|card SEAT|build [--force]|done|--help" >&2; exit 2 ;;
 esac
