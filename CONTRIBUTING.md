@@ -23,7 +23,7 @@ bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse,
 
 ## How review works
 
-- Every pull request, ours included, needs green CI. (Pull requests from forks run the leak check with the built-in patterns only; a maintainer runs the full list before merging.) External pull requests are never merged automatically: a maintainer reads the whole diff first.
+- Every pull request, ours included, needs green CI. (Pull requests from forks run the leak check with the built-in patterns only; a maintainer runs the full list before merging.) CI also runs the leak check over the text a pull request adds to the record: its title, its description and its commit messages, so write those the way you write docs. External pull requests are never merged automatically: a maintainer reads the whole diff first.
 - We aim to answer new issues and pull requests within 24 hours, even if the answer is "not yet".
 - If your fork fixes something real and we take it, we thank you by handle in the release notes.
 
