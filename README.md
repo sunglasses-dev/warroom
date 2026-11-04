@@ -81,7 +81,7 @@ A synthetic board (`examples/4-seat/sample-board.md`):
 [09:31 · W1] R1 done. Flag is --export. 1 file, +14/-2. Receipt receipts/r1.md
 @W2 ACTION: R2 can start, flag name above.
 [10:13 · MANAGER] @BOSS ACTION: R1 and R2 are ready for your read. PR 12.
-[10:34 · BOSS] WATCH GREEN PR 12 at 1a2b3c4d5e6f: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)
+[10:34 · BOSS] WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)
 ```
 
 A waiter reads only the first line of a post, right after its stamp. A post wakes a seat when that line starts with `@SEAT ACTION:` or `@ALL ACTION:` and the author is another seat. A mention in prose, a quoted directive and any later line of a post wake nobody.
