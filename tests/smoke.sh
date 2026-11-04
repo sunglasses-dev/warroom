@@ -20,7 +20,8 @@
 #  21. every hook with a bad warroom.env exits 1 (shown, prompt goes through), never 2 (Claude Code blocks the prompt)
 #  22-26. install.sh --check exit codes 0/1/2 with reasons, an exact-text inventory (counts, matchers, skipped, other
 #         spellings), an existing config is validated; a key set twice is refused by both readers; --uninstall,
-#         --check and --dry-run change no file; no write target may be the settings file (26b)
+#         --check and --dry-run change no file; no write target may be the settings file (26b); the block ends the
+#         output, a dry run says nothing was written, uninstall leaves no empty ~/.warroom (26c)
 #  27-32. second review (waiter, cursor, guard, reopen): shared opt-out rows, one wake when a waiter is replaced, a board refilled in
 #         place, the guard's job identity and its mark across board generations, reopen READY only with cards, quoted commands
 #  33. a missing board is created without truncating (parallel first posts all survive); an uncreatable board is an error
@@ -539,7 +540,7 @@ for d, ds, fs in sorted(os.walk(sys.argv[1])):
 snap "$T/i26" > "$T/s26a"
 env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i26/home" CLAUDE_CONFIG_DIR="$T/i26/cfg" bash "$ROOT/install.sh" --uninstall >"$T/i26u" 2>&1; urc=$?
 snap "$T/i26" > "$T/s26b"
-rmline="   rm -r -- $(printf '%q' "$T/i26/home/.warroom/warroom.env") $(printf '%q' "$T/i26/run")"
+rmline="   rm -r -- $(printf '%q' "$T/i26/home/.warroom") $(printf '%q' "$T/i26/run")"
 [ $urc = 0 ] && cmp -s "$T/s26a" "$T/s26b" && blk "$T/i26u" | cmp -s - "$T/i26/real.block" && grep -qxF "$rmline" "$T/i26u" && [ "$(grep -c '^   this clone  ' "$T/i26u")" = 4 ] \
   && grep -qF "$T/i26/cfg/settings.json" "$T/i26u" && grep -q 'deletes the board, its whole history' "$T/i26u" \
   && ok "--uninstall lists four entries, prints the block and the cleanup command, changes no file" || bad "--uninstall: rc $urc, files $(cmp -s "$T/s26a" "$T/s26b" && echo same || echo CHANGED)"
@@ -551,6 +552,29 @@ done
 snap "$T/i26d" > "$T/s26d"
 [ "$r" = " --check=2 --uninstall=0 --dry-run=0" ] && cmp -s "$T/s26c" "$T/s26d" && blk "$T/i26d.out" | cmp -s - "$T/i26/real.block" && [ -s "$T/i26/real.block" ] \
   && ok "--check, --uninstall, --dry-run create nothing; --dry-run prints the real run's block" || bad "fresh-home modes:$r, files $(cmp -s "$T/s26c" "$T/s26d" && echo same || echo CHANGED)"
+
+# 26c. output an outside tester can follow: the hook block ends the output (after the seat messages), a dry run does not
+#      say "Done" or offer an undo, and --uninstall lists the default ~/.warroom folder itself when it holds only
+#      warroom.env and its backups (no empty folder left), but only the file when the folder holds anything else or
+#      WARROOM_ENV names the file
+e1=$(grep -n -- '--- end hook block ---' "$T/i26/real" | tail -1 | cut -d: -f1); m1=$(grep -n '^3\. first message' "$T/i26/real" | cut -d: -f1)
+b1=$(grep -n -- '--- begin hook block ---' "$T/i26/real" | tail -1 | cut -d: -f1); tot=$(wc -l < "$T/i26/real" | tr -d ' ')
+[ -n "$e1" ] && [ -n "$m1" ] && [ "$m1" -lt "$b1" ] && [ $((tot - e1)) = 2 ] && tail -1 "$T/i26/real" | grep -q '^Done\. ' \
+  && ok "install: the hook block comes after the seat messages, 2 lines from the end" || bad "block position: msgs $m1 begin $b1 end $e1 of $tot"
+tail -1 "$T/i26d.out" | grep -qx 'Dry run: nothing was written. Run it again without --dry-run to write steps 1 and 2.' \
+  && ! grep -qE '^Done\.|To undo' "$T/i26d.out" && ok "--dry-run ends with 'nothing was written', no Done or undo line" || bad "dry-run footer: $(tail -1 "$T/i26d.out")"
+c=$T/i26c; mkdir -p "$c/cfg" "$c/h/.warroom" "$c/run"; printf 'SEATS="BOSS W1"\nWARROOM_DIR="%s"\nBOARD="board.md"\n' "$c/run" > "$c/h/.warroom/warroom.env"
+cp "$c/h/.warroom/warroom.env" "$c/h/.warroom/warroom.env.bak-20261104-120000-1"; r=""
+u26() { env -u SEATS -u WARROOM_DIR "$@" HOME="$c/h" CLAUDE_CONFIG_DIR="$c/cfg" bash "$ROOT/install.sh" --uninstall 2>&1 | grep '^   rm -r -- '; }
+[ "$(u26 -u WARROOM_ENV)" = "   rm -r -- $(printf '%q' "$c/h/.warroom") $(printf '%q' "$c/run")" ] && r="$r folder"
+echo keep > "$c/h/.warroom/notes.txt"
+[ "$(u26 -u WARROOM_ENV)" = "   rm -r -- $(printf '%q' "$c/h/.warroom/warroom.env") $(printf '%q' "$c/run")" ] && r="$r file"
+mv "$c/h/.warroom/notes.txt" "$c/notes.txt"; ln -s "$c/notes.txt" "$c/h/.warroom/warroom.env.bak-link"
+[ "$(u26 -u WARROOM_ENV)" = "   rm -r -- $(printf '%q' "$c/h/.warroom/warroom.env") $(printf '%q' "$c/run")" ] && r="$r link"
+mkdir -p "$c/mine"; cp "$c/h/.warroom/warroom.env" "$c/mine/warroom.env"
+[ "$(u26 WARROOM_ENV="$c/mine/warroom.env")" = "   rm -r -- $(printf '%q' "$c/mine/warroom.env") $(printf '%q' "$c/run")" ] && r="$r custom"
+[ "$r" = " folder file link custom" ] && [ -f "$c/notes.txt" ] && [ -f "$c/h/.warroom/warroom.env" ] \
+  && ok "--uninstall lists ~/.warroom as a folder only when it holds warroom.env and its backups alone" || bad "uninstall cleanup paths:$r"
 
 # 26b. no write target may be the settings file: WARROOM_ENV naming it or a link to it, or a board that links to it,
 #      is refused before any write (settings bytes and time unchanged, a missing one not created); a normal install

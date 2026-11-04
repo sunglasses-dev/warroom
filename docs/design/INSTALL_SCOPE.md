@@ -10,10 +10,12 @@ Four review rounds found the same kind of failure. Whenever `install.sh` decided
 
 1. **Two runtime writes:** `warroom.env`, and the run directory with the board (created if missing; an existing board is left as it is). These are separate writes; if the second fails, the first stays.
 2. **No write target may be the settings file.** Before writing, it resolves every destination (`warroom.env`, its temp and backup names, the run directory, the board) and refuses when one is the settings file or links to it. Without this, `WARROOM_ENV` naming the settings file plus `--replace-config` would overwrite it with config text. It assumes stable paths: it does not defend against a file being swapped while it runs.
-3. **Prints the four hook entries as one JSON block** (one top-level `"hooks"` object), the settings file they belong in, and what to do for the state that file is in now: missing, empty, not valid JSON, no `"hooks"` key, some entries missing, all present. It prints a copy command to run first.
+3. **Prints one first message per seat.**
+4. **Prints the four hook entries as one JSON block, last** (one top-level `"hooks"` object), so the block ends the output: the settings file they belong in, and what to do for the state that file is in now: missing, empty, not valid JSON, no `"hooks"` key, some entries missing, all present. When the file exists, it prints a copy command to run first.
    - Settings file: `$CLAUDE_CONFIG_DIR/settings.json`, or `settings.json` in the `.claude` folder in your home folder.
    - Entries: `SessionStart` runs `waiter-check.sh`; `UserPromptSubmit` runs `waiter-check.sh`, `board-tail.sh` and `board-guard.sh`. Each command is `bash` plus the shell-quoted absolute path in this clone.
-4. **Prints one first message per seat.**
+
+A dry run ends with "Dry run: nothing was written", not with the "Done" and undo lines of a real run.
 
 It reads the settings file to give that advice, and never opens it for writing. There is no manifest, no lock on settings, no settings backup, no adoption of entries and no migration. Files left by the earlier implementation (a manifest next to `warroom.env`, settings backups) are not read, moved or deleted.
 
@@ -33,7 +35,7 @@ An inventory of one file, by exact command text. It does not read other settings
 
 1. What the settings file holds now: this clone's entries and other references, with their locations. The user removes the ones that are this war room's and keeps the groups and hooks around them.
 2. The four commands this clone prints.
-3. A separate, optional cleanup command: `rm -r --` with `warroom.env` and the run directory, shell-quoted. It says first that this deletes the board, its whole history, the state files and any receipts there, and that it should run only after every seat session and background job has stopped.
+3. A separate, optional cleanup command: `rm -r --` with `warroom.env` and the run directory, shell-quoted. When `warroom.env` is in the default `~/.warroom` folder and that folder holds only it and its backups, the folder is listed instead, so no empty folder is left; a `WARROOM_ENV` you chose is listed as that one file. It says first that this deletes the board, its whole history, the state files and any receipts there, and that it should run only after every seat session and background job has stopped.
 
 It deletes nothing itself.
 
@@ -54,11 +56,12 @@ The commands hold the clone's absolute path. After a move, `--check` usually fin
 - **Cleanup is manual.** A moved clone or an uninstall needs entries removed by hand; a familiar script name is not proof of where an entry came from.
 - **Scope:** the hooks apply to every session that reads that settings file.
 
-## Tests (`tests/smoke.sh` sections 5, 18, 19, 22, 23, 26, 26b)
+## Tests (`tests/smoke.sh` sections 5, 18, 19, 22, 23, 26, 26b, 26c)
 
 - The printed block parses as JSON with exactly the four entries, and each command splits back to `bash` and the path, for a clone path with a space and an apostrophe. The settings file stays byte-identical; a missing one is not created.
 - `--check` gives 0 / 1 / 2 with the reason for each case (all found, one missing, invalid JSON, a key twice, wrong `"hooks"` shapes, a missing file), byte-identical every time; counts and matchers, skipped entries, other spellings and `disableAllHooks` are reported.
 - `--uninstall` exits 0, lists four entries, prints the block, the target path and the quoted cleanup command, and changes no file, mtimes included.
 - In a fresh home, `--check`, `--uninstall` and `--dry-run` create nothing; `--dry-run` prints the same non-empty block as a real run.
 - `WARROOM_ENV` naming the settings file, or a link to it, and a board that links to it (also a dangling link) are refused before any write; a normal install keeps an existing board unchanged.
+- The hook block comes after the seat messages and ends the output; a dry run says nothing was written and offers no undo; `--uninstall` lists the default `~/.warroom` folder only when it holds `warroom.env` and its backups alone (another file or a link there, or a `WARROOM_ENV` you chose: the file only).
 - Run against the previous installer, the new tests in sections 5, 18, 19, 22, 23, 26 and 26b fail.
