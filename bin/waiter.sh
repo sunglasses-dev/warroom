@@ -63,7 +63,7 @@ pend=""
 while :; do
   sleep "$POLL"
   mine || replaced
-  "$HERE/pids.sh" check >/dev/null 2>&1 || true
+  "$HERE/pids.sh" check >/dev/null || true      # stdout dropped, stderr kept: a ledger lock failure is shown
   g2=$(wr_generation "$BOARD_FILE"); n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
   # board replaced, shorter, or changed at the line we stopped at: read it from the start
   if [ "$g2" != "$gen" ] || [ "$n" -lt "$base" ] || { [ "$base" -gt 0 ] && [ "$(wr_linesum "$BOARD_FILE" "$base")" != "$lastck" ]; }; then base=0; gen=$g2; fi
@@ -82,7 +82,8 @@ while :; do
     wr_lock "$CUR" || continue
     if ! mine; then wr_unlock "$CUR"; replaced; fi
     if [ -e "$LAST" ] && [ $(( $(date +%s) - $(wr_mtime "$LAST") )) -lt "$GAP" ]; then wr_unlock "$CUR"; continue; fi
-    wr_cursor_put "$CUR" "$gen" "$base" "$lastck"; : > "$LAST"
+    wr_cursor_put "$CUR" "$gen" "$base" "$lastck"; touch "$LAST"   # touch, never ": >": LAST only carries a time, and a
+    # BOARD configured with the same name must not be emptied (the cursor lock covers the cursor and LAST together)
     wr_unlock "$CUR"
     echo "[WAKE -> $SEAT] a board line is addressed to you. Act on it, then re-arm: bash $(printf '%q' "$HERE/waiter.sh") $SEAT $SID (as a background job)."
     printf '%s\n' "$pend"

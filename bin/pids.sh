@@ -29,7 +29,7 @@ case "${1:-}" in
     kill -0 "$p" 2>/dev/null || { echo "pid $p is not alive" >&2; exit 2; }
     s=$(started "$p")
     [ -n "$s" ] || { echo "cannot read the start time of pid $p (ps failed), so a reused pid could not be told apart: not registered" >&2; exit 2; }
-    wr_lock "$P" || exit 1          # drop the old row and add the new one in ONE step
+    wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }          # drop the old row and add the new one in ONE step
     if awk -F'\t' -v l="$l" '$1!=l' "$P" > "$P.tmp.$$" && printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$P.tmp.$$" && mv "$P.tmp.$$" "$P"; then
       wr_unlock "$P"; echo "registered $l $p $o"
     else
@@ -37,7 +37,7 @@ case "${1:-}" in
     fi ;;
   done)
     l=${2:?label}
-    wr_lock "$P" || exit 1
+    wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }
     if awk -F'\t' -v l="$l" '$1!=l' "$P" > "$P.tmp.$$" && mv "$P.tmp.$$" "$P"; then
       wr_unlock "$P"; echo "removed $l"
     else
@@ -48,13 +48,13 @@ case "${1:-}" in
     # Every waiter runs this on every poll, so two seats can check at the same moment. The whole check runs under the
     # ledger lock: only one caller sees a dead row, posts its wake, then drops it.
     keep="$P.tmp.$$"; bad=0
-    wr_lock "$P" || exit 1
+    wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }
     : > "$keep" || bad=1
     while IFS="$TAB" read -r l p o s; do
       [ -n "$l" ] || continue
       if alive "$p" "$s"; then
         printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$keep" || bad=1
-      elif "$HERE/board.sh" post GUARD "@$o ACTION: job '$l' (pid $p) is no longer running. Read its receipt, then continue or restart it." </dev/null >/dev/null 2>&1; then
+      elif wr_run "$HERE/board.sh" post GUARD "@$o ACTION: job '$l' (pid $p) is no longer running. Read its receipt, then continue or restart it." </dev/null >/dev/null; then   # wr_run: the post holds no copy of the ledger lock; its stderr is kept
         :                             # delivered: the row is dropped
       else
         printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$keep" || bad=1     # not delivered: keep it, the next check tries again

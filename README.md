@@ -122,6 +122,7 @@ Optional helpers beside the board: `pids.sh` notices when a registered job's pro
 | a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts and one Python watchdog |
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
 | a way to get more from your plan | it avoids spending model turns on repeatedly checking for work; your plan and its limits still apply |
+| a lock for every writer | the board, the job ledger and the state files are locked only against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked. Give each protected file one name (no symlinked or hard-linked board) and never delete a `.flock` file. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
 | a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. The scripts do not check that a seat acted on a line |
 
 ## FAQ

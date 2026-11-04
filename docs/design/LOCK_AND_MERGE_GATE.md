@@ -19,7 +19,7 @@ Both fixes patched a symptom and moved the race. This doc changes the mechanism 
 
 ### What the lock is for
 
-There is one writer at a time per protected file: the board (`wr_append`), the seat registry (`waiter.sh`), the job ledger (`pids.sh`), a tail anchor (`board.sh tail`) and a guard mark (`board-guard.sh`). The lock is advisory: it only protects writers that use `wr_lock`. Two nestings exist today, and they are the only supported lock order: the ledger lock, then the board lock (`pids.sh check` posts while it holds the ledger), and a guard mark lock, then the board lock (`board-guard.sh` posts while it holds the mark). In both cases the board lock is taken by a separate `board.sh` process, not by the same shell. "One protected file" means one key under *Protection identity* below. Aliases (symlinks and hard links) are refused, not supported.
+There is one writer at a time per protected file: the board (`wr_append`), the seat registry and a seat cursor (`waiter.sh`), the job ledger (`pids.sh`), a tail anchor (`board.sh tail`) and a guard mark (`board-guard.sh`). The lock is advisory: it only protects writers that use `wr_lock`. Three nestings exist today, and they are the only supported lock order: the ledger lock, then the board lock (`pids.sh check` posts while it holds the ledger); a guard mark lock, then the board lock (`board-guard.sh` posts while it holds the mark); and a seat cursor lock, then the seat registry lock (`waiter.sh` arming, both held by the same shell in slots 8 and 9). In the first two the board lock is taken by a separate `board.sh` process, not by the same shell. "One protected file" means one key under *Protection identity* below. Aliases (symlinks and hard links) are refused, not supported.
 
 ### Option M: a directory lock plus a reclaim lock (the shape the ruling asked us to argue)
 
@@ -97,14 +97,16 @@ Today several callers fail silently (r3d FIX 3). The contract is: never write wi
 |---|---|---|
 | `wr_append` (board post) | returns 1 and prints a reason | unchanged |
 | `board.sh tail` anchor | exits 1 and prints a reason | unchanged |
-| `waiter.sh` registry | exits 1 and prints a reason | unchanged |
+| `waiter.sh` cursor, arming | exits 1 and prints a reason | unchanged |
+| `waiter.sh` cursor, delivery (`waiter.sh:82`) | skips this poll silently and tries again on the next | unchanged: the wake is delivered on a later poll; the cursor lock covers the cursor and the wake timestamp `.lastwake-SEAT` together, and the timestamp is updated with `touch`, never truncated |
+| `waiter.sh` registry | exits 1 and prints a reason, after releasing the cursor | unchanged |
 | `waiter.sh` ledger check (`waiter.sh:66`, `pids.sh check >/dev/null 2>&1`) | stderr thrown away | stderr kept through this outer call too, so a ledger lock failure reaches the waiter's own output (r3d2 FIX 3) |
 | `pids.sh add / done / check` | `exit 1`, prints nothing | prints `pids.sh: could not lock the job ledger; nothing changed` and exits 1 |
 | `pids.sh check` nested post (`pids.sh:46`) | stderr thrown away | the post runs through `wr_run`, and its stderr is kept. A row is dropped only when its post succeeded. A failed post, a failed board lock included, keeps the row for the next check, as the code does today |
 | `board-guard.sh` mark | `continue`, prints nothing, exits 0 | prints `board-guard: skipped SEAT (mark busy), will retry on the next prompt` and still exits 0, so a busy lock never blocks the prompt. The nested post (`board-guard.sh:39`) runs through `wr_run` and keeps its stderr. The mark is written only after the post succeeded, as today, so a failed post leaves the mark unchanged and the seat is named again on the next prompt. The hook runs on every prompt. This makes the line visible in the script's output; how the host shows hook stderr is not something this design promises |
 | board bootstrap (`_common.sh:22`) | `[ -e "$BOARD_FILE" ] \|\| : > "$BOARD_FILE"`: an unlocked check, then a truncating create, so a slow starter can empty a board another process has just written | `: >> "$BOARD_FILE"`: creates the file if it is missing and never truncates it (r3d2 FIX 3) |
 
-No caller retries in a loop beyond the `wr_lock` wait.
+No caller retries in a loop beyond the `wr_lock` wait, with one exception: the waiter's delivery (`waiter.sh:82`) skips that poll and tries again on the next one.
 
 "Never write without the lock" means: never change a protected file's **contents** without that file's lock. Three things happen without the lock, and none of them can change contents:
 

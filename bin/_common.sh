@@ -38,34 +38,94 @@ wr_mtime() {
   echo "$_m"
 }
 wr_seat_ok() { case " $SEATS " in *" $1 "*) return 0 ;; esac; return 1; }
-# One writer at a time. mkdir is atomic, and the holder writes its pid into the lock. A lock is taken over only when
-# that pid is gone (or, if the holder died before writing its pid, when the lock is over 10 s old); a live holder is
-# waited for and never evicted, and only the holder can release it. Limits: one machine, a local file system, and a pid
-# that has been reused by another process looks alive.
-wr_reclaim() { # $1 lock directory, $2 the dead owner we saw ("" = no owner written)
-  _d="$1.dead.$$"
-  mv "$1" "$_d" 2>/dev/null || return 0                 # someone else reclaimed it first
-  if [ "$(cat "$_d/owner" 2>/dev/null)" = "$2" ]; then rm -f "$_d/owner"; rmdir "$_d" 2>/dev/null
-  else mv "$_d" "$1" 2>/dev/null; fi                     # it was a new, live lock: put it back
+# --- The writer lock (design: docs/design/LOCK_AND_MERGE_GATE.md, Part A) -------------------------------------------
+# One writer at a time per protected file, for writers that use these functions (the lock is advisory).
+#   wr_lock FILE      take FILE's lock, waiting up to WARROOM_LOCK_WAIT seconds (default 10). 0 = held, 1 = not taken
+#                     (the reason is on stderr), 2 = refused (subshell, alias, already held, nesting limit)
+#   wr_unlock FILE    release FILE's lock if this shell holds it; otherwise do nothing
+#   wr_run CMD ARGS   run CMD with the lock descriptors closed: use it for every script started inside a section
+# How it works: FILE's lock is flock(2) on the sidecar FILE.flock, opened on fd 8 or 9 of this shell and locked by a
+# short python3 helper. The sidecar is never removed or renamed (removing it would let the next writer lock a new file),
+# and nothing ever unlocks it with LOCK_UN. The lock is released when the last copy of the descriptor closes: at
+# wr_unlock, or when the holder exits or is killed. Children inherit a copy, so scripts started inside a section go
+# through wr_run; short foreground commands (mv, sed, awk, cat, date) keep a copy only while the holder waits for them.
+# Residual: if such a command, or the helper itself, is stopped (SIGSTOP, a hung disk) and the holder is killed, the
+# lock stays held until that command ends. Waiters time out with a message; nothing steals the lock.
+# Rules: fds 8 and 9 are reserved for this lock. Two locks at most per shell, never the same FILE twice. Never from a
+# ( ... ), $( ... ) or pipeline subshell: the top level of a script or its functions only. One name per protected file:
+# a FILE that is a symlink, a FILE with hard links, or a sidecar that is a symlink is refused; symlinked parent folders
+# are fine (the key is the physical folder plus the file name), and an absolute BOARD path gets the same checks.
+# Limits: one machine and a local file system (flock over NFS/SMB is not trusted); cooperating writers only (an editor
+# or an "echo >>" that bypasses board.sh is not locked); re-pointing a parent symlink or moving the run folder while
+# writers run is not supported. Upgrading from the old mkdir lock: stop every session, waiter and job that uses this
+# run folder first; a leftover FILE.lock folder is then inert. Never delete a .flock file.
+# Lock order (outer, then inner), the only nestings: job ledger -> board (pids.sh check posts a dead job), guard mark
+# -> board (board-guard.sh posts an idle seat), seat cursor -> seat registry (waiter.sh arming). Nothing takes them in
+# the other order. A caller that cannot lock prints its own line and gives up, except the waiter's delivery, which
+# tries again on its next poll. Why python3 and not flock(1): flock(1) ships with Linux but not with macOS, and the
+# helper must behave the same on both.
+_WR_SLOT8=""; _WR_SLOT9=""
+_wr_path() { # FILE -> _WR_KEY = physical parent folder + base name (no checks)
+  _wr_d=$(cd -P "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1
+  _WR_KEY="$_wr_d/$(basename "$1")"
+}
+_wr_links() { # FILE -> its link count, "" if unreadable (GNU stat first, see wr_mtime)
+  _wr_n=$(stat -c %h "$1" 2>/dev/null) || _wr_n=$(stat -f %l "$1" 2>/dev/null) || _wr_n=""
+  case "$_wr_n" in ''|*[!0-9]*) echo "" ;; *) echo "$_wr_n" ;; esac
+}
+_wr_sub_ok() { # every lock function refuses inside a subshell, before it touches anything
+  [ "${BASH_SUBSHELL:-0}" = 0 ] && return 0
+  echo "lock used from a subshell ($1 $2): lock and unlock at the top level of a script or in its functions" >&2; return 2
 }
 wr_lock() {
-  _k="$1.lock"
-  for _i in $(seq 1 100); do
-    if mkdir "$_k" 2>/dev/null; then printf '%s\n' "$$" > "$_k/owner"; return 0; fi
-    _o=$(cat "$_k/owner" 2>/dev/null)
-    if [ -n "$_o" ]; then
-      kill -0 "$_o" 2>/dev/null || wr_reclaim "$_k" "$_o"
-    elif [ $(( $(date +%s) - $(wr_mtime "$_k") )) -gt 10 ]; then
-      wr_reclaim "$_k" ""
-    fi
-    sleep 0.1
-  done
+  _wr_sub_ok wr_lock "$1" || return 2
+  _wr_path "$1" || { echo "could not open lock file for $1: its folder cannot be resolved" >&2; return 1; }
+  _wr_k=$_WR_KEY
+  if [ -L "$_wr_k" ]; then echo "$1 is a symlink; point the war room at the real path (a protected file has one name)" >&2; return 2; fi
+  if [ -e "$_wr_k" ]; then
+    _wr_c=$(_wr_links "$_wr_k")
+    [ -n "$_wr_c" ] || { echo "could not open lock file for $1: its link count cannot be read" >&2; return 1; }
+    [ "$_wr_c" -le 1 ] || { echo "$1 has $_wr_c hard links; a protected file must have exactly one name" >&2; return 2; }
+  fi
+  if [ -L "$_wr_k.flock" ]; then echo "lock file $_wr_k.flock is a symlink; refusing to lock through it" >&2; return 2; fi
+  if [ "$_WR_SLOT8" = "$_wr_k" ] || [ "$_WR_SLOT9" = "$_wr_k" ]; then echo "already holding the lock for $1" >&2; return 2; fi
+  if [ -z "$_WR_SLOT8" ]; then _wr_fd=8; elif [ -z "$_WR_SLOT9" ]; then _wr_fd=9; else echo "lock nesting limit (2) reached at $1" >&2; return 2; fi
+  # open the sidecar with >> (created if missing, never truncated); the group keeps bash's own error line off stderr
+  if [ "$_wr_fd" = 8 ]; then { exec 8>>"$_wr_k.flock"; } 2>/dev/null; else { exec 9>>"$_wr_k.flock"; } 2>/dev/null; fi || {
+    echo "could not open lock file $_wr_k.flock: $( { : >> "$_wr_k.flock"; } 2>&1 | sed 's/.*: //' | head -1)" >&2; return 1; }
+  _wr_w=${WARROOM_LOCK_WAIT:-10}; case "$_wr_w" in ''|*[!0-9.]*) _wr_w=10 ;; esac
+  _wr_e=$(python3 -I -S -c '
+import errno, fcntl, sys, time
+fd, wait = int(sys.argv[1]), float(sys.argv[2])
+end = time.monotonic() + wait
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); sys.exit(0)
+    except OSError as e:
+        if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            sys.stderr.write("%s\n" % (e.strerror or e)); sys.exit(3)
+    if time.monotonic() >= end: sys.exit(1)
+    time.sleep(0.02)' "$_wr_fd" "$_wr_w" 2>&1 >/dev/null)   # the helper only inherits fd 8/9; its stderr is kept
+  _wr_rc=$?
+  if [ "$_wr_rc" = 0 ]; then
+    if [ "$_wr_fd" = 8 ]; then _WR_SLOT8=$_wr_k; else _WR_SLOT9=$_wr_k; fi
+    return 0
+  fi
+  if [ "$_wr_fd" = 8 ]; then exec 8>&-; else exec 9>&-; fi    # failed: close only the descriptor just opened
+  if [ "$_wr_rc" = 1 ]; then echo "could not lock $1: held by another writer for ${_wr_w}s" >&2
+  else echo "lock helper failed for $1: ${_wr_e:-no message} (exit $_wr_rc)" >&2; fi
   return 1
 }
 wr_unlock() {
-  _k="$1.lock"
-  [ "$(cat "$_k/owner" 2>/dev/null)" = "$$" ] || return 0   # not ours: leave it alone
-  rm -f "$_k/owner"; rmdir "$_k" 2>/dev/null; return 0
+  _wr_sub_ok wr_unlock "$1" || return 2
+  _wr_path "$1" || return 0
+  if [ -n "$_WR_SLOT8" ] && [ "$_WR_SLOT8" = "$_WR_KEY" ]; then exec 8>&-; _WR_SLOT8=""
+  elif [ -n "$_WR_SLOT9" ] && [ "$_WR_SLOT9" = "$_WR_KEY" ]; then exec 9>&-; _WR_SLOT9=""; fi
+  return 0
+}
+wr_run() {
+  _wr_sub_ok wr_run "$1" || return 2
+  "$@" 8>&- 9>&-
 }
 # append one already-formatted block to the board under the lock; fails (and says so) when the board cannot be written
 wr_append() {
