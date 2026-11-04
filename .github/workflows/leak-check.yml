@@ -1,0 +1,14 @@
+name: leak-check
+on: [push, pull_request]
+jobs:
+  leak-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write the private denylist (a repository secret) to a file, if one is set
+        env:
+          DENYLIST: ${{ secrets.LEAKCHECK_DENYLIST }}
+        run: |
+          if [ -n "$DENYLIST" ]; then printf '%s\n' "$DENYLIST" > "$RUNNER_TEMP/denylist.txt"; echo "LEAKCHECK_DENYLIST=$RUNNER_TEMP/denylist.txt" >> "$GITHUB_ENV"; fi
+      - name: Run the leak check
+        run: bash tools/leak-check.sh
