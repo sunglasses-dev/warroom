@@ -15,7 +15,13 @@ mkdir -p "$W" 2>/dev/null; [ -e "$BOARD_FILE" ] || : > "$BOARD_FILE"
 BOSS_SEAT=${SEATS%% *}
 
 wr_now()   { date +%H:%M; }
-wr_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+# GNU stat first: on Linux `stat -f` means "file system status" and prints several lines, so it must not run first.
+# On macOS/BSD `stat -c` fails without printing anything, and the BSD form runs instead.
+wr_mtime() {
+  _m=$(stat -c %Y "$1" 2>/dev/null) || _m=$(stat -f %m "$1" 2>/dev/null) || _m=0
+  case "$_m" in ''|*[!0-9]*) _m=0 ;; esac
+  echo "$_m"
+}
 wr_seat_ok() { case " $SEATS " in *" $1 "*) return 0 ;; esac; return 1; }
 # one writer at a time: mkdir is atomic; a lock older than 10 s is stale and is taken over
 wr_lock() {

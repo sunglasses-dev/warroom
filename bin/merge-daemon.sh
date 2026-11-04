@@ -28,10 +28,18 @@ while :; do
   head=$(view headRefOid .headRefOid); state=$(view state .state)
   [ "$state" = OPEN ] || finish FAIL "PR state is '$state', not OPEN"
   [ "$head" = "$HEAD" ] || finish FAIL "branch head is $head, not the pinned $HEAD"
-  bad=$(view statusCheckRollup '[.statusCheckRollup[]? | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT")] | length')
-  pending=$(view statusCheckRollup '[.statusCheckRollup[]? | select(.status!="COMPLETED" and .state!="SUCCESS")] | length')
-  [ "${bad:-0}" -gt 0 ] && finish FAIL "$bad check(s) failed"
-  [ "${pending:-1}" -eq 0 ] && break
+  # Allowlist, not denylist: a check counts as green only when it says so. Anything finished and not green is bad.
+  #   check runs:      COMPLETED + SUCCESS|NEUTRAL|SKIPPED = green · not COMPLETED = pending · anything else = bad
+  #   commit statuses: SUCCESS = green · PENDING|EXPECTED = pending · anything else (FAILURE, ERROR) = bad
+  # Zero checks counts as pending (they may not have registered yet), so a PR with no checks times out, never merges.
+  counts=$(view statusCheckRollup '[.statusCheckRollup[]? | if has("state") and (has("status")|not) then
+      (if .state=="SUCCESS" then "g" elif (.state=="PENDING" or .state=="EXPECTED") then "p" else "b" end)
+    else
+      (if .status!="COMPLETED" then "p" elif (.conclusion=="SUCCESS" or .conclusion=="NEUTRAL" or .conclusion=="SKIPPED") then "g" else "b" end)
+    end] | "\(map(select(.=="b"))|length) \(map(select(.=="p"))|length) \(length)"')
+  read -r bad pending total <<< "${counts:-0 1 0}"
+  [ "${bad:-0}" -gt 0 ] && finish FAIL "$bad check(s) finished without a green result"
+  [ "${total:-0}" -gt 0 ] && [ "${pending:-1}" -eq 0 ] && break
   [ "$(date +%s)" -ge "$end" ] && finish FAIL "timed out waiting for checks"
   sleep "$POLL"
 done
