@@ -2,6 +2,9 @@
 # waiter-check.sh — Claude Code hook for SessionStart and UserPromptSubmit.
 # Reads the hook JSON from stdin, finds this session in the seat registry and prints a one-line banner when its waiter
 # is missing or has ended. Silent when the waiter is alive. Anything printed on stdout reaches the model as context.
+# a bad warroom.env must not block the prompt (exit 2 would): see WR_CONFIG_EXIT in bin/_common.sh
+# shellcheck disable=SC2034
+WR_CONFIG_EXIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"
 case "${1:-}" in -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat 2>/dev/null)

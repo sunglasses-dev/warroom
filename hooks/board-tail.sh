@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # board-tail.sh — Claude Code hook for UserPromptSubmit. Prints how many board lines are new for this seat and shows the
 # ones that name it. It does not move the seat's read anchor; `bin/board.sh tail SEAT` does that.
+# a bad warroom.env must not block the prompt (exit 2 would): see WR_CONFIG_EXIT in bin/_common.sh
+# shellcheck disable=SC2034
+WR_CONFIG_EXIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"; . "$HERE/../bin/_cursor.sh"
 case "${1:-}" in -h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat 2>/dev/null)

@@ -8,9 +8,13 @@ WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$WR_ROOT/bin/_config.sh"
 # shellcheck disable=SC2034  # WR_ENV_FILE and BOSS_SEAT are read by the scripts that source this file
 WR_ENV_FILE=$(wr_config_path)
-if [ -f "$WR_ENV_FILE" ]; then wr_load_config "$WR_ENV_FILE" || exit 2; else WR_ENV_FILE=""; fi
+# Exit code for a bad config: 2 in bin/ scripts. Hooks set WR_CONFIG_EXIT=1 before sourcing this file, because Claude
+# Code reads a hook's exit 2 as "block this prompt": one bad line in warroom.env would lock every session out.
+# Exit 1 is shown as a hook error and the prompt goes through. Only 1 and 2 are accepted.
+case "${WR_CONFIG_EXIT:-}" in 1) ;; *) WR_CONFIG_EXIT=2 ;; esac
+if [ -f "$WR_ENV_FILE" ]; then wr_load_config "$WR_ENV_FILE" || exit "$WR_CONFIG_EXIT"; else WR_ENV_FILE=""; fi
 SEATS=${SEATS:-"BOSS MANAGER W1 W2"}
-wr_seats_ok "$SEATS" || { echo "SEATS='$SEATS': names are [A-Z][A-Z0-9_]{0,15}, no repeats; ALL, NONE and GUARD are reserved" >&2; exit 2; }
+wr_seats_ok "$SEATS" || { echo "SEATS='$SEATS': names are [A-Z][A-Z0-9_]{0,15}, no repeats; ALL, NONE and GUARD are reserved" >&2; exit "$WR_CONFIG_EXIT"; }
 WARROOM_DIR=${WARROOM_DIR:-$HOME/warroom-run}
 BOARD=${BOARD:-board.md}
 case "$BOARD" in /*) BOARD_FILE="$BOARD" ;; *) BOARD_FILE="$WARROOM_DIR/$BOARD" ;; esac
