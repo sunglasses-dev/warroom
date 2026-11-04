@@ -143,6 +143,14 @@ wr_started() {
   [ -n "$_wr_st" ] || return 1
   printf '%s\n' "$_wr_st"
 }
+# wr_rowproc PID STARTED COLS: judge a recorded row. Like wr_proc, except that a row of five or more columns whose start
+# column is EMPTY (ps could not read it when the row was written) is never alive: a live pid with no recorded start time is
+# unknown, a dead one is dead. Only an old four-column row (COLS < 5) is judged by the pid alone.
+wr_rowproc() {
+  if [ -z "${2:-}" ] && [ "${3:-0}" -ge 5 ]; then
+    case "$(wr_proc "$1")" in dead) echo dead ;; *) echo unknown ;; esac
+  else wr_proc "$1" "${2:-}"; fi
+}
 # wr_proc PID [STARTED]: print one word.
 #   dead     no such process, or (when STARTED is given) the pid now belongs to a process that started at another time
 #   alive    the process exists and, when STARTED is given, started at that time; with no STARTED the pid alone decides

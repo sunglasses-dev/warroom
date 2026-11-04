@@ -31,10 +31,17 @@ EOT
     last=$(wr_cursor_get "$a" "$BOARD_FILE" 31536000); [ "$last" = none ] && last=0
     # print what is new; the anchor remembers where, and a checksum of everything, it read
     chunk="$a.chunk.$$"; snap="$a.snap.$$"
-    head -n "$n" "$BOARD_FILE" > "$snap"; sum=$(wr_sumstdin < "$snap")      # one read: the lines and their sum are the same bytes
-    tail -n "$((n-last))" "$snap" > "$chunk"
-    # save the position first, then print: when the anchor cannot be saved nothing is printed and the lines come again
-    if wr_cursor_put "$a" "$g" "$n" "$sum"; then cat "$chunk"; rc=0; else echo "could not save the read position of $seat ($a): nothing marked as read" >&2; rc=1; fi
+    # one read: the lines and their sum are the same bytes; scratch files that cannot be written end the read before anything is marked
+    if ! { head -n "$n" "$BOARD_FILE" > "$snap" && sum=$(wr_sumstdin < "$snap") && tail -n "$((n-last))" "$snap" > "$chunk"; }; then
+      echo "could not write a scratch file for $seat in $W (full or read-only?): nothing marked as read" >&2
+      rm -f "$chunk" "$snap"; wr_unlock "$a"; exit 1
+    fi
+    # print first, then save the position: a line is marked as read only after it was written out. If the output fails
+    # (closed pipe, full disk) the anchor stays, exit 1, and the lines come again. If only the anchor cannot be saved the
+    # lines were printed and come once more (at-least-once, never lost); the exit code says so.
+    if ! cat "$chunk"; then echo "could not write the lines for $seat to the output: nothing marked as read" >&2; rc=1
+    elif wr_cursor_put "$a" "$g" "$n" "$sum"; then rc=0
+    else echo "could not save the read position of $seat ($a): the lines above were printed but NOT marked as read; they come again" >&2; rc=1; fi
     rm -f "$chunk" "$snap"; wr_unlock "$a"; exit "$rc" ;;
   read) n=${2:-20}; tail -n "$n" "$BOARD_FILE" ;;
   path) echo "$BOARD_FILE" ;;
