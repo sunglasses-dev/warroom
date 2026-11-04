@@ -1,50 +1,111 @@
 #!/usr/bin/env bash
 # merge-daemon.sh — TEMPLATE. Wait for one pull request to go green, merge it once, read the result back, leave a receipt.
 # No model is involved: a script waits, a script merges, a script checks. Copy it and change the policy to yours.
-#   merge-daemon.sh PR --head SHA [--repo OWNER/REPO] [--seat SEAT] [--poll SECONDS] [--timeout SECONDS] [--dry-run]
-# Rules this template enforces:
-#   - the merge is pinned to --head: if the branch moved, nothing is merged and the run ends FAIL
-#   - squash merge only; the commit message is the PR title, with an empty body
+#   merge-daemon.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT] [--poll S] [--timeout S] [--dry-run]
+# What it does: each look at the PR is ONE gh call (state, head and checks together), so they describe the same moment.
+#   - the merge is pinned to --head (a full 40-character sha): if the branch moved, nothing is merged and the run ends FAIL
+#   - a check counts as green only when it says so (SUCCESS, NEUTRAL, SKIPPED); a finished check that is not green fails the run
+#   - --require NAME (repeatable) names a check that must exist and be green; one that has not appeared yet counts as pending
+#   - when all looks green it looks ONE more time, and merges only if that second look shows the same head and the same result
+#   - squash merge only, with --match-head-commit; the commit message is the PR title, with an empty body
 #   - after the merge the PR is read back: state MERGED and a merge commit exist, or the run ends FAIL
-#   - the last board line is "POSTCONDITION PASS" or "POSTCONDITION FAIL", and a receipt file is written either way
-# Needs: gh (logged in) and python3. --dry-run prints what it would do and merges nothing.
+#   - the last board line is "POSTCONDITION PASS" or "POSTCONDITION FAIL" and a receipt file is written either way;
+#     if the receipt or the board line cannot be written the run itself ends FAIL
+# Limit: this script cannot stop someone else merging. The guarantee that nothing merges unchecked is a server-side one:
+# branch protection with required status checks on the target branch. Without --require it also warns, because a check
+# that has not registered yet is not waited for. Needs: gh (logged in) and python3. --dry-run merges and writes nothing.
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"
-case "${1:-}" in -h|--help|help|"") sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
-PR=$1; shift; HEAD=""; REPO=""; SEAT=$BOSS_SEAT; POLL=30; TIMEOUT=7200; DRY=0
+case "${1:-}" in -h|--help|help|"") sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+PR=$1; shift; HEAD=""; REPO=""; SEAT=$BOSS_SEAT; POLL=30; TIMEOUT=7200; DRY=0; REQUIRE=""
 while [ $# -gt 0 ]; do case "$1" in
-  --head) HEAD=$2; shift 2 ;; --repo) REPO=$2; shift 2 ;; --seat) SEAT=$2; shift 2 ;;
-  --poll) POLL=$2; shift 2 ;; --timeout) TIMEOUT=$2; shift 2 ;; --dry-run) DRY=1; shift ;;
+  --head) HEAD=${2:-}; shift 2 ;; --repo) REPO=${2:-}; shift 2 ;; --seat) SEAT=${2:-}; shift 2 ;;
+  --require) REQUIRE="${REQUIRE:+$REQUIRE
+}${2:-}"; shift 2 ;;
+  --poll) POLL=${2:-}; shift 2 ;; --timeout) TIMEOUT=${2:-}; shift 2 ;; --dry-run) DRY=1; shift ;;
   *) echo "unknown option $1" >&2; exit 2 ;; esac; done
-[ -n "$HEAD" ] || { echo "--head SHA is required (the merge is pinned to it)" >&2; exit 2; }
+case "$PR" in ''|*[!0-9]*) echo "PR must be a number" >&2; exit 2 ;; esac
+case "$HEAD" in
+  '') echo "--head SHA is required (the merge is pinned to it)" >&2; exit 2 ;;
+  *[!0-9a-f]*) echo "--head must be a full lower-case hex sha" >&2; exit 2 ;;
+esac
+[ "${#HEAD}" -eq 40 ] || { echo "--head must be the full 40-character sha, not an abbreviation" >&2; exit 2; }
+case "$POLL$TIMEOUT" in ''|*[!0-9]*) echo "--poll and --timeout are whole seconds" >&2; exit 2 ;; esac
+wr_seat_ok "$SEAT" || { echo "unknown seat '$SEAT' (seats: $SEATS)" >&2; exit 2; }
+[ -n "$REQUIRE" ] || echo "warning: no --require given; a check that has not registered yet is not waited for. Branch protection with required checks is the real guard." >&2
 R=(); [ -n "$REPO" ] && R=(--repo "$REPO")
-RECEIPT="$W/receipts/merge_${PR}_$(date +%Y%m%d_%H%M%S).md"; mkdir -p "$W/receipts"
-say() { "$HERE/board.sh" post "$SEAT" "$1" >/dev/null; }
-finish() { # finish PASS|FAIL "detail"
-  { echo "# merge receipt PR $PR"; echo "- result: $1"; echo "- detail: $2"; echo "- pinned head: $HEAD"; echo "- time: $(date '+%Y-%m-%d %H:%M:%S')"; } > "$RECEIPT"
-  say "POSTCONDITION $1 merge of PR $PR: $2 (receipt $RECEIPT)"; [ "$1" = PASS ] && exit 0 || exit 1; }
-view() { gh pr view "$PR" "${R[@]}" --json "$1" -q "$2" 2>/dev/null; }
+RECEIPT="$W/receipts/merge_${PR}_$(date +%Y%m%d_%H%M%S)_$$.md"; mkdir -p "$W/receipts"
+
+finish() { # finish PASS|FAIL "detail" — receipt and board line must both succeed, or the run fails
+  _res=$1; _rc=0
+  { echo "# merge receipt PR $PR"; echo "- result: $_res"; echo "- detail: $2"; echo "- pinned head: $HEAD"
+    echo "- required checks: ${REQUIRE:-none}" | tr '\n' ' '; echo; echo "- time: $(date '+%Y-%m-%d %H:%M:%S')"; } > "$RECEIPT" \
+    || { echo "could not write the receipt $RECEIPT" >&2; _rc=1; }
+  "$HERE/board.sh" post "$SEAT" "POSTCONDITION $_res merge of PR $PR: $2 (receipt $RECEIPT)" >/dev/null \
+    || { echo "could not post the result to the board" >&2; _rc=1; }
+  if [ "$_rc" != 0 ] && [ "$_res" = PASS ]; then echo "merged, but the receipt or the board line failed: run counts as FAIL" >&2; fi
+  [ "$_res" = PASS ] && [ "$_rc" = 0 ] && exit 0
+  exit 1; }
+
+# snapshot: ONE gh call; sets S_STATE S_HEAD S_BAD S_PENDING S_TOTAL S_MISSING S_TITLE. Returns 1 when gh or parsing failed.
+snapshot() {
+  _json=$(gh pr view "$PR" "${R[@]}" --json state,headRefOid,title,statusCheckRollup 2>/dev/null) || return 1
+  _out=$(REQUIRE="$REQUIRE" python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+req = [r for r in os.environ.get("REQUIRE", "").split("\n") if r]
+green_c = ("SUCCESS", "NEUTRAL", "SKIPPED")
+seen = {}      # name -> list of "g" / "p" / "b"
+bad = pending = total = 0
+for c in d.get("statusCheckRollup") or []:
+    if "state" in c and "status" not in c:                       # commit status
+        name = c.get("context") or ""
+        st = c.get("state")
+        v = "g" if st == "SUCCESS" else ("p" if st in ("PENDING", "EXPECTED") else "b")
+    else:                                                        # check run
+        name = c.get("name") or ""
+        if c.get("status") != "COMPLETED": v = "p"
+        else: v = "g" if c.get("conclusion") in green_c else "b"
+    total += 1
+    seen.setdefault(name, []).append(v)
+    if v == "b": bad += 1
+    elif v == "p": pending += 1
+missing = [r for r in req if r not in seen]
+title = (d.get("title") or "").replace("\n", " ").replace("\r", " ")
+print(d.get("state") or ""); print(d.get("headRefOid") or ""); print(bad); print(pending); print(total)
+print(",".join(missing)); print(title)
+' <<< "$_json" 2>/dev/null) || return 1
+  { read -r S_STATE; read -r S_HEAD; read -r S_BAD; read -r S_PENDING; read -r S_TOTAL; read -r S_MISSING; read -r S_TITLE; } <<< "$_out"
+  case "$S_BAD$S_PENDING$S_TOTAL" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+# judge: look once. 0 = ready to merge, 1 = not yet (keep waiting), 2 = stop (REASON says why)
+judge() {
+  snapshot || { REASON="could not read the PR (gh or parsing failed)"; return 1; }
+  [ "$S_STATE" = OPEN ] || { REASON="PR state is '$S_STATE', not OPEN"; return 2; }
+  [ "$S_HEAD" = "$HEAD" ] || { REASON="branch head is $S_HEAD, not the pinned $HEAD"; return 2; }
+  [ "$S_BAD" -eq 0 ] || { REASON="$S_BAD check(s) finished without a green result"; return 2; }
+  # Zero checks counts as pending (they may not have registered yet), so a PR with no checks times out, never merges.
+  if [ "$S_PENDING" -gt 0 ] || [ "$S_TOTAL" -eq 0 ] || [ -n "$S_MISSING" ]; then
+    REASON="waiting: $S_PENDING pending, $S_TOTAL total${S_MISSING:+, required not seen: $S_MISSING}"; return 1
+  fi
+  return 0
+}
+
 end=$(( $(date +%s) + TIMEOUT ))
 while :; do
-  head=$(view headRefOid .headRefOid); state=$(view state .state)
-  [ "$state" = OPEN ] || finish FAIL "PR state is '$state', not OPEN"
-  [ "$head" = "$HEAD" ] || finish FAIL "branch head is $head, not the pinned $HEAD"
-  # Allowlist, not denylist: a check counts as green only when it says so. Anything finished and not green is bad.
-  #   check runs:      COMPLETED + SUCCESS|NEUTRAL|SKIPPED = green · not COMPLETED = pending · anything else = bad
-  #   commit statuses: SUCCESS = green · PENDING|EXPECTED = pending · anything else (FAILURE, ERROR) = bad
-  # Zero checks counts as pending (they may not have registered yet), so a PR with no checks times out, never merges.
-  counts=$(view statusCheckRollup '[.statusCheckRollup[]? | if has("state") and (has("status")|not) then
-      (if .state=="SUCCESS" then "g" elif (.state=="PENDING" or .state=="EXPECTED") then "p" else "b" end)
-    else
-      (if .status!="COMPLETED" then "p" elif (.conclusion=="SUCCESS" or .conclusion=="NEUTRAL" or .conclusion=="SKIPPED") then "g" else "b" end)
-    end] | "\(map(select(.=="b"))|length) \(map(select(.=="p"))|length) \(length)"')
-  read -r bad pending total <<< "${counts:-0 1 0}"
-  [ "${bad:-0}" -gt 0 ] && finish FAIL "$bad check(s) finished without a green result"
-  [ "${total:-0}" -gt 0 ] && [ "${pending:-1}" -eq 0 ] && break
-  [ "$(date +%s)" -ge "$end" ] && finish FAIL "timed out waiting for checks"
+  judge; rc=$?
+  [ "$rc" = 2 ] && finish FAIL "$REASON"
+  if [ "$rc" = 0 ]; then
+    judge; rc=$?                                   # the confirming look, right before the merge
+    [ "$rc" = 2 ] && finish FAIL "$REASON (seen on the confirming look)"
+    [ "$rc" = 0 ] && break
+  fi
+  [ "$(date +%s)" -ge "$end" ] && finish FAIL "timed out waiting for checks ($REASON)"
   sleep "$POLL"
 done
-if [ $DRY = 1 ]; then echo "dry run: PR $PR is green at $HEAD; would squash-merge pinned to it"; exit 0; fi
-title=$(view title .title)
-gh pr merge "$PR" "${R[@]}" --squash --match-head-commit "$HEAD" --subject "$title (#$PR)" --body "" >/dev/null 2>&1 || finish FAIL "gh pr merge was refused"
-state=$(view state .state); mc=$(view mergeCommit .mergeCommit.oid)
-if [ "$state" = MERGED ] && [ -n "$mc" ]; then finish PASS "merged as $mc"; else finish FAIL "readback shows state '$state' and no merge commit"; fi
+if [ $DRY = 1 ]; then echo "dry run: PR $PR is green at $HEAD on two looks; would squash-merge pinned to it"; exit 0; fi
+err=$(gh pr merge "$PR" "${R[@]}" --squash --match-head-commit "$HEAD" --subject "$S_TITLE (#$PR)" --body "" 2>&1 >/dev/null) \
+  || finish FAIL "gh pr merge was refused: $(printf '%s' "$err" | head -n 1 | cut -c1-120)"
+snapshot || finish FAIL "merge was sent, but the PR could not be read back"
+mc=$(gh pr view "$PR" "${R[@]}" --json mergeCommit -q .mergeCommit.oid 2>/dev/null)
+if [ "$S_STATE" = MERGED ] && [ -n "$mc" ]; then finish PASS "merged as $mc"; else finish FAIL "readback shows state '$S_STATE' and no merge commit"; fi

@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # board-tail.sh — Claude Code hook for UserPromptSubmit. Prints how many board lines are new for this seat and shows the
 # ones that name it. It does not move the seat's read anchor; `bin/board.sh tail SEAT` does that.
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"; . "$HERE/../bin/_cursor.sh"
 case "${1:-}" in -h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat 2>/dev/null)
 SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)
 [ -n "$SID" ] || exit 0
 seat=$(awk -F'\t' -v s="$SID" '$1==s {print $2}' "$W/seats.tsv" 2>/dev/null | tail -1)
 [ -n "$seat" ] && [ "$seat" != NONE ] || exit 0
-n=$(wc -l < "$BOARD_FILE" | tr -d ' '); last=$(cat "$W/.anchor-$seat" 2>/dev/null || echo 0)
-case "$last" in ''|*[!0-9]*) last=0 ;; esac; [ "$last" -gt "$n" ] && last=0
+n=$(wc -l < "$BOARD_FILE" | tr -d ' '); last=$(wr_cursor_get "$W/.anchor-$seat" "$BOARD_FILE" 31536000); [ "$last" = none ] && last=0
 new=$((n-last)); [ "$new" -gt 0 ] || exit 0
 echo "[BOARD] $new new line(s) since your last read. Read them with: bash $HERE/../bin/board.sh tail $seat"
 sed -n "$((last+1)),${n}p" "$BOARD_FILE" | grep -E "@${seat} |@ALL " | tail -3 | cut -c1-300
