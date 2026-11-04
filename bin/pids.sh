@@ -24,13 +24,23 @@ case "${1:-}" in
   done) l=${2:?label}; drop "$l"; echo "removed $l" ;;
   list) cat "$P" ;;
   check)
-    while IFS="$(printf '\t')" read -r l p o; do
+    # Every waiter runs this on every poll, so two seats can check at the same moment. The ledger is read and the dead
+    # rows are dropped under the lock; only the caller that dropped a row posts its wake, so each dead job wakes once.
+    TAB="$(printf '\t')"; dead=""; keep="$P.tmp.$$"
+    wr_lock "$P" || exit 1
+    : > "$keep"
+    while IFS="$TAB" read -r l p o; do
       [ -n "$l" ] || continue
-      if ! kill -0 "$p" 2>/dev/null; then
-        "$HERE/board.sh" post GUARD "@$o ACTION: job '$l' (pid $p) is no longer running. Read its receipt, then continue or restart it." >/dev/null
-        drop "$l"
-      fi
-    done < "$P" ;;
+      if kill -0 "$p" 2>/dev/null; then printf '%s\t%s\t%s\n' "$l" "$p" "$o" >> "$keep"
+      else dead="$dead$l$TAB$p$TAB$o
+"; fi
+    done < "$P"
+    if [ -n "$dead" ]; then mv "$keep" "$P"; else rm -f "$keep"; fi
+    wr_unlock "$P"
+    printf '%s' "$dead" | while IFS="$TAB" read -r l p o; do
+      [ -n "$l" ] || continue
+      "$HERE/board.sh" post GUARD "@$o ACTION: job '$l' (pid $p) is no longer running. Read its receipt, then continue or restart it." >/dev/null
+    done ;;
   -h|--help|help|"") sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) echo "unknown command (add|done|list|check|--help)" >&2; exit 2 ;;
 esac
