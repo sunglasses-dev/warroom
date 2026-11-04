@@ -8,17 +8,19 @@ Use GitHub's private reporting: open the **Security** tab of this repository and
 
 Include what you ran, what happened, and what you expected. A minimal reproduction in a temp directory is ideal.
 
-We reply within 72 hours, tell you what we will do, and credit you in the release notes unless you prefer otherwise.
+We aim to reply within 72 hours, tell you what we will do, and credit you in the release notes unless you prefer otherwise.
 
 ## What is in scope
 
 - Anything that lets a board line, a file in the run directory, or a pull request run code you did not intend
 - The installer changing settings it should not touch
-- The leak check missing a class of secret it claims to catch
+- The leak check missing a kind of leak it says it checks for (it checks a fixed list of patterns, nothing more)
 - The merge daemon merging something that is not green, or not the pinned head
 
-## What the scripts never do
+## What the scripts do not do
 
-- Send anything over the network, except `gh` calls the merge daemon makes to the repository you point it at
-- Run anything as root
-- Read files other than these: your run directory, the Claude Code settings file, and `warroom.env` (looked up at `$WARROOM_ENV`, then `./warroom.env`, then `~/.warroom/warroom.env`, then the clone folder). `cpu-sentinel.py` also reads the process list through `ps`
+These describe what the scripts are written to do. They are not a sandbox: the scripts run with your user's permissions.
+
+- Make network calls of their own, except the `gh` calls the merge daemon makes to the repository you point it at. `gh` uses your own GitHub login and configuration. Claude Code itself talks to its own service.
+- Ask for elevated rights. Nothing here uses `sudo`, and nothing checks who runs it, so do not run the scripts as root.
+- Read files beyond the ones each tool needs: the run directory (`$WARROOM_DIR`, which can be set to a path outside the clone), the Claude Code settings file, the `warroom.env` file (looked up at `$WARROOM_ENV`, then `./warroom.env`, then `~/.warroom/warroom.env`, then the clone folder), their own scripts, and for `cpu-sentinel.py` the process list through `ps`. `tools/leak-check.sh` reads the tree and the denylist you point it at.

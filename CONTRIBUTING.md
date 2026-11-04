@@ -7,7 +7,7 @@ Thanks for looking. This project is small on purpose: a board file, a waiter, a 
 Run the same three checks CI runs. All three must pass.
 
 ```bash
-bash tools/leak-check.sh          # 0 hits: no personal paths, account names, tokens or seat numbers
+bash tools/leak-check.sh          # 0 hits for the configured patterns; it does not read git history, so check names, credentials and history yourself
 shellcheck -S warning bin/*.sh hooks/*.sh install.sh tools/*.sh tests/*.sh
 bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse, dead job, guard, installer
 ```
@@ -24,7 +24,7 @@ bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse,
 ## How review works
 
 - Every pull request, ours included, needs green CI. (Pull requests from forks run the leak check with the built-in patterns only; a maintainer runs the full list before merging.) External pull requests are never merged automatically: a maintainer reads the whole diff first.
-- We answer new issues and pull requests within 24 hours, even if the answer is "not yet".
+- We aim to answer new issues and pull requests within 24 hours, even if the answer is "not yet".
 - If your fork fixes something real and we take it, we thank you by handle in the release notes.
 
 ## Questions
