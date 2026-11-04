@@ -1,15 +1,16 @@
 # shellcheck shell=bash
 # bin/_common.sh — sourced by every script in bin/ and hooks/. Not run on its own.
-# Finds warroom.env, then sets SEATS, WARROOM_DIR, BOARD (full path in $BOARD_FILE) and a few helpers.
+# Reads warroom.env as data (bin/_config.sh: one file, a strict KEY=VALUE grammar, never sourced), then sets SEATS,
+# WARROOM_DIR, BOARD (full path in $BOARD_FILE) and a few helpers. A bad config stops the script with the reason.
 export LC_ALL=C
 WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/_config.sh
+. "$WR_ROOT/bin/_config.sh"
 # shellcheck disable=SC2034  # WR_ENV_FILE and BOSS_SEAT are read by the scripts that source this file
-WR_ENV_FILE=""
-for _f in "${WARROOM_ENV:-}" "$PWD/warroom.env" "$HOME/.warroom/warroom.env" "$WR_ROOT/warroom.env"; do
-  # shellcheck source=/dev/null disable=SC2034
-  if [ -n "$_f" ] && [ -f "$_f" ]; then . "$_f"; WR_ENV_FILE="$_f"; break; fi
-done
+WR_ENV_FILE=$(wr_config_path)
+if [ -f "$WR_ENV_FILE" ]; then wr_load_config "$WR_ENV_FILE" || exit 2; else WR_ENV_FILE=""; fi
 SEATS=${SEATS:-"BOSS MANAGER W1 W2"}
+wr_seats_ok "$SEATS" || { echo "SEATS='$SEATS': names are [A-Z][A-Z0-9_]{0,15}, no repeats; ALL, NONE and GUARD are reserved" >&2; exit 2; }
 WARROOM_DIR=${WARROOM_DIR:-$HOME/warroom-run}
 BOARD=${BOARD:-board.md}
 case "$BOARD" in /*) BOARD_FILE="$BOARD" ;; *) BOARD_FILE="$WARROOM_DIR/$BOARD" ;; esac
