@@ -24,6 +24,7 @@
 #         output, a dry run says nothing was written, uninstall leaves no empty ~/.warroom (26c)
 #  27-32. second review (waiter, cursor, guard, reopen): shared opt-out rows, one wake when a waiter is replaced, a board refilled in
 #         place, the guard's job identity and its mark across board generations, reopen READY only with cards, quoted commands
+#         (32c: a unique reopen id per arm and its own request line as the boundary; arm, build, done check every write)
 #  33. a missing board is created without truncating (parallel first posts all survive); an uncreatable board is an error
 #  34. a ledger write that fails leaves the ledger as it was and exits non-zero
 #  35. pids.sh add refuses pid 0 and a pid whose start time cannot be read
@@ -681,7 +682,7 @@ LG="$WARROOM_DIR/REOPEN_LEDGER.md"; : > "$BF"; rm -f "$WARROOM_DIR/.reopen-reque
 [ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && grep -q 'INCOMPLETE (forced), not back: W1' "$LG" && grep -q 'REOPEN DONE .* INCOMPLETE (forced; not back: W1)' "$BF" && ok "reopen done --force closes it, labeled INCOMPLETE with the missing seat" || bad "reopen done --force: rc $rc"
 "$B/reopen.sh" arm >/dev/null; sleep 1; for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
 "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
-[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -c 'INCOMPLETE' "$LG")" = 1 ] && tail -1 "$BF" | grep -q 'REOPEN DONE R-[0-9-]*: ledger' && ok "reopen done with every seat back writes a plain ledger row and end line" || bad "reopen done with all back: rc $rc"
+[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -c 'INCOMPLETE' "$LG")" = 1 ] && tail -1 "$BF" | grep -q 'REOPEN DONE R-[0-9a-f-]*: ledger' && ok "reopen done with every seat back writes a plain ledger row and end line" || bad "reopen done with all back: rc $rc"
 "$B/reopen.sh" arm >/dev/null; sleep 1; for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
 printf '# Reopen ledger\n| when | id | seats back |\n|---|---|---|\n' > "$LG"   # a fresh ledger: ids repeat within one minute, a row with this id would mean "already recorded"
 chmod 444 "$LG"; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?; chmod 644 "$LG"
@@ -690,6 +691,42 @@ chmod 444 "$BF"; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?; chmod 644 "$BF"
 [ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && ok "reopen done: an end line that cannot be posted exits 1 and keeps the marker" || bad "reopen done with a read-only board: rc $rc"
 "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
 [ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -c '^| 20' "$LG")" = 1 ] && ok "reopen done: running it again after the fault closes it" || bad "reopen done rerun: rc $rc"
+# 32c. the reopen boundary: each arm gets a unique id and counts only posts after its own request line, so a second
+#      reopen inside the same minute cannot close on the first one's returns; arm writes no marker when the request
+#      cannot be posted, and reposts a request that never reached the board; build posts no READY when the sheet
+#      cannot be written; done exits 1 when the marker cannot be removed
+: > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested" "$LG"; rm -rf "$WARROOM_DIR/cards" "$WARROOM_DIR"/REOPEN_MESSAGES_*
+"$B/reopen.sh" arm >/dev/null; id1=$(head -1 "$WARROOM_DIR/.reopen-requested")
+for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done; "$B/reopen.sh" "done" >/dev/null 2>&1; r1=$?
+"$B/reopen.sh" arm >/dev/null; id2=$(head -1 "$WARROOM_DIR/.reopen-requested")
+"$B/reopen.sh" "done" >/dev/null 2>&1; r2=$?; rows=$(grep -c '^| 20' "$LG")
+[ $r1 = 0 ] && [ $r2 = 1 ] && [ "$rows" = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && [ "$id1" != "$id2" ] \
+  && printf '%s\n%s\n' "$id1" "$id2" | grep -cE '^R-[0-9]{10}-[0-9a-f]{4}$' | grep -qx 2 \
+  && ok "a second reopen right after the first does not close on the first one's returns (unique ids)" || bad "same-minute reopen: done rc $r1/$r2, ledger rows $rows, ids $id1 $id2"
+"$B/reopen.sh" status | grep -q 'banked 0/' && ok "reopen status counts only posts after the current request" || bad "status after a second arm: $("$B/reopen.sh" status | head -1)"
+for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done; "$B/reopen.sh" "done" >/dev/null 2>&1; r3=$?
+[ $r3 = 0 ] && [ "$(grep -c '^| 20' "$LG")" = 2 ] && grep -qF "| $id2 | " "$LG" && ok "the second reopen closes on its own returns and adds its own ledger row" || bad "second done: rc $r3, rows $(grep -c '^| 20' "$LG")"
+: > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested"; chmod 444 "$BF"
+"$B/reopen.sh" arm >/dev/null 2>&1; r4=$?; chmod 644 "$BF"
+[ $r4 = 1 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ ! -s "$BF" ] && ok "arm with a read-only board exits 1 and writes no marker" || bad "read-only arm: rc $r4, marker $([ -e "$WARROOM_DIR/.reopen-requested" ] && echo yes || echo no)"
+printf 'R-1000000000-abcd\n2001-09-09 01:46\n' > "$WARROOM_DIR/.reopen-requested"
+o1=$("$B/reopen.sh" arm 2>&1); o2=$("$B/reopen.sh" arm 2>&1)
+[ "$(grep -c 'REOPEN REQUESTED R-1000000000-abcd\. ' "$BF")" = 1 ] && case "$o1" in *"posted again"*) true ;; *) false ;; esac && [ "$o2" = "already armed: R-1000000000-abcd" ] \
+  && ok "arm reposts a request that is not on the board, then says already armed" || bad "arm repair: '$o1' / '$o2'"
+: > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested"; "$B/reopen.sh" arm >/dev/null; mkdir -p "$WARROOM_DIR/cards"; sleep 1   # cards must be newer than the marker
+for t in BOSS W1; do echo "card of $t" > "$WARROOM_DIR/cards/${t}_REOPEN_smoke32c.md"; "$B/board.sh" post "$t" "banked for reopen" >/dev/null; done
+sheet="$WARROOM_DIR/REOPEN_MESSAGES_$(date +%Y-%m-%d).md"; mkdir -p "$sheet"
+e5=$("$B/reopen.sh" build 2>&1 >/dev/null); r5=$?; rmdir "$sheet"
+"$B/reopen.sh" build >/dev/null 2>&1; r6=$?
+[ $r5 = 1 ] && case "$e5" in *"is a directory"*) true ;; *) false ;; esac && [ "$(grep -c 'REOPEN READY' "$BF")" = 1 ] && [ $r6 = 0 ] && [ -f "$sheet" ] && tail -1 "$BF" | grep -q 'REOPEN READY' \
+  && ok "build posts no READY when the sheet path is a directory, and READY once it can write it" || bad "sheet fault: rc $r5/$r6, READY lines $(grep -c 'REOPEN READY' "$BF")"
+for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
+chmod 555 "$WARROOM_DIR"; "$B/reopen.sh" "done" >/dev/null 2>&1; r7=$?; chmod 755 "$WARROOM_DIR"
+[ $r7 = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && tail -1 "$BF" | grep -q "REOPEN DONE" && ok "done exits 1 when the marker cannot be removed" || bad "marker removal fault: rc $r7"
+"$B/reopen.sh" "done" >/dev/null 2>&1; r8=$?
+[ $r8 = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -cF "| $(grep -o 'REOPEN DONE R-[0-9a-f-]*' "$BF" | tail -1 | cut -d' ' -f3) | " "$LG")" = 1 ] \
+  && ok "done after the marker fault closes it with one ledger row" || bad "done after the marker fault: rc $r8"
+rm -f "$WARROOM_DIR/.reopen-requested"
 # generated commands are quoted for a path with a space: the reopen request line and the board-tail hook
 rm -f "$WARROOM_DIR/.reopen-requested"; : > "$BF"; bash "$T/sp dir/bin/reopen.sh" arm >/dev/null 2>&1
 grep -q 'bash [^ ]*sp\\ dir/bin/reopen.sh card SEAT' "$BF" && ok "the reopen request prints a quoted reopen.sh command for a path with a space" || bad "reopen arm command not quoted: $(head -c 300 "$BF")"
