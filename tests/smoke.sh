@@ -2,7 +2,7 @@
 # tests/smoke.sh — end-to-end check on a throwaway board. Runs in CI and on your machine; touches nothing outside a temp dir.
 #   1. a plain mention does not wake a seat; an "@SEAT ACTION:" line does, within a few seconds
 #   2. a second waiter on a seat that is already held is refused
-#   3. a registered job that dies wakes its owner once, and its row is dropped
+#   3. a registered job that dies wakes its owner once, and its row is dropped, also when several seats check at once
 #   4. the idle guard names a silent seat once per silence, not once per prompt
 #   5. install.sh refuses a settings file that is not valid JSON and leaves it unchanged
 set -u
@@ -31,6 +31,11 @@ sleep 30 & J=$!; "$B/pids.sh" add smoke-job $J BOSS >/dev/null; kill $J; wait $J
 "$B/pids.sh" check >/dev/null; "$B/pids.sh" check >/dev/null
 n=$(grep -c "@BOSS ACTION" "$("$B/board.sh" path)")
 [ "$n" = 1 ] && ! grep -q smoke-job "$WARROOM_DIR/pids.tsv" && ok "dead job wakes its owner once, row dropped" || bad "dead job: $n wake lines"
+# same, with several seats checking at the same moment (every waiter runs check on every poll)
+sleep 30 & J=$!; "$B/pids.sh" add smoke-race $J W1 >/dev/null; kill $J; wait $J 2>/dev/null
+for _ in 1 2 3 4; do "$B/pids.sh" check >/dev/null & done; wait
+n=$(grep -c "job 'smoke-race'" "$("$B/board.sh" path)")
+[ "$n" = 1 ] && ok "dead job wakes once with 4 checks at the same moment" || bad "concurrent check: $n wake lines"
 
 # 4. guard once per silence
 : > "$("$B/board.sh" path)"; printf '[%s · W1] hello\n' "$(date -d '-40 min' +%H:%M 2>/dev/null || date -v-40M +%H:%M)" > "$("$B/board.sh" path)"
