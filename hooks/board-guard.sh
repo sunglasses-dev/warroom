@@ -35,13 +35,18 @@ for seat in $SEATS; do
   mark="$W/.guard-$seat"
   # once per silence: the mark holds the board generation, line number and checksum of the seat's last post; the same
   # three = already said it.
-  # Check, post and mark happen under one lock, so two prompts at the same moment say it once; the mark is written
-  # only after the post succeeded, so a failed post is tried again at the next prompt.
+  # Check, mark and post happen under one lock, so two prompts at the same moment say it once. The mark is saved BEFORE
+  # the post: if it cannot be saved nothing is posted (the next prompt tries again), and if the post fails the old mark
+  # is put back, so a failed post is tried again and a failed mark write can never turn into a post at every prompt.
   wr_lock "$mark" || { echo "board-guard: skipped $seat (mark busy), will retry on the next prompt" >&2; continue; }
   here="$(wr_generation "$BOARD_FILE") $lineno $(printf '%s\n' "$line" | wr_sum)"
-  if [ "$(cat "$mark" 2>/dev/null)" != "$here" ] &&
-     wr_run "$HERE/../bin/board.sh" post GUARD "@${seat} ACTION: no board post from you for ${age} min and no registered job. Take the next unclaimed card, or post what you are waiting on." >/dev/null; then
-    printf '%s\n' "$here" > "$mark.tmp.$$" && mv "$mark.tmp.$$" "$mark"
+  prev=$(cat "$mark" 2>/dev/null)
+  if [ "$prev" != "$here" ]; then
+    if ! { printf '%s\n' "$here" > "$mark.tmp.$$" && mv "$mark.tmp.$$" "$mark"; }; then
+      rm -f "$mark.tmp.$$"; echo "board-guard: skipped $seat (could not save the mark in $W), will retry on the next prompt" >&2
+    elif ! wr_run "$HERE/../bin/board.sh" post GUARD "@${seat} ACTION: no board post from you for ${age} min and no registered job. Take the next unclaimed card, or post what you are waiting on." >/dev/null; then
+      if [ -n "$prev" ]; then { printf '%s\n' "$prev" > "$mark.tmp.$$" && mv "$mark.tmp.$$" "$mark"; } || rm -f "$mark.tmp.$$" "$mark"; else rm -f "$mark"; fi
+    fi
   fi
   wr_unlock "$mark"
 done

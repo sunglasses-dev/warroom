@@ -1,11 +1,13 @@
 # shellcheck shell=bash
 # bin/_cursor.sh — read positions in the board that survive a rotation, a truncation and a new day. Sourced after _common.sh.
 # A cursor file holds "GENERATION LINE EPOCH SUM". GENERATION is the board's inode plus a checksum of its first line;
-# SUM is the checksum of the last line the reader consumed (line number LINE). A reader resumes only when the board is
-# the same file AND the line it stopped at is still the same line, so a board that was emptied in place and refilled
-# (same inode, same first line, already longer than before) is noticed and read again from its start.
+# SUM is the checksum and byte length of the whole consumed prefix (lines 1 to LINE, "crc-bytes"; 0 for LINE 0). A reader
+# resumes only when the board is the same file AND everything it has already read is still byte for byte the same, so a
+# board that was emptied or edited in place and filled again (same inode, same first line, same line at the reader's
+# position, a new line somewhere in the part already read) is noticed and read again from its start.
 # Supported ways to rotate a board: move it away (mv board.md board.old, then start a new file: new inode), or empty it
-# and let it fill again. Not noticed: a rewrite that leaves the line at the reader's position byte for byte the same.
+# and let it fill again. A cursor written by an older version holds the checksum of the last line only; it is still
+# accepted once, and every cursor written from now on carries the prefix sum.
 wr_inode() {
   _ino=$(stat -c %i "$1" 2>/dev/null) || _ino=$(stat -f %i "$1" 2>/dev/null) || _ino=0
   case "$_ino" in ''|*[!0-9]*) _ino=0 ;; esac
@@ -13,13 +15,20 @@ wr_inode() {
 }
 wr_generation() { echo "$(wr_inode "$1"):$(head -n 1 "$1" 2>/dev/null | cksum | cut -d' ' -f1)"; }
 wr_sum() { cksum | cut -d' ' -f1; }                       # checksum of stdin
-# wr_linesum BOARD N — checksum of line N (N = 0: the empty prefix, 0)
+# wr_sumstdin — "crc-bytes" of stdin (the byte length makes a collision in the crc alone not enough)
+wr_sumstdin() { cksum | awk '{print $1 "-" $2}'; }
+# wr_prefixsum BOARD N — "crc-bytes" of lines 1 to N (N = 0: the empty prefix, 0)
+wr_prefixsum() {
+  case "$2" in ''|*[!0-9]*) echo 0; return ;; esac
+  if [ "$2" -gt 0 ]; then head -n "$2" "$1" 2>/dev/null | wr_sumstdin; else echo 0; fi
+}
+# wr_linesum BOARD N — checksum of line N alone (only to read a cursor written by an older version)
 wr_linesum() {
   case "$2" in ''|*[!0-9]*) echo 0; return ;; esac
   if [ "$2" -gt 0 ]; then sed -n "${2}p;${2}q" "$1" 2>/dev/null | wr_sum; else echo 0; fi
 }
 # wr_cursor_get CURSOR_FILE BOARD MAX_AGE_SECONDS
-#   prints the line to resume from; 0 when the board was replaced, shrank or changed at the reader's position (all of it
+#   prints the line to resume from; 0 when the board was replaced, shrank or changed in the part already read (all of it
 #   is new to this reader); "none" when there is no usable cursor (first run, unreadable, or older than MAX_AGE_SECONDS).
 wr_cursor_get() {
   _g=""; _l=""; _t=""; _s=""
@@ -30,15 +39,20 @@ wr_cursor_get() {
   if [ "$_g" = "$(wr_generation "$2")" ]; then
     _n=$(wc -l < "$2" | tr -d ' ')
     if [ "$_l" -le "$_n" ]; then
-      # an old cursor without SUM is accepted once; every cursor written from now on carries it
-      if [ -z "$_s" ] || [ "$_l" -eq 0 ] || [ "$_s" = "$(wr_linesum "$2" "$_l")" ]; then echo "$_l"; return; fi
+      if [ "$_l" -eq 0 ] || [ -z "$_s" ]; then echo "$_l"; return; fi     # nothing read yet, or a cursor without SUM (accepted once)
+      case "$_s" in
+        *-*) [ "$_s" = "$(wr_prefixsum "$2" "$_l")" ] && { echo "$_l"; return; } ;;
+        *)   [ "$_s" = "$(wr_linesum "$2" "$_l")" ] && { echo "$_l"; return; } ;;   # older cursor: the last line only
+      esac
     fi
   fi
   echo 0
 }
 # wr_cursor_put CURSOR_FILE GENERATION LINE SUM — GENERATION is read before the line count, so a rotation in between is
-# noticed at the next read (it can repeat a line, never skip one). SUM is the checksum of line LINE as the reader read it.
-# Written to a temp file, then renamed.
+# noticed at the next read (it can repeat a line, never skip one). SUM is the prefix sum of lines 1 to LINE as the reader
+# read them. Written to a temp file, then renamed. Returns non-zero when the write or the rename fails; the cursor is
+# then exactly as it was and no temp file is left. Callers check the result before they report a read or a wake.
 wr_cursor_put() {
-  printf '%s %s %s %s\n' "$2" "$3" "$(date +%s)" "${4:-0}" > "$1.tmp.$$" && mv "$1.tmp.$$" "$1"
+  if printf '%s %s %s %s\n' "$2" "$3" "$(date +%s)" "${4:-0}" > "$1.tmp.$$" && mv "$1.tmp.$$" "$1"; then return 0; fi
+  rm -f "$1.tmp.$$"; return 1
 }

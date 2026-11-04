@@ -30,6 +30,8 @@
 #  39. leak-check: a bad denylist pattern or an unreadable file is an error (exit 2), run-state files in the tree are a hit
 #  40. process identity: ps failing is "unknown" (row kept, seat not taken, guard silent, hook says so), never "dead"; a
 #      reused pid holds no seat and inherits no sentinel strikes or opt-out; a failed sentinel sample keeps its state
+#  41-43. position integrity (a rewrite anywhere in the part already read is noticed), every state write checked (fault
+#         injection with a stub mv), the board bootstrap under a forced race (with a wrong-code control)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -730,6 +732,95 @@ o2=$(WARROOM_DIR="$RS" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1)
 case "$o1" in *"would kill tree $BL"*) a=1 ;; *) a=0 ;; esac; case "$o2" in *"would kill tree $BL"*) b=1 ;; *) b=0 ;; esac
 [ "$a$b" = 10 ] && ok "sentinel: an opt-out older than the process is ignored, a current one stops the kill" || bad "sentinel opt-out by identity: old $a current $b (want 1 0)"
 kill $BL 2>/dev/null; wait $BL 2>/dev/null
+# 41. position integrity: a rewrite anywhere in the part already read is noticed (same file, same first line, same line at
+#     the reader's position, a new line in the middle); the waiter, board.sh tail and the board-tail hook all see it
+R8="$T/c708a"; mkdir -p "$R8"; BF8="$R8/board.md"
+printf '[00:00 · BOSS] head\n[00:00 · BOSS] old 1\n[00:00 · BOSS] old 2\n[00:00 · BOSS] old 3\n[00:00 · BOSS] old 4\n[00:00 · BOSS] last consumed\n' > "$BF8"
+WARROOM_DIR="$R8" "$B/board.sh" tail W1 >/dev/null
+WARROOM_DIR="$R8" "$B/waiter.sh" W1 sid-i1 > "$T/i1.out" 2>/dev/null & WP=$!; sleep 2
+ino0=$(ls -i "$BF8" | cut -d' ' -f1)
+printf '[00:00 · BOSS] head\n[00:00 · BOSS] old 1\n[00:01 · BOSS] @W1 ACTION: interior refill\n[00:00 · BOSS] old 3\n[00:00 · BOSS] old 4\n[00:00 · BOSS] last consumed\n[00:02 · BOSS] added after\n' > "$BF8"
+[ "$(ls -i "$BF8" | cut -d' ' -f1)" = "$ino0" ] && ok "refill fixture: same file, same first line, same line at the old position" || bad "refill fixture: the board changed inode"
+if wait_exit $WP 8 && grep -q "interior refill" "$T/i1.out"; then ok "an interior rewrite of the part already read is noticed by the waiter"; else bad "interior rewrite: the waiter stayed asleep"; fi
+kill $WP 2>/dev/null; wait $WP 2>/dev/null
+h=$(printf '{"session_id":"sid-i1"}' | WARROOM_DIR="$R8" bash "$ROOT/hooks/board-tail.sh" 2>/dev/null)
+case "$h" in *"interior refill"*) ok "the board-tail hook shows the interior rewrite" ;; *) bad "interior rewrite: the board-tail hook showed '$h'" ;; esac
+c=$(WARROOM_DIR="$R8" "$B/board.sh" tail W1 | grep -c "interior refill")
+[ "$c" = 1 ] && ok "board.sh tail reads an interior rewrite again" || bad "interior rewrite: board.sh tail printed the directive $c times"
+c=$(WARROOM_DIR="$R8" "$B/board.sh" tail W1 | grep -c "interior refill")
+[ "$c" = 0 ] && ok "board.sh tail does not print it a second time" || bad "board.sh tail repeated the directive"
+# a cursor written by an older version (checksum of the last line only) is accepted once; a wrong one is not
+printf '[00:00 · BOSS] a\n[00:00 · BOSS] b\n' > "$R8/b2.md"
+g=$(WARROOM_DIR="$R8" BOARD=b2.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_generation "$BOARD_FILE"; wr_linesum "$BOARD_FILE" 2' _ "$B" | tr '\n' ' ')
+printf '%s 2 %s %s\n' "${g%% *}" "$(date +%s)" "${g##* }" > "$R8/.old-cur"; printf '%s 2 %s 12345\n' "${g%% *}" "$(date +%s)" > "$R8/.bad-cur"
+r1=$(WARROOM_DIR="$R8" BOARD=b2.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2/.old-cur" "$BOARD_FILE" 99999; wr_cursor_get "$2/.bad-cur" "$BOARD_FILE" 99999' _ "$B" "$R8" | tr '\n' ' ')
+[ "$r1" = "2 0 " ] && ok "an older cursor (last-line checksum) is accepted once; a wrong one reads from the start" || bad "older cursor: got '$r1'"
+
+# 42. every state write is checked. Fault injection: a stub mv in front of PATH fails a rename whose target ends in a name
+#     listed in the file $FAILMV_FILE (the file can appear while a waiter runs). Control: without the file the same run works.
+SH41="$T/shim41"; mkdir -p "$SH41"; REALMV=$(command -v mv)
+cat > "$SH41/mv" <<SHIM
+#!/bin/sh
+[ -f "\${FAILMV_FILE:-/nonexistent}" ] && for p in \$(cat "\$FAILMV_FILE"); do case "\$2" in *\$p) exit 1 ;; esac; done
+exec $REALMV "\$@"
+SHIM
+chmod +x "$SH41/mv"; export FAILMV_FILE="$T/failmv"; rm -f "$FAILMV_FILE"
+R9="$T/c708b"; mkdir -p "$R9"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] two\n' > "$R9/board.md"
+printf 'other-sid\tBOSS\t1\t00:00\n' > "$R9/seats.tsv"
+# 41a. the registry rename fails: exit 1, message, no "armed", registry as it was, no temp file
+printf 'seats.tsv\n' > "$FAILMV_FILE"; s0=$(cksum < "$R9/seats.tsv")
+WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/waiter.sh" W1 sid-f1 > /dev/null 2> "$T/f1.err" & WP=$!; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?; e=$(cat "$T/f1.err")
+[ $r = 1 ] && case "$e" in *"could not update the seat registry"*) true ;; *) false ;; esac && ! printf '%s\n' "$e" | grep -q '^armed ' \
+  && [ "$(cksum < "$R9/seats.tsv")" = "$s0" ] && [ -z "$(find "$R9" -name '*tmp*')" ] && ok "arm: a failed registry write says so, exits 1, keeps the registry, leaves no temp file" || bad "arm with a failed registry write: rc $r, '$e'"
+# 41b. the position cannot be saved: same, and the registry gets no row for the new session
+rm -f "$FAILMV_FILE"; WARROOM_DIR="$R9" "$B/waiter.sh" W1 sid-f2 > /dev/null 2> "$T/f2.err" & WP=$!; sleep 2; kill $WP 2>/dev/null; wait $WP 2>/dev/null
+grep -q "armed W1" "$T/f2.err" && ok "fault control: without the fault the same arm succeeds" || bad "fault control: the arm failed without a fault: $(cat "$T/f2.err")"
+printf '.cursor-W1\n' > "$FAILMV_FILE"; c0=$(cksum < "$R9/.cursor-W1"); s0=$(cksum < "$R9/seats.tsv")
+WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/waiter.sh" W1 sid-f3 > /dev/null 2> "$T/f3.err" & WP=$!; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?; e=$(cat "$T/f3.err")
+[ $r = 1 ] && case "$e" in *"could not save the position of seat W1"*) true ;; *) false ;; esac && [ "$(cksum < "$R9/.cursor-W1")" = "$c0" ] \
+  && [ "$(cksum < "$R9/seats.tsv")" = "$s0" ] && ! grep -q sid-f3 "$R9/seats.tsv" && [ -z "$(find "$R9" -name '*tmp*')" ] && ok "arm: a failed position write says so, exits 1, keeps the cursor and the registry" || bad "arm with a failed position write: rc $r, '$e'"
+# 41c. a wake whose position cannot be saved is not reported as delivered: exit 1, the lines are printed, the cursor is kept,
+#      and the next arm delivers them again
+rm -f "$FAILMV_FILE" "$R9/.lastwake-W1"; WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/waiter.sh" W1 sid-f4 > "$T/f4.out" 2> "$T/f4.err" & WP=$!; sleep 2
+c0=$(cksum < "$R9/.cursor-W1"); printf '.cursor-W1\n' > "$FAILMV_FILE"
+WARROOM_DIR="$R9" "$B/board.sh" post BOSS "@W1 ACTION: delivery fault line" >/dev/null
+wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
+[ $r = 1 ] && grep -q "delivery fault line" "$T/f4.out" && grep -q "NOT marked as delivered" "$T/f4.err" && ! grep -q '^\[WAKE' "$T/f4.out" && [ "$(cksum < "$R9/.cursor-W1")" = "$c0" ] && [ ! -e "$R9/.lastwake-W1" ] \
+  && ok "wake: a position that cannot be saved is not a delivery (exit 1, lines printed, cursor and gap marker kept)" || bad "wake with a failed position write: rc $r, out '$(cat "$T/f4.out")', err '$(cat "$T/f4.err")'"
+rm -f "$FAILMV_FILE"; WARROOM_DIR="$R9" "$B/waiter.sh" W1 sid-f5 > "$T/f5.out" 2>/dev/null & WP=$!
+if wait_exit $WP 8 && grep -q "delivery fault line" "$T/f5.out"; then ok "wake: after the fault is gone the same line is delivered again, once"; else bad "wake after a failed save: the line was lost"; fi
+kill $WP 2>/dev/null; wait $WP 2>/dev/null
+# 41d. board.sh tail: when the anchor cannot be saved nothing is printed as read; afterwards the lines come
+WARROOM_DIR="$R9" "$B/board.sh" tail BOSS >/dev/null; WARROOM_DIR="$R9" "$B/board.sh" post W1 "new for the tail" >/dev/null
+printf '.anchor-BOSS\n' > "$FAILMV_FILE"; a0=$(cksum < "$R9/.anchor-BOSS")
+o=$(WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/board.sh" tail BOSS 2>"$T/tail.err"); r=$?
+[ $r = 1 ] && [ -z "$o" ] && grep -q "could not save the read position" "$T/tail.err" && [ "$(cksum < "$R9/.anchor-BOSS")" = "$a0" ] && [ -z "$(find "$R9" -name '*tmp*' -o -name '*.chunk.*' -o -name '*.snap.*')" ] \
+  && ok "tail: an anchor that cannot be saved prints nothing, exits 1, keeps the anchor" || bad "tail with a failed anchor write: rc $r, out '$o'"
+rm -f "$FAILMV_FILE"; o=$(WARROOM_DIR="$R9" "$B/board.sh" tail BOSS)
+case "$o" in *"new for the tail"*) ok "tail: after the fault the same lines are printed" ;; *) bad "tail after a failed save lost the lines: '$o'" ;; esac
+# 41e. board-guard: a mark that cannot be saved means no post (nothing repeats at every prompt); control: it posts once
+RGD="$T/c708c"; mkdir -p "$RGD"; printf '[00:00 · W1] working\n' > "$RGD/board.md"; printf '.guard-W1\n' > "$FAILMV_FILE"; b0=$(cksum < "$RGD/board.md")
+e=$(WARROOM_DIR="$RGD" PATH="$SH41:$PATH" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null 2>&1 >/dev/null); r=$?
+[ $r = 0 ] && [ "$(cksum < "$RGD/board.md")" = "$b0" ] && [ ! -e "$RGD/.guard-W1" ] && case "$e" in *"could not save the mark"*) true ;; *) false ;; esac && ok "guard: a mark that cannot be saved posts nothing, says so, exits 0" || bad "guard with a failed mark write: rc $r, '$e'"
+rm -f "$FAILMV_FILE"; for _ in 1 2; do WARROOM_DIR="$RGD" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null >/dev/null 2>&1; done
+[ "$(grep -c '@W1 ACTION: no board post' "$RGD/board.md")" = 1 ] && ok "guard control: without the fault it posts once per silence" || bad "guard control: $(grep -c '@W1 ACTION: no board post' "$RGD/board.md") posts"
+
+# 43. bootstrap: another writer wins the race between "board missing?" and "create it". Forced by a stub mkdir that plants a
+#     first line at the moment the creating script makes the board's folder. The shipped code keeps that line; the old
+#     truncating form (control, a mutated copy of bin/) loses it, so the fixture does discriminate.
+SH42="$T/shim42"; mkdir -p "$SH42"; REALMKDIR=$(command -v mkdir)
+cat > "$SH42/mkdir" <<SHIM
+#!/bin/sh
+if [ "\$1" = -p ] && [ "\$2" = "\$RACE_DIR" ] && [ ! -e "\$RACE_DIR/board.md" ]; then $REALMKDIR -p "\$2"; printf 'first writer line\n' >> "\$RACE_DIR/board.md"; fi
+exec $REALMKDIR "\$@"
+SHIM
+chmod +x "$SH42/mkdir"
+RACE="$T/race-ship"; WARROOM_DIR="$T/race-run1" BOARD="$RACE/board.md" RACE_DIR="$RACE" PATH="$SH42:$PATH" bash -c '. "$1"' _ "$C" >/dev/null 2>&1
+[ "$(cat "$RACE/board.md" 2>/dev/null)" = "first writer line" ] && ok "bootstrap: a line written between the check and the create survives (forced race)" || bad "bootstrap race: the board holds '$(cat "$RACE/board.md" 2>/dev/null)'"
+MUT="$T/mut42"; mkdir -p "$MUT"; cp -R "$B" "$MUT/bin"; sed 's/: >> "\$BOARD_FILE"/: > "$BOARD_FILE"/' "$B/_common.sh" > "$MUT/bin/_common.sh.new"; mv "$MUT/bin/_common.sh.new" "$MUT/bin/_common.sh"
+RACE="$T/race-mut"; WARROOM_DIR="$T/race-run2" BOARD="$RACE/board.md" RACE_DIR="$RACE" PATH="$SH42:$PATH" bash -c '. "$1"' _ "$MUT/bin/_common.sh" >/dev/null 2>&1
+[ -z "$(cat "$RACE/board.md" 2>/dev/null)" ] && ok "bootstrap control: the old truncating create loses that line, so the fixture catches it" || bad "bootstrap control: the old form did not lose the line; the fixture is blind"
+unset FAILMV_FILE
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
