@@ -20,6 +20,14 @@
 #         a key set twice is refused by both readers; two installers at once give one result
 #  27-32. second review (waiter, cursor, guard, reopen): shared opt-out rows, one wake when a waiter is replaced, a board refilled in
 #         place, the guard's job identity and its mark across board generations, reopen READY only with cards, quoted commands
+#  33. a missing board is created without truncating (parallel first posts all survive); an uncreatable board is an error
+#  34. a ledger write that fails leaves the ledger as it was and exits non-zero
+#  35. pids.sh add refuses pid 0 and a pid whose start time cannot be read
+#  36. cpu-sentinel reads the four-column ledger (job policy, owner alerted once); a row with a reused pid is ignored
+#  37. cpu-sentinel --dry-run changes nothing; a failed alert post is retried until it lands, then not repeated
+#  38. merge-daemon: an option without a value exits 2 (no spin); a dry run writes nothing on any outcome
+#  39. merge-daemon readback: merged by this run / merged by another account / accepted but not merged / refused because already merged
+#  40. leak-check: a bad denylist pattern or an unreadable file is an error (exit 2), run-state files in the tree are a hit
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -261,7 +269,6 @@ mkdir -p "$T/i26/cfg" "$T/i26/home"; printf '{"model": "x"}\n' > "$T/i26/cfg/set
 for i in 1 2; do env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i26/home" CLAUDE_CONFIG_DIR="$T/i26/cfg" bash "$ROOT/install.sh" --dir "$T/i26/run" >"$T/i26/o$i" 2>&1 & done; wait
 n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2])); print(d["model"], sum(len(g["hooks"]) for e in d["hooks"].values() for g in e), sum(len(v) for v in m["settings"].values()))' "$T/i26/cfg/settings.json" "$T/i26/home/.warroom/installed-hooks.json" 2>/dev/null)
 [ "$n" = "x 4 4" ] && ok "two installers at once: one result, manifest matches" || bad "concurrent install: '$n' ($(cat "$T/i26/o1" "$T/i26/o2" | grep -i -m1 -E 'could not|changed|another'))"
-
 # 27. two sessions opting out (NONE) keep both rows; a seat's own arm still replaces only that seat's row (FIX 5)
 rm -f "$WARROOM_DIR/seats.tsv"
 "$B/waiter.sh" NONE sid-n1 >/dev/null 2>&1; "$B/waiter.sh" NONE sid-n2 >/dev/null 2>&1; "$B/waiter.sh" NONE sid-n1 >/dev/null 2>&1
@@ -335,6 +342,124 @@ cd_=$(bash "$T/sp dir/bin/reopen.sh" card W1 2>/dev/null)
 case "$bn" in *'sp\ dir/bin/waiter.sh'*) q1=1 ;; *) q1=0 ;; esac
 case "$cd_" in *'sp\ dir/bin/waiter.sh'*) q2=1 ;; *) q2=0 ;; esac
 [ "$q1$q2" = 11 ] && ok "banner and reopen card print a quoted waiter command for a path with a space" || bad "quoting: banner $q1, card $q2"
+
+# 33. a missing board is created with >> (never truncates); an uncreatable one is an error, not silence
+# Only the creation step is raced here (scripts source _common.sh, then append): going through board.sh post would also
+# race the board lock, and that lock starves under 8-way contention on Ubuntu CI ("could not lock the board"); that is a separate lock problem, not board creation.
+# The old window (test, then truncate) is microseconds wide and cannot be forced, so the file is also checked for the append form.
+n=0
+for r in 1 2 3 4 5; do
+  RUN_BOARD="$T/r22.$r"; rm -rf "$RUN_BOARD"; pl=""
+  for k in 1 2 3 4 5 6 7 8; do
+    WARROOM_DIR="$RUN_BOARD" bash -c '. "$1"; printf "first %s\n" "$2" >> "$BOARD_FILE"' _ "$B/_common.sh" "$k" >/dev/null 2>&1 & pl="$pl $!"
+  done
+  wait $pl 2>/dev/null
+  n=$(grep -c 'first' "$RUN_BOARD/board.md" 2>/dev/null); [ "$n" = 8 ] || break
+done
+[ "$n" = 8 ] && ok "eight first writers to a missing board all survive (5 rounds)" || bad "first writers to a missing board: only ${n:-0} of 8 lines survived"
+grep -q ': >> "\$BOARD_FILE"' "$B/_common.sh" && ! grep -qE '(^|[;&] *): > "\$BOARD_FILE"' "$B/_common.sh" && ok "the board is created with an append, not a truncating redirect" || bad "_common.sh creates the board with a truncating redirect"
+printf x > "$T/afile"; WARROOM_DIR="$T/afile/run" "$B/board.sh" path >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && ok "a board that cannot be created is an error" || bad "uncreatable board reported success"
+
+# 34. a failed ledger write keeps the old ledger and fails (ulimit -f is in 1024-byte blocks: 4 = 4 KiB; the 8 KiB ledger
+#     already exists, so only the copy the script writes runs over the limit)
+RUN_LEDGER="$T/r23"; mkdir -p "$RUN_LEDGER"; sleep 30 & J=$!
+python3 -c 'import sys; open(sys.argv[1], "w").write("".join("r%03d\t1\tBOSS\tx\n" % i for i in range(584)))' "$RUN_LEDGER/pids.tsv"; cp "$RUN_LEDGER/pids.tsv" "$T/r23.orig"
+( ulimit -f 4; WARROOM_DIR="$RUN_LEDGER" "$B/pids.sh" add job23 $J BOSS >/dev/null 2>&1 ) 2>/dev/null; rc=$?
+[ $rc != 0 ] && cmp -s "$T/r23.orig" "$RUN_LEDGER/pids.tsv" && [ -z "$(find "$RUN_LEDGER" -name '*tmp*')" ] && ok "failed ledger write: old ledger kept, exit non-zero, no temp file left" \
+  || bad "ledger write failure: rc $rc, ledger $(cmp -s "$T/r23.orig" "$RUN_LEDGER/pids.tsv" && echo same || echo CHANGED)"
+kill $J 2>/dev/null; wait $J 2>/dev/null
+
+# 35. pid 0 and an unreadable start time are refused, nothing is registered
+sleep 30 & J=$!; mkdir -p "$T/fakebin"; printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/ps"; chmod +x "$T/fakebin/ps"
+"$B/pids.sh" add z0 0 BOSS >/dev/null 2>&1; r0=$?; "$B/pids.sh" add z00 000 BOSS >/dev/null 2>&1; r00=$?
+PATH="$T/fakebin:$PATH" "$B/pids.sh" add nops $J BOSS >/dev/null 2>&1; r1=$?
+[ $r0 != 0 ] && [ $r00 != 0 ] && [ $r1 != 0 ] && ! grep -qE '^(z0|z00|nops)	' "$WARROOM_DIR/pids.tsv" && ok "pid 0 and an unreadable start time are refused, no row written" \
+  || bad "pids add: pid0 rc $r0/$r00, no-ps rc $r1, rows $(grep -cE '^(z0|z00|nops)	' "$WARROOM_DIR/pids.tsv")"
+kill $J 2>/dev/null; wait $J 2>/dev/null
+
+# 36. the sentinel reads the four-column ledger: a registered hot process gets the job policy, its owner is alerted once
+RUN_SENT="$T/r25"; mkdir -p "$RUN_SENT"; : > "$RUN_SENT/board.md"
+bash -c 'while :; do :; done' & BL=$!; sleep 2
+WARROOM_DIR="$RUN_SENT" "$B/pids.sh" add busy25 $BL W1 >/dev/null
+for _ in 1 2 3 4 5 6 7; do WARROOM_DIR="$RUN_SENT" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; done
+n=$(grep -c "@W1 ACTION: process $BL .*(job)" "$RUN_SENT/board.md")
+[ "$n" = 1 ] && ok "sentinel: registered hot process is a job, its owner is alerted exactly once" || bad "sentinel job alert: $n lines for the owner"
+# the same row with a start time that is not this process's: the row is ignored (no owner, no job alert)
+awk -F'\t' 'BEGIN{OFS="\t"} {$4="Thu Jan  1 00:00:00 1970"; print}' "$RUN_SENT/pids.tsv" > "$T/r25.mod" && cp "$T/r25.mod" "$RUN_SENT/pids.tsv"
+rm -rf "$RUN_SENT/sentinel"; : > "$RUN_SENT/board.md"
+for _ in 1 2 3 4 5 6; do WARROOM_DIR="$RUN_SENT" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; done
+n=$(grep -c "@W1 ACTION: process $BL " "$RUN_SENT/board.md")
+[ "$n" = 0 ] && ok "sentinel: a ledger row whose pid started at another time is ignored" || bad "sentinel trusted a reused pid ($n alerts to the row's owner)"
+kill $BL 2>/dev/null; wait $BL 2>/dev/null
+
+# 37. --dry-run changes nothing; a failed post is retried, a delivered one is not repeated
+RUN_DRY="$T/r26"; mkdir -p "$RUN_DRY/sentinel"; : > "$RUN_DRY/board.md"
+bash -c 'while :; do :; done' & BL=$!; sleep 2
+KEY="$BL:$(ps -o comm= -p $BL | sed 's/^ *//;s/ *$//')"
+printf '{"strikes": {"%s": 2}, "alerted": []}\n' "$KEY" > "$RUN_DRY/sentinel/strikes.json"; cp "$RUN_DRY/sentinel/strikes.json" "$T/r26.strikes"
+out=$(WARROOM_DIR="$RUN_DRY" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1)
+if printf '%s' "$out" | grep -q "would post to BOSS" && ! grep -q ACTION "$RUN_DRY/board.md" && cmp -s "$T/r26.strikes" "$RUN_DRY/sentinel/strikes.json" && [ ! -e "$RUN_DRY/sentinel/sentinel.log" ]; then
+  ok "sentinel --dry-run: says what it would post, writes no board line, strike file or log"
+else bad "sentinel --dry-run had effects or printed nothing: $(printf '%s' "$out" | head -c 160)"; fi
+mkdir "$RUN_DRY/bd"                                    # a board that is a directory: the alert post fails
+BOARD="$RUN_DRY/bd" WARROOM_DIR="$RUN_DRY" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1
+rmdir "$RUN_DRY/bd"; : > "$RUN_DRY/bd"                     # now the board can be written
+for _ in 1 2; do BOARD="$RUN_DRY/bd" WARROOM_DIR="$RUN_DRY" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; done
+n=$(grep -c "@BOSS ACTION: process $BL " "$RUN_DRY/bd")
+[ "$n" = 1 ] && ok "sentinel: a failed alert post is retried on the next run, then not repeated" || bad "sentinel alert retry: $n lines"
+kill $BL 2>/dev/null; wait $BL 2>/dev/null
+
+# 38. merge-daemon: an option without a value exits 2 instead of spinning; a dry run writes nothing, pass or fail
+"$B/merge-daemon.sh" 7 --head >/dev/null 2>&1 & MP=$!
+if wait_exit $MP 5; then wait $MP; rc=$?; else kill $MP 2>/dev/null; wait $MP 2>/dev/null; rc=spin; fi
+[ "$rc" = 2 ] && ok "merge-daemon: an option with no value exits 2" || bad "merge-daemon with a missing option value: $rc"
+nrec() { ls "$WARROOM_DIR/receipts" 2>/dev/null | wc -l | tr -d ' '; }
+nboard() { wc -l < "$("$B/board.sh" path)" | tr -d ' '; }
+mk OPEN build FAILURE > "$SD/view.1"; rm -f "$SD/view.2" "$SD/merged" "$SD/count"; r0=$(nrec); b0=$(nboard)
+PATH="$SD:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 --require build --dry-run >/dev/null 2>&1; rc=$?
+[ $rc = 1 ] && [ "$(nrec)" = "$r0" ] && [ "$(nboard)" = "$b0" ] && ok "merge-daemon --dry-run: a failing PR ends FAIL and writes no receipt or board line" || bad "failed dry run: rc $rc, receipts $r0->$(nrec), board $b0->$(nboard)"
+mk OPEN build SUCCESS > "$SD/view.1"; rm -f "$SD/merged" "$SD/count"
+PATH="$SD:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 --require build --dry-run >/dev/null 2>&1; rc=$?
+[ $rc = 0 ] && [ ! -e "$SD/merged" ] && [ "$(nrec)" = "$r0" ] && [ "$(nboard)" = "$b0" ] && ok "merge-daemon --dry-run: a green PR passes, merges nothing, writes nothing" || bad "green dry run: rc $rc, receipts $r0->$(nrec), board $b0->$(nboard)"
+
+# 39. merge-daemon readback: four outcomes that must not be told apart by "merged" alone
+S2="$T/stub2"; mkdir -p "$S2"; export GH_STUB_DIR="$S2"
+cat > "$S2/gh" <<'STUB'
+#!/usr/bin/env bash
+d=$GH_STUB_DIR
+case "$*" in
+  *"pr merge"*) if [ -e "$d/refuse" ]; then touch "$d/ext"; echo "Pull request is already merged" >&2; exit 1; fi
+                [ -e "$d/queued" ] || touch "$d/merged"; exit 0 ;;
+  *"api user"*) cat "$d/me" 2>/dev/null; exit 0 ;;
+  *mergeCommit*) printf 'feedface\t%s\n' "$(cat "$d/mergedby" 2>/dev/null)"; exit 0 ;;
+  *statusCheckRollup*) if [ -e "$d/merged" ] || [ -e "$d/ext" ]; then cat "$d/view.merged"; else cat "$d/view.1"; fi ;;
+esac
+STUB
+chmod +x "$S2/gh"; mk OPEN build SUCCESS > "$S2/view.1"; mk MERGED build SUCCESS > "$S2/view.merged"
+outcome() { # outcome FLAGS... : run once on a clean stub, print the last POSTCONDITION line and the exit code
+  rm -f "$S2/merged" "$S2/ext" "$S2/refuse" "$S2/queued" "$S2/me" "$S2/mergedby"; : > "$("$B/board.sh" path)"
+  for f in "$@"; do case "$f" in me=*) echo "${f#me=}" > "$S2/me" ;; by=*) echo "${f#by=}" > "$S2/mergedby" ;; *) touch "$S2/$f" ;; esac; done
+  PATH="$S2:$PATH" "$B/merge-daemon.sh" 7 --head "$SHA" --poll 1 --timeout 3 --require build >/dev/null 2>&1; echo "rc=$? $(grep POSTCONDITION "$("$B/board.sh" path)" | tail -1)"; }
+o=$(outcome me=ownerlogin by=ownerlogin); case "$o" in "rc=0 "*"POSTCONDITION PASS"*"merged by this run (invocation"*) ok "merge readback: merged by this run's account is reported as such" ;; *) bad "own merge: $o" ;; esac
+o=$(outcome me=ownerlogin by=otherlogin); case "$o" in "rc=1 "*"POSTCONDITION FAIL"*"NOT merged by this run's account"*) ok "merge readback: merged by another account is not a pass" ;; *) bad "other account: $o" ;; esac
+o=$(outcome queued); case "$o" in "rc=1 "*"POSTCONDITION FAIL"*"still 'OPEN'"*) ok "merge readback: accepted but still open (queue/auto-merge) is not a pass" ;; *) bad "queued: $o" ;; esac
+o=$(outcome refuse); case "$o" in "rc=1 "*"POSTCONDITION FAIL"*"already MERGED by someone else"*) ok "merge readback: refused because already merged is reported as another actor's merge" ;; *) bad "refused/ext: $o" ;; esac
+o=$(outcome); case "$o" in "rc=0 "*"POSTCONDITION PASS"*"does not prove this run did it"*) ok "merge readback: an unreadable merging account passes with the limit stated" ;; *) bad "unreadable merger: $o" ;; esac
+export GH_STUB_DIR="$SD"
+
+# 40. leak-check: scan errors are errors, run-state files in the tree are hits
+LK="$T/lk"; mkdir -p "$LK/tree"; printf 'nothing here\n' > "$LK/tree/a.txt"; printf '(unbalanced\n' > "$LK/bad.deny"
+bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r0=$?
+LEAKCHECK_DENYLIST="$LK/bad.deny" bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r1=$?
+[ $r0 = 0 ] && [ $r1 = 2 ] && ok "leak-check: a clean tree passes, a malformed denylist pattern is an error (exit 2)" || bad "leak-check: clean rc $r0, bad pattern rc $r1"
+if [ "$(id -u)" != 0 ]; then
+  printf 'x\n' > "$LK/tree/locked.txt"; chmod 000 "$LK/tree/locked.txt"
+  bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r2=$?; chmod 600 "$LK/tree/locked.txt"
+  [ $r2 = 2 ] && ok "leak-check: an unreadable file is an error, not a clean result" || bad "leak-check on an unreadable file: rc $r2"
+fi
+: > "$LK/tree/pids.tsv"; bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r3=$?
+[ $r3 = 1 ] && ok "leak-check: a run-state file inside the tree is a hit" || bad "leak-check on a tree holding pids.tsv: rc $r3"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail

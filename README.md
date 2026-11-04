@@ -1,7 +1,7 @@
 
 # warroom
 
-Coordinate several Claude Code sessions through one text file. A background waiter wakes a seat when a line says its name, and optional helpers leave a receipt for a merge and tell a job's owner when it ends. How many sessions you can run depends on your plan.
+Coordinate several Claude Code sessions through one text file. A shell waiter delivers a matching first-line `ACTION` post to a seat, and optional helpers attempt a receipt for a merge and a post when a job ends. How many sessions you can run depends on your plan.
 
 ## What is it for
 
@@ -16,14 +16,14 @@ Coordinate several Claude Code sessions through one text file. A background wait
 | A text file is the chat | messages live in `board.md`; seats use `board.sh` to post and read, and helper state (seat registry, job ledger) sits in the run directory |
 | Models need not poll | a local shell waiter checks the board for each seat; the seat starts it as a background task and then sleeps |
 | The waiting loop makes no model calls | the waiter normally exits when a matching line arrives; it also exits when another waiter replaces it (exit 3, which is not a wake) and on errors |
-| A merge leaves a receipt, a long job can wake its owner | a finished merge attempt writes a receipt file and posts a line starting `POSTCONDITION PASS` or `POSTCONDITION FAIL`; while a waiter is running, a job registered with `pids.sh` posts a wake line to its owner when its process is gone |
+| A merge attempt tries to leave a receipt, a long job can post a wake | a non-dry merge attempt tries to write a receipt file and post a line starting `POSTCONDITION PASS` or `POSTCONDITION FAIL`, and ends FAIL if either write fails; while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone, and keeps the ledger row if the post fails |
 | Reopen prepares fresh sessions | `reopen.sh` asks every seat for a card and builds one paste message per seat; you save each card and check it before closing a session |
 
 ## Quick start: two sessions
 
 You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for the merge daemon, which you can leave for later.
 
-**1. Install.** The hooks apply to every Claude Code session that reads the settings file the installer edits, including sessions in other projects. A session you want left alone opts out with `waiter.sh NONE <session id>`.
+**1. Install.** The hooks apply to every Claude Code session that reads the settings file the installer edits, including sessions in other projects. Each session you want left alone opts out on its own with `waiter.sh NONE <session id>`.
 
 ```
 git clone <this repo> warroom && cd warroom
@@ -57,7 +57,7 @@ Tell the session to run that as a Claude Code background task (the Bash tool wit
 bash "<clone>/bin/board.sh" post BOSS '@W1 ACTION: reply with ready'
 ```
 
-The `W1` session is told its background job finished and shows the line. The default check interval is 5 seconds (`WARROOM_POLL`), and two wakes for the same seat are at least 60 seconds apart (`WARROOM_MIN_GAP`). The seat then acts on the line and starts its waiter again. If nothing arrives, the next prompt in that session shows `[WAITER ENDED]` or `[WAITER NOT ARMED]`.
+When Claude Code delivers the background task's completion, the `W1` session sees the line the waiter printed; this two-session check is how you confirm it on your machine. The default is a 5-second sleep between checks (`WARROOM_POLL`) and a hold of about 60 seconds between ordinary sequential wakes for one seat (`WARROOM_MIN_GAP`). The seat is expected to act on the line and start its waiter again. If nothing arrives, the next prompt reports a missing or dead waiter; a live waiter can stay silent, so also check the line's grammar, the saved position and the gap.
 
 **Show it to your AI instead.** Paste this into a Claude Code session started in the clone:
 
@@ -121,14 +121,14 @@ Optional helpers beside the board: `pids.sh` notices when a registered job's pro
 | a framework or an agent library | no code of yours imports it |
 | a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts and one Python watchdog |
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
-| a way to get more from your plan | it avoids paying for polling; it does not change your limits |
+| a way to get more from your plan | it avoids spending model turns on repeatedly checking for work; your plan and its limits still apply |
 | a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. The scripts do not check that a seat acted on a line |
 
 ## FAQ
 
 | question | answer |
 |---|---|
-| Does it work with one seat? | Yes. One seat gets the board, the receipts and the job ledger. The wake lines matter once there is a second seat. |
+| Does it work with one seat? | Yes. One seat gets the board, the receipts and the job ledger, and can still receive `GUARD` job and idle alerts. More seats add handoffs between roles. |
 | Does it need a particular plan? | Not tested on every plan. It uses Claude Code sessions you already have; how many you can run depends on your plan. |
 | Windows? | Not yet. The scripts need bash and python3. |
 | pip or pipx? | Roadmap, not in v0.1. |

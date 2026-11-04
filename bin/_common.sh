@@ -19,7 +19,13 @@ WARROOM_DIR=${WARROOM_DIR:-$HOME/warroom-run}
 BOARD=${BOARD:-board.md}
 case "$BOARD" in /*) BOARD_FILE="$BOARD" ;; *) BOARD_FILE="$WARROOM_DIR/$BOARD" ;; esac
 W="$WARROOM_DIR"
-mkdir -p "$W" 2>/dev/null; [ -e "$BOARD_FILE" ] || : > "$BOARD_FILE"
+# Create a missing board with >>, which never truncates: two scripts that both find it missing must not erase each
+# other's first post. If the run directory or the board cannot be created, say so and stop (a hook exits 1, not 2).
+mkdir -p "$W" 2>/dev/null
+if [ ! -e "$BOARD_FILE" ]; then
+  mkdir -p "$(dirname "$BOARD_FILE")" 2>/dev/null
+  : >> "$BOARD_FILE" 2>/dev/null || { echo "cannot create the board $BOARD_FILE" >&2; exit "$WR_CONFIG_EXIT"; }
+fi
 # shellcheck disable=SC2034
 BOSS_SEAT=${SEATS%% *}
 
