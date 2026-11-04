@@ -13,6 +13,9 @@
 #  11. locks: a live owner is never evicted, a dead owner is reclaimed, a non-owner cannot release
 #  12. the job ledger: concurrent add of one label gives one row; a reused pid (wrong start time) counts as gone
 #  13. merge-daemon (gh stubbed): a check that fails on the second look, or a required check that never appears, merges nothing
+#  14-16. warroom.env is data: command text refused, the current folder ignored, shell and cpu-sentinel.py agree
+#  17-20. install.sh: refuses command text in --dir, survives an interrupted write, re-points a moved clone, keeps config
+#  21. every hook with a bad warroom.env exits 1 (shown, prompt goes through), never 2 (Claude Code blocks the prompt)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -165,6 +168,59 @@ mk OPEN build SUCCESS lint NEUTRAL > "$SD/view.1"; runmd --require build; rc=$?
 [ $rc = 0 ] && [ -e "$SD/merged" ] && ok "merge-daemon: green on two looks with the required check merges, pinned" || bad "merge-daemon did not merge a green PR (rc $rc)"
 runmd --head "${SHA%a}b"; rc=$?
 [ $rc = 1 ] && [ ! -e "$SD/merged" ] && ok "merge-daemon: a branch that is not at the pinned head merges nothing" || bad "merge-daemon ignored the pinned head (rc $rc)"
+
+# 14. config is data, never code: a $(...) in warroom.env is refused and does not run
+printf 'WARROOM_DIR="$(touch %s/m-env)"\n' "$T" > "$T/bad.env"
+WARROOM_ENV="$T/bad.env" "$B/board.sh" path >/dev/null 2>&1; rc=$?
+[ $rc = 2 ] && [ ! -e "$T/m-env" ] && ok "command text in warroom.env is refused, not run" || bad "bad warroom.env: rc $rc, ran=$([ -e "$T/m-env" ] && echo yes || echo no)"
+
+# 15. a warroom.env in the current folder is ignored (only $WARROOM_ENV or ~/.warroom/warroom.env are read)
+mkdir -p "$T/cwd" "$T/h8"; printf 'SEATS="EVIL"\nWARROOM_DIR="%s/cwd-run"\n' "$T" > "$T/cwd/warroom.env"
+got=$(cd "$T/cwd" && env -u SEATS -u WARROOM_DIR -u WARROOM_ENV HOME="$T/h8" bash "$B/board.sh" path 2>&1)
+[ "$got" = "$T/h8/warroom-run/board.md" ] && ok "warroom.env in the current folder is ignored" || bad "cwd config was read: $got"
+
+# 16. the shell scripts and cpu-sentinel.py resolve the same config
+printf 'SEATS="A1 B2"\nWARROOM_DIR="$HOME/run9"\nBOARD="b9.md"\n' > "$T/s9.env"
+sh_cfg=$(env -u SEATS -u WARROOM_DIR HOME="$T/h8" WARROOM_ENV="$T/s9.env" bash -c '. "$1/_common.sh"; printf "SEATS=%s\nWARROOM_DIR=%s\nBOARD_FILE=%s\n" "$SEATS" "$WARROOM_DIR" "$BOARD_FILE"' _ "$B")
+py_cfg=$(env -u SEATS -u WARROOM_DIR HOME="$T/h8" WARROOM_ENV="$T/s9.env" python3 "$B/cpu-sentinel.py" --config)
+[ "$sh_cfg" = "$py_cfg" ] && ok "shell and cpu-sentinel.py read the same config" || bad "config differs: [$sh_cfg] vs [$py_cfg]"
+mkdir -p "$T/p9"; cp "$T/s9.env" "$T/p9/\$(touch m-py)"
+(cd "$T/p9" && WARROOM_ENV="$T/p9/\$(touch m-py)" python3 "$B/cpu-sentinel.py" --config >/dev/null 2>&1)
+[ ! -e "$T/p9/m-py" ] && ok "cpu-sentinel.py never hands the config path to a shell" || bad "cpu-sentinel.py ran text from the config path"
+
+# 17. install.sh refuses a --dir with command text and writes nothing
+mkdir -p "$T/i10/cfg" "$T/i10/home"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i10/home" CLAUDE_CONFIG_DIR="$T/i10/cfg" bash "$ROOT/install.sh" --dir "$T/i10/\$(touch $T/m-dir)" >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && [ ! -e "$T/m-dir" ] && [ ! -e "$T/i10/home/.warroom" ] && [ ! -e "$T/i10/cfg/settings.json" ] \
+  && ok "install refuses \$(...) in --dir and writes nothing" || bad "install --dir with command text: rc $rc"
+
+# 18. an interrupted settings write leaves settings.json exactly as it was (the write goes to a temp file first)
+mkdir -p "$T/i11/cfg" "$T/i11/home"
+# bash counts ulimit -f in 1024-byte blocks: 8 = 8 KiB. The file fits under it; the file with the hooks added does not.
+python3 -c 'import json,sys; json.dump({"model": "x", "pad": "p" * 7950}, open(sys.argv[1], "w"))' "$T/i11/cfg/settings.json"
+cp "$T/i11/cfg/settings.json" "$T/i11/orig"
+( ulimit -f 8; env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i11/home" CLAUDE_CONFIG_DIR="$T/i11/cfg" bash "$ROOT/install.sh" --dir "$T/i11/run" >/dev/null 2>&1 ); rc=$?
+[ $rc != 0 ] && cmp -s "$T/i11/orig" "$T/i11/cfg/settings.json" && ok "interrupted settings write leaves the file intact, install fails" \
+  || bad "interrupted write: rc $rc, file $(cmp -s "$T/i11/orig" "$T/i11/cfg/settings.json" && echo same || echo CHANGED)"
+
+# 19. reinstall: a moved clone's entries are pointed here, never doubled; a second run changes nothing
+mkdir -p "$T/i12/cfg" "$T/i12/home"
+printf '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash /gone/clone/hooks/board-tail.sh"}]}]}}\n' > "$T/i12/cfg/settings.json"
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" --dir "$T/i12/run" >/dev/null 2>&1
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" >"$T/i12/out2" 2>&1
+n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["hooks"]; print(sum(len(g["hooks"]) for e in d.values() for g in e), sum("/gone/" in h["command"] for e in d.values() for g in e for h in g["hooks"]))' "$T/i12/cfg/settings.json")
+nb=0; for f in "$T"/i12/cfg/settings.json.warroom-bak-*; do [ -e "$f" ] && nb=$((nb + 1)); done
+[ "$n" = "4 0" ] && [ "$nb" = 1 ] && grep -q "nothing to change" "$T/i12/out2" && ok "moved clone re-pointed, second run changes nothing" || bad "reinstall: entries/old '$n', backups $nb"
+
+# 20. reinstall with other seats than the existing config is refused, not silently ignored
+env -u WARROOM_ENV -u SEATS -u WARROOM_DIR HOME="$T/i12/home" CLAUDE_CONFIG_DIR="$T/i12/cfg" bash "$ROOT/install.sh" --seats "X1 X2" >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && grep -q 'SEATS="BOSS MANAGER W1 W2"' "$T/i12/home/.warroom/warroom.env" && ok "install refuses seats that differ from the existing config" || bad "install with other seats: rc $rc"
+
+# 21. a hook never exits 2 on a bad config: Claude Code would block the prompt, in every session on the machine
+hr=""; for h in board-guard board-tail waiter-check; do
+  printf '{"session_id": "sid-h21"}' | WARROOM_ENV="$T/bad.env" bash "$ROOT/hooks/$h.sh" >/dev/null 2>&1; hr="$hr $h=$?"
+done
+[ "$hr" = " board-guard=1 board-tail=1 waiter-check=1" ] && [ ! -e "$T/m-env" ] && ok "hooks exit 1, not 2, on a bad warroom.env" || bad "hook exit codes on a bad config:$hr"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
