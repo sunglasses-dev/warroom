@@ -1,7 +1,7 @@
 
 # warroom
 
-Run a boss, a manager and two workers in Claude Code all day on one subscription: a shared text file is the chat, a seat wakes only when a line says its name, every long job leaves a receipt.
+Run a boss, a manager and two workers in Claude Code all day on one subscription: a shared text file is the chat, a seat wakes only when a line says its name, a merge leaves a receipt, and a finished long job wakes its owner.
 
 ## What is it for
 
@@ -15,8 +15,8 @@ Run a boss, a manager and two workers in Claude Code all day on one subscription
 |---|---|
 | A text file is the chat | one file, `board.md`; every seat appends a stamped line and reads what is new |
 | Nobody polls | a seat starts one background waiter and then sleeps |
-| A sleeping seat costs nothing | the waiter is a shell loop, not a model call; it exits only when a line names its seat |
-| Every long job leaves a receipt | a merge writes a file and a final line, `POSTCONDITION PASS` or `POSTCONDITION FAIL` |
+| A sleeping seat costs no tokens | the waiter is a shell loop, not a model call; it exits only when a line names its seat |
+| A merge leaves a receipt, a long job wakes its owner | a merge writes a file and a final line, `POSTCONDITION PASS` or `POSTCONDITION FAIL`; a job registered with `pids.sh` wakes its owner once when it ends |
 | Fresh sessions keep the thread | `reopen.sh` has each seat write a card, then builds one paste message per seat |
 
 ## How to use it: two doors
@@ -30,6 +30,8 @@ bash install.sh               # writes warroom.env, backs up your Claude Code se
 ```
 
 `install.sh` ends by printing one first message per seat. Paste each into that seat's own Claude Code session.
+
+The hooks point at this clone's absolute path, so keep the clone where it is. If you move it, run `install.sh` again.
 
 **Door 2: show this repo to your AI**
 

@@ -21,4 +21,4 @@ We reply within 72 hours, tell you what we will do, and credit you in the releas
 
 - Send anything over the network, except `gh` calls the merge daemon makes to the repository you point it at
 - Run anything as root
-- Read files outside the run directory and the Claude Code settings file
+- Read files other than these: your run directory, the Claude Code settings file, and `warroom.env` (looked up at `$WARROOM_ENV`, then `./warroom.env`, then `~/.warroom/warroom.env`, then the clone folder). `cpu-sentinel.py` also reads the process list through `ps`
