@@ -8,8 +8,8 @@ Run the same three checks CI runs. All three must pass.
 
 ```bash
 bash tools/leak-check.sh          # 0 hits for the configured patterns; it does not read git history, so check names, credentials and history yourself
-shellcheck -S warning bin/*.sh hooks/*.sh install.sh tools/*.sh tests/*.sh
-bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse, dead job, guard, installer
+shellcheck -S warning bin/*.sh hooks/*.sh tools/*.sh tests/*.sh
+bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse, dead job, guard, reopen
 ```
 
 `python3 -m py_compile bin/*.py` covers the one Python file.

@@ -23,30 +23,27 @@ Coordinate several Claude Code sessions through one text file. A shell waiter de
 
 You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for `pr-watch.sh`, which you can leave for later.
 
-**1. Install.** `install.sh` writes `warroom.env` and the run directory, and prints the four hook entries for you to add. It never edits your Claude Code settings file.
+**1. Install.** There is no installer script: you make one edit to your Claude Code settings, by hand or with your Claude Code session, and [docs/INSTALL.md](docs/INSTALL.md) has the exact commands and the hook block. In short:
 
 ```
 git clone https://github.com/sunglasses-dev/warroom warroom && cd warroom
-bash install.sh --dry-run     # runs the checks, prints the plan and the hook block, writes nothing
-bash install.sh               # writes warroom.env and the run directory, prints the hook block
 ```
 
-It names the settings file the block belongs in (`$CLAUDE_CONFIG_DIR/settings.json`, or `settings.json` in the `.claude` folder in your home folder) and says what to do for the state that file is in now. Then:
-
-- (a) Save a copy of the settings file. When the file exists, `install.sh` prints the `cp` command; with no file yet there is nothing to copy.
-- (b) Add the block. No file yet: create it with the block as its whole content. No `"hooks"` key: add the block's `"hooks"` property and keep every other one. A `"hooks"` key already there: keep every event, group and entry in it, add only the missing entries as a new group at the end of that event's list, and never add a second `"hooks"` key. A file that does not parse: repair it first, do not paste into it.
-- (c) Check that the file still parses, and compare it with the copy.
-- (d) Run `bash install.sh --check`. It lists where each of the four commands appears in that one file: exit 0 when all four are found, 1 when some are missing, 2 when it cannot read the file (it says why). It checks text, not that the hooks run; Quick start step 4 is the real test.
+- (a) Copy `warroom.env.example` to `~/.warroom/warroom.env` and edit the seats, run directory and board name.
+- (b) Create the run directory and an empty board.
+- (c) Save a uniquely named copy of your Claude Code settings file, then merge the `hooks` block from `docs/INSTALL.md` into it, with the full path of your clone in place of the placeholder. No second `"hooks"` key; a file that does not parse is repaired first, never pasted into.
+- (d) Check that the file still parses with the one `python3` command in `docs/INSTALL.md`, and compare it with the copy.
+- (e) Open two fresh sessions and run the wake check below (steps 2 to 4). That check is the real test.
 
 Take care with the edit. On Claude Code 2.1.318 we saw this, in a fresh session: a settings file that is not valid JSON is reported as not loaded, and nothing in it is in effect, hooks and permission rules included; one hook entry whose command is a number is skipped and the rest of the file stays in effect. Other mistakes were not tried. Whether a session that is already open picks up the change was not checked either: if the banner in Quick start step 3 does not appear, restart the session. Keep the copy until the wake check passes.
 
 The hooks apply to every Claude Code session that reads that settings file, including sessions in other projects. Each session you want left alone opts out on its own with `waiter.sh NONE <session id>`.
 
-`warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else. `install.sh` refuses to write it, or the board, when either one is the settings file or links to it.
+`warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else.
 
-Keep the clone where it is: the hooks hold its absolute path. After a move, `--check` finds the old commands as "other reference" entries; replace them with the block `install.sh` prints from the new place. Writing `warroom.env` and creating the run directory are separate steps: if the second fails, the first stays, and running `install.sh` again continues from there. To remove the war room, `bash install.sh --uninstall` prints the entries to take out and a separate cleanup command; it deletes nothing.
+Keep the clone where it is: the hooks hold its absolute path. After a move, edit the four paths in the settings file by hand. To remove the war room, see the end of `docs/INSTALL.md`: remove the four entries, stop your jobs, and delete the run directory only after looking inside it.
 
-**2. Start two Claude Code sessions** and paste one of the first messages `install.sh` printed into each, for example `BOSS` into the first and `W1` into the second.
+**2. Start two Claude Code sessions** and paste the first message from step 5 of `docs/INSTALL.md` into each, with `BOSS` as the seat in the first and `W1` in the second.
 
 **3. Arm each waiter with its real session id.** When a session starts, and on its next prompt, the hook prints a banner that holds the session's own id:
 
@@ -73,18 +70,19 @@ When Claude Code delivers the background task's completion, the `W1` session see
 **Show it to your AI instead.** Paste this into a Claude Code session started in the clone:
 
 ```
-Read README.md, install.sh and hooks/waiter-check.sh in this folder. Run bash install.sh --dry-run,
-then bash install.sh for seats BOSS MANAGER W1 W2. Add the hook block it prints to the settings file
-it names, as its advice says for that file: save a copy first, keep every setting, event and entry
-already there, add only the missing entries, never a second "hooks" key, and stop and tell me if the
-file does not parse. Show me the diff against the copy, then run bash install.sh --check.
+Read README.md, docs/INSTALL.md and hooks/waiter-check.sh in this folder. Follow docs/INSTALL.md
+for seats BOSS MANAGER W1 W2: write ~/.warroom/warroom.env and create the run directory. For my Claude Code
+settings file, first save a uniquely named copy if the file exists, then merge only the hooks property
+into it as the document says: keep every setting, event and entry already there, add only the missing
+entries, never a second "hooks" key, and stop and tell me if the file does not parse. Show me the diff
+against the copy and run the parse command from the document.
 I am seat BOSS. Take my session id from the waiter banner (if there is none, tell me to restart this
 session) and start my waiter as a Claude Code background task. I will open a second session for W1
-with the first message install.sh printed; then run the two-session wake check from the Quick start.
-Leave pr-watch.sh, cpu-sentinel.py and the --uninstall cleanup command alone.
+with the first message from the document; then run the two-session wake check from the Quick start.
+Leave pr-watch.sh and cpu-sentinel.py alone.
 ```
 
-Nothing in this repo is piped from the internet into a shell. Read `install.sh` first; it is short.
+Nothing in this repo is piped from the internet into a shell. Read `docs/INSTALL.md` and the four hook scripts first; they are short.
 
 ## What a day looks like
 
