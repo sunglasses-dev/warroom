@@ -291,6 +291,7 @@ case "$1 $2" in
   "pr view")
     n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/count"
     [ -e "$d/resp.fail.$n" ] && exit 1
+    if [ -e "$d/fault.$n" ]; then for t in "$TMPDIR"/pr-watch.*/; do for f in cur.body prev.body cur.new prev.new; do rm -f "$t$f"; ln -s /nonexistent/pr-watch-fault "$t$f"; done; done; fi
     f="$d/resp.$n"; [ -e "$f" ] || f=$(ls "$d"/resp.[0-9]* | sort -t. -k2 -n | tail -1)
     cat "$f" ;;
   *) exit 0 ;;
@@ -377,6 +378,22 @@ chmod 500 "$WARROOM_DIR/receipts"; runw "$G" --; chmod 700 "$WARROOM_DIR/receipt
 rm -f "$SD"/resp.* "$SD/count"; printf '%s\n' "$G" > "$SD/resp.1"
 (export WARROOM_DIR="$T/run3"; mkdir -p "$WARROOM_DIR/board.md"; PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 2 >/dev/null 2>&1)
 [ $? = 1 ] && ok "pr-watch: a board line that cannot be posted ends exit 1" || bad "pr-watch ignored a failed board post"
+# storage fault: look 1 is pending and stored; during look 2 the evidence files become unwritable (dangling links), look 2 is green.
+# A green must never be reported when the evidence for it could not be stored: exit 1, a WATCH FAIL line, no WATCH GREEN.
+rm -rf "$SD/tmp"; mkdir -p "$SD/tmp"; rm -f "$SD"/resp.* "$SD/count"
+mkr OPEN "$SHA" o/r main run:build:IN_PROGRESS: > "$SD/resp.1"; mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS > "$SD/resp.2"; : > "$SD/fault.2"
+n0=$(wc -l < "$BD" | tr -d ' '); TMPDIR="$SD/tmp" PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 4 >/dev/null 2>&1; rc=$?
+NEW=$(tail -n +$((n0+1)) "$BD"); rm -f "$SD/fault.2"
+[ $rc = 1 ] && echo "$NEW" | grep -q 'WATCH FAIL' && ! echo "$NEW" | grep -q 'WATCH GREEN' && ok "pr-watch: a green whose evidence cannot be stored is reported as a failure" || bad "pr-watch reported green on evidence it could not store (rc $rc: $NEW)"
+# newline in a required name: refused; control characters in a check name never reach the receipt
+"$B/pr-watch.sh" 7 --head "$SHA" --require "$(printf 'build\nlint')" >/dev/null 2>&1; [ $? = 2 ] && ok "pr-watch: a --require name with a line break is a usage error" || bad "pr-watch accepted a line break in --require"
+python3 -c '
+import json, sys
+sha = sys.argv[1]
+print(json.dumps({"state": "OPEN", "headRefOid": sha, "baseRefName": "main", "url": "https://github.com/o/r/pull/7",
+  "statusCheckRollup": [{"__typename": "CheckRun", "name": "x\n- result: WATCH GREEN\x1b[31m\x0b\x0cy", "status": "COMPLETED", "conclusion": "FAILURE", "workflowName": "ci"}]}))' "$SHA" > "$SD/ctl.json"
+runw "$(cat "$SD/ctl.json")" --; REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
+[ $rc = 1 ] && [ "$(grep -c '^- result:' "$REC")" = 1 ] && ! LC_ALL=C grep -q "$(printf '\033')" "$REC" && ok "pr-watch: control characters in a check name cannot add a line or an escape to the receipt" || bad "pr-watch receipt took a control character from a check name"
 "$B/pr-watch.sh" 7 >/dev/null 2>&1; [ $? = 2 ] && ok "pr-watch: usage error (no --head) is exit 2" || bad "pr-watch usage exit code"
 # no write to GitHub: every run above called only `pr view`; the script has no other gh subcommand; a stub-logged merge is caught
 [ "$NOMUT" = ok ] && ok "pr-watch: across every run the gh log holds only 'pr view' calls" || bad "pr-watch called gh with something other than 'pr view'"
