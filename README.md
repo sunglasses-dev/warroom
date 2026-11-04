@@ -15,8 +15,8 @@ Coordinate several Claude Code sessions through one text file. A background wait
 |---|---|
 | A text file is the chat | messages live in `board.md`; seats use `board.sh` to post and read, and helper state (seat registry, job ledger) sits in the run directory |
 | Models need not poll | a local shell waiter checks the board for each seat; the seat starts it as a background task and then sleeps |
-| The waiting loop makes no model calls | the waiter normally exits when a matching line arrives; it also exits when another waiter replaces it and on errors |
-| A merge leaves a receipt, a long job can wake its owner | a finished merge attempt writes a receipt file and posts a line starting `POSTCONDITION PASS` or `POSTCONDITION FAIL`; while a waiter is running, a job registered with `pids.sh` posts one wake line to its owner when its process is gone |
+| The waiting loop makes no model calls | the waiter normally exits when a matching line arrives; it also exits when another waiter replaces it (exit 3, which is not a wake) and on errors |
+| A merge leaves a receipt, a long job can wake its owner | a finished merge attempt writes a receipt file and posts a line starting `POSTCONDITION PASS` or `POSTCONDITION FAIL`; while a waiter is running, a job registered with `pids.sh` posts a wake line to its owner when its process is gone |
 | Reopen prepares fresh sessions | `reopen.sh` asks every seat for a card and builds one paste message per seat; you save each card and check it before closing a session |
 
 ## Quick start: two sessions
@@ -27,11 +27,13 @@ You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for 
 
 ```
 git clone <this repo> warroom && cd warroom
-bash install.sh --dry-run     # prints the planned steps, writes nothing, does not check your settings
-bash install.sh               # writes warroom.env, backs up your Claude Code settings, adds the hooks
+bash install.sh --dry-run     # runs the checks and prints the plan, writes nothing
+bash install.sh               # writes warroom.env, backs up your Claude Code settings, adds four hook entries
 ```
 
-Keep the clone where it is: the hooks point at its absolute path.
+`warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else.
+
+Keep the clone where it is: the hooks point at its absolute path. If you move it, run `install.sh` again; the entries for the old place are pointed at the new one.
 
 **2. Start two Claude Code sessions** and paste one of the first messages `install.sh` printed into each, for example `BOSS` into the first and `W1` into the second.
 
@@ -82,7 +84,7 @@ A synthetic board (`examples/4-seat/sample-board.md`):
 [10:34 · BOSS] POSTCONDITION PASS merge of PR 12: merged (receipt receipts/merge_12.md)
 ```
 
-The first line of a post, after its stamp, is what a waiter reads. It starts with `@SEAT ACTION:` or `@ALL ACTION:` to wake a seat. An ordinary mention of a seat name does not wake it.
+A waiter reads only the first line of a post, right after its stamp. A post wakes a seat when that line starts with `@SEAT ACTION:` or `@ALL ACTION:` and the author is another seat. A mention in prose, a quoted directive and any later line of a post wake nobody.
 
 ## How it fits together
 
@@ -110,7 +112,7 @@ The first line of a post, after its stamp, is what a waiter reads. It starts wit
   the seat reads the line, acts, and starts its waiter again
 ```
 
-Optional helpers beside the board: `pids.sh` notices when a registered job's process is gone, `merge-daemon.sh` merges a pull request pinned to one head once its checks are green and writes a receipt, `cpu-sentinel.py` reports selected processes that stay hot, `reopen.sh` prepares the cards and paste messages for fresh sessions.
+Optional helpers beside the board: `pids.sh` notices when a registered job's process is gone, `merge-daemon.sh` merges a pull request pinned to one head once its checks are green and writes a receipt (it is a template; the guarantee that nothing merges unchecked is branch protection with required checks on the server), `cpu-sentinel.py` reports selected processes that stay hot, `reopen.sh` prepares the cards and paste messages for fresh sessions.
 
 ## What it is not
 
@@ -120,7 +122,7 @@ Optional helpers beside the board: `pids.sh` notices when a registered job's pro
 | a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts and one Python watchdog |
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
 | a way to get more from your plan | it avoids paying for polling; it does not change your limits |
-| a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The scripts do not check that a seat acted on a line |
+| a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. The scripts do not check that a seat acted on a line |
 
 ## FAQ
 

@@ -12,3 +12,7 @@ cards/
 REOPEN_LEDGER.md
 REOPEN_MESSAGES_*.md
 *.warroom-bak-*
+*.bak-*
+.cursor-*
+.lastwake-*
+.anchor-*
