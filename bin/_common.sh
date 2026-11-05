@@ -38,7 +38,7 @@ wr_mtime() {
   echo "$_m"
 }
 wr_seat_ok() { case " $SEATS " in *" $1 "*) return 0 ;; esac; return 1; }
-# --- The writer lock (design: docs/design/LOCK_AND_MERGE_GATE.md, Part A) -------------------------------------------
+# --- The writer lock -----------------------------------------------------------------------------------------------
 # One writer at a time per protected file, for writers that use these functions (the lock is advisory).
 #   wr_lock FILE      take FILE's lock, waiting up to WARROOM_LOCK_WAIT seconds (default 10). 0 = held, 1 = not taken
 #                     (the reason is on stderr), 2 = refused (subshell, alias, already held, nesting limit)

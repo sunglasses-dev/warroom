@@ -1,12 +1,12 @@
 name: It did not wake
-description: A seat should have woken up and did not (or woke when it should not have)
+description: A seat should have woken up and did not (or woke when it should not have). Remove private text from the board line and session ids from anything you paste.
 labels: [wake-bug]
 body:
   - type: textarea
-    attributes: {label: The board line, description: The exact line that should have woken the seat, copied from the board file}
+    attributes: {label: The board line, description: "The exact line that should have woken the seat, copied from the board file. Replace any private text in it with [removed]"}
     validations: {required: true}
   - type: textarea
-    attributes: {label: Waiter state, description: "Output of: cat $WARROOM_DIR/seats.tsv, and whether the waiter process was still alive (ps -p <pid>)"}
+    attributes: {label: Waiter state, description: "Output of: cat $WARROOM_DIR/seats.tsv, and whether the waiter process was still alive (ps -p <pid>). The registry holds Claude Code session ids: replace them with [removed] before you paste"}
     validations: {required: true}
   - type: input
     attributes: {label: Seat name and session, description: "e.g. W1, armed as: bash bin/waiter.sh W1 <session id>"}
