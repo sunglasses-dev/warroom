@@ -243,7 +243,7 @@ printf 'line one\nline two\n' > "$R3/board.md"; b0=$(cksum < "$R3/board.md"); pl
 for k in 1 2 3 4 5 6 7 8; do WARROOM_DIR="$R3" bash -c '. "$1"' _ "$C" >/dev/null 2>&1 & pl="$pl $!"; done; wait $pl 2>/dev/null
 [ "$(cksum < "$R3/board.md")" = "$b0" ] && ok "lock: sourcing _common.sh never changes a board that has content" || bad "lock: bootstrap changed the board"
 
-# FIX 1: a BOARD configured as the waiter's own marker name (.lastwake-W1) is never emptied by a wake
+# a BOARD configured as the waiter's own marker name (.lastwake-W1) is never emptied by a wake
 R4="$LD/run4"; mkdir -p "$R4"; printf '%s\n' "[00:00 · BOSS] forty-four bytes of board here." > "$R4/.lastwake-W1"; h0=$(head -c 44 "$R4/.lastwake-W1" | cksum)
 WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/waiter.sh" W1 sid-l > "$LD/w4.out" 2>&1 & wp=$!; sleep 2
 WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/board.sh" post BOSS "@W1 ACTION: wake on a board named like the marker"
@@ -459,13 +459,13 @@ env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" bash -c '. "$1/bin/_common.
 env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" python3 "$B/cpu-sentinel.py" --config >/dev/null 2>&1; r2=$?
 [ $r1 != 0 ] && [ $r2 != 0 ] && [ ! -e "$T/dup-first" ] && [ ! -e "$T/dup-last" ] && ok "a key set twice is refused by both readers" || bad "duplicate key: shell rc $r1, sentinel rc $r2"
 
-# 27. two sessions opting out (NONE) keep both rows; a seat's own arm still replaces only that seat's row (FIX 5)
+# 27. two sessions opting out (NONE) keep both rows; a seat's own arm still replaces only that seat's row
 rm -f "$WARROOM_DIR/seats.tsv"
 "$B/waiter.sh" NONE sid-n1 >/dev/null 2>&1; "$B/waiter.sh" NONE sid-n2 >/dev/null 2>&1; "$B/waiter.sh" NONE sid-n1 >/dev/null 2>&1
 n=$(awk -F'\t' '$2=="NONE"' "$WARROOM_DIR/seats.tsv" | wc -l | tr -d ' ')
 [ "$n" = 2 ] && ok "a second opt-out does not delete the first" || bad "NONE rows after three opt-outs by two sessions: $n"
 
-# 28. a waiter replaced by a newer arm of the same session never delivers a second wake (FIX 3), 6 rounds
+# 28. a waiter replaced by a newer arm of the same session never delivers a second wake, 6 rounds
 BF="$("$B/board.sh" path)"; dup=0
 for i in 1 2 3 4 5 6; do
   : > "$BF"; rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/seats.tsv"
@@ -478,7 +478,7 @@ for i in 1 2 3 4 5 6; do
 done
 [ $dup = 0 ] && ok "replacing a waiter at the moment of a wake gives exactly one wake (6 rounds)" || bad "same-session replacement: $dup of 6 rounds did not give exactly one wake"
 
-# 29. a board emptied in place and refilled (same file, same first line, longer) is read again; so is board.sh tail (FIX 4)
+# 29. a board emptied in place and refilled (same file, same first line, longer) is read again; so is board.sh tail
 printf '[00:00 · BOSS] head\n[00:00 · BOSS] old 1\n[00:00 · BOSS] old 2\n[00:00 · BOSS] old 3\n[00:00 · BOSS] old 4\n[00:00 · BOSS] old 5\n' > "$BF"
 rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/seats.tsv" "$WARROOM_DIR"/.anchor-*
 "$B/board.sh" tail BOSS >/dev/null
@@ -488,7 +488,7 @@ if wait_exit $WP 10 && grep -q "after the refill" "$T/t1.out"; then ok "board em
 c=$("$B/board.sh" tail BOSS | grep -c "after the refill")
 [ "$c" = 1 ] && ok "board.sh tail reads a refilled board again" || bad "board.sh tail after a refill printed the directive $c times"
 
-# 30. the idle guard: a reused pid does not count as a running job; a new silence after a replaced board is named again (FIX 12)
+# 30. the idle guard: a reused pid does not count as a running job; a new silence after a replaced board is named again
 past=$(date -d '-40 min' +%H:%M 2>/dev/null || date -v-40M +%H:%M)
 : > "$WARROOM_DIR/pids.tsv"; rm -f "$WARROOM_DIR"/.guard-*; printf '[%s · W1] hello\n' "$past" > "$BF"
 sleep 60 & GJ=$!; "$B/pids.sh" add guard-job $GJ W1 >/dev/null
@@ -505,7 +505,7 @@ echo '{}' | WARROOM_IDLE_MIN=30 bash "$ROOT/hooks/board-guard.sh"
 n=$(grep -c "GUARD\] @W1 ACTION" "$BF")
 [ "$n" = 1 ] && ok "guard names a silence again after the board was replaced (same line number)" || bad "guard after a replaced board: $n lines in the new board"
 
-# 31. reopen build is READY only with banked seats and current cards; otherwise it refuses, or writes a marked draft (FIX 13)
+# 31. reopen build is READY only with banked seats and current cards; otherwise it refuses, or writes a marked draft
 : > "$BF"; rm -rf "$WARROOM_DIR/.reopen-requested" "$WARROOM_DIR/cards" "$WARROOM_DIR"/REOPEN_MESSAGES_*
 "$B/reopen.sh" arm >/dev/null
 "$B/reopen.sh" build >/dev/null 2>&1; rc=$?
@@ -522,7 +522,7 @@ S=$(ls "$WARROOM_DIR"/REOPEN_MESSAGES_*.md 2>/dev/null | head -1)
   && ok "reopen build is READY once every seat has banked and has a current card" || bad "reopen build with cards and banks: rc $rc"
 rm -f "$WARROOM_DIR/.reopen-requested"
 
-# 32. no error text on the first arm; printed commands are shell-quoted when the install path has a space (RIDER 2)
+# 32. no error text on the first arm; printed commands are shell-quoted when the install path has a space
 rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR/seats.tsv"
 "$B/waiter.sh" W1 sid-q1 >/dev/null 2> "$T/q1.err" & WP=$!; sleep 2; kill $WP 2>/dev/null; wait $WP 2>/dev/null
 [ "$(wc -l < "$T/q1.err" | tr -d ' ')" = 1 ] && grep -q '^armed W1' "$T/q1.err" && ok "first arm prints only the armed line on stderr" || bad "first arm stderr: $(head -c 200 "$T/q1.err")"
@@ -742,7 +742,7 @@ case "$o1" in *"would kill tree $BL"*) a=1 ;; *) a=0 ;; esac; case "$o2" in *"wo
 kill $BL 2>/dev/null; wait $BL 2>/dev/null
 # 41. position integrity: a rewrite anywhere in the part already read is noticed (same file, same first line, same line at
 #     the reader's position, a new line in the middle); the waiter, board.sh tail and the board-tail hook all see it
-R8="$T/c708a"; mkdir -p "$R8"; BF8="$R8/board.md"
+R8="$T/pos-rewrite"; mkdir -p "$R8"; BF8="$R8/board.md"
 printf '[00:00 · BOSS] head\n[00:00 · BOSS] old 1\n[00:00 · BOSS] old 2\n[00:00 · BOSS] old 3\n[00:00 · BOSS] old 4\n[00:00 · BOSS] last consumed\n' > "$BF8"
 WARROOM_DIR="$R8" "$B/board.sh" tail W1 >/dev/null
 WARROOM_DIR="$R8" "$B/waiter.sh" W1 sid-i1 > "$T/i1.out" 2>/dev/null & WP=$!; sleep 2
@@ -773,7 +773,7 @@ cat > "$SH41/mv" <<SHIM
 exec $REALMV "\$@"
 SHIM
 chmod +x "$SH41/mv"; export FAILMV_FILE="$T/failmv"; rm -f "$FAILMV_FILE"
-R9="$T/c708b"; mkdir -p "$R9"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] two\n' > "$R9/board.md"
+R9="$T/pos-savefail"; mkdir -p "$R9"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] two\n' > "$R9/board.md"
 printf 'other-sid\tBOSS\t1\t00:00\n' > "$R9/seats.tsv"
 # 41a. the registry rename fails: exit 1, message, no "armed", registry as it was, no temp file
 printf 'seats.tsv\n' > "$FAILMV_FILE"; s0=$(cksum < "$R9/seats.tsv")
@@ -808,7 +808,7 @@ o=$(WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/board.sh" tail BOSS 2>"$T/tail.err"
 rm -f "$FAILMV_FILE"; o=$(WARROOM_DIR="$R9" "$B/board.sh" tail BOSS)
 case "$o" in *"new for the tail"*) ok "tail: after the fault the same lines are printed again" ;; *) bad "tail after a failed save lost the lines: '$o'" ;; esac
 # 41e. board-guard: a mark that cannot be saved means no post (nothing repeats at every prompt); control: it posts once
-RGD="$T/c708c"; mkdir -p "$RGD"; printf '[00:00 · W1] working\n' > "$RGD/board.md"; printf '.guard-W1\n' > "$FAILMV_FILE"; b0=$(cksum < "$RGD/board.md")
+RGD="$T/guard-markfail"; mkdir -p "$RGD"; printf '[00:00 · W1] working\n' > "$RGD/board.md"; printf '.guard-W1\n' > "$FAILMV_FILE"; b0=$(cksum < "$RGD/board.md")
 e=$(WARROOM_DIR="$RGD" PATH="$SH41:$PATH" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null 2>&1 >/dev/null); r=$?
 [ $r = 0 ] && [ "$(cksum < "$RGD/board.md")" = "$b0" ] && [ ! -e "$RGD/.guard-W1" ] && case "$e" in *"could not save the mark"*) true ;; *) false ;; esac && ok "guard: a mark that cannot be saved posts nothing, says so, exits 0" || bad "guard with a failed mark write: rc $r, '$e'"
 rm -f "$FAILMV_FILE"; for _ in 1 2; do WARROOM_DIR="$RGD" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null >/dev/null 2>&1; done

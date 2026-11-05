@@ -29,6 +29,6 @@ bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse,
 
 ## Questions
 
-Use Discussions for questions, including the ones that feel too basic to ask. Use Issues for bugs and for "it did not wake" reports (there is a template for that).
+Open an issue for questions too, including the ones that feel too basic to ask. Use the issue templates for bugs and for "it did not wake" reports.
 
 By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Security problems go through [SECURITY.md](SECURITY.md), not public issues.
