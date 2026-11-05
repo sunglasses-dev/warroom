@@ -1571,20 +1571,49 @@ else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process st
 fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }
 _f0=$fail; pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant skipctl (control: this fixture always skips)$' "$T/skipctl.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skipctl.out")" = 0 ] && ok "mutants: a skipped fixture makes pa_mut print a skip and count neither ok nor FAIL" || bad "mutants: pa_mut on a skipped fixture: $(cat "$T/skipctl.out")"
-# 60. read gate, report mode (enforcing after the repairs)
-if command -v python3 >/dev/null 2>&1; then
-  RG_OUT=$(python3 -I "$ROOT/tests/read-gate.py" --self-test 2>&1); RG_RC=$?
-  if [ "$RG_RC" = 0 ]; then ok "read gate self-test: $(printf '%s\n' "$RG_OUT" | head -1)"; else bad "read gate self-test (rc $RG_RC): $(printf '%s\n' "$RG_OUT" | head -8)"; fi
-  RG_OUT=$(python3 -I "$ROOT/tests/read-gate.py" --root "$ROOT" 2>&1); RG_RC=$?
-  if [ "$RG_RC" = 0 ]; then
-    ok "read gate inventory (report only): $(printf '%s\n' "$RG_OUT" | head -1)"
-    printf '%s\n' "$RG_OUT" | sed -n '2,$p' | sed 's/^/     /'
+# 60. read gate, report mode (enforcing after the repairs). The block must fail when the gate cannot run or runs as an empty
+# no-op: each stage has to print its own summary line, the inventory has to cover every script in bin/ and hooks/, and a missing
+# python3 is a failure, not a skip.
+rg_stage() {    # $1 gate script, $2 tree root; prints one "ok" or "FAIL" line per stage
+  local gate=$1 root=$2 out rc want
+  if ! command -v python3 >/dev/null 2>&1; then bad "read gate needs python3 and it is not on PATH"; return; fi
+  out=$(python3 -I "$gate" --self-test 2>&1); rc=$?
+  if [ "$rc" = 0 ] && printf '%s\n' "$out" | head -1 | grep -Eq '^read-gate self-test: [1-9][0-9]* checks passed, 0 failed \([1-9][0-9]* fixtures, [1-9][0-9]* trees, [1-9][0-9]* mutants, [1-9][0-9]* code mutants\)$'; then
+    ok "read gate self-test: $(printf '%s\n' "$out" | head -1)"
   else
-    bad "read gate could not run (rc $RG_RC): $(printf '%s\n' "$RG_OUT" | head -8)"
+    bad "read gate self-test (rc $rc, no summary line?): $(printf '%s\n' "$out" | head -8)"
   fi
+  want=$(ls "$root"/bin/*.sh "$root"/hooks/*.sh 2>/dev/null | wc -l | tr -d ' ')
+  out=$(python3 -I "$gate" --root "$root" 2>&1); rc=$?
+  if [ "$rc" = 0 ] && [ "$want" != 0 ] && printf '%s\n' "$out" | head -1 | grep -Eq "^read-gate \(report mode\): files=$want occurrences=[1-9][0-9]* "; then
+    ok "read gate inventory (report only): $(printf '%s\n' "$out" | head -1)"
+    printf '%s\n' "$out" | sed -n '2,$p' | sed 's/^/     /'
+  else
+    bad "read gate inventory (rc $rc, want files=$want): $(printf '%s\n' "$out" | head -8)"
+  fi
+}
+rg_stage "$ROOT/tests/read-gate.py" "$ROOT"
+# the block itself: an empty no-op gate and a missing python3 must both fail it, and with the summary checks taken out the no-op passes
+RG_T=$(mktemp -d) || exit 1
+printf 'pass\n' > "$RG_T/noop.py"
+RG_TOOLS="$RG_T/tools"; mkdir "$RG_TOOLS"
+for RG_X in grep ls wc head tr sed; do ln -s "$(command -v "$RG_X")" "$RG_TOOLS/$RG_X"; done
+RG_NOOP=$( (rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
+if printf '%s\n' "$RG_NOOP" | grep -q '^FAIL read gate self-test' && printf '%s\n' "$RG_NOOP" | grep -q '^FAIL read gate inventory' && ! printf '%s\n' "$RG_NOOP" | grep -q '^ok '; then
+  ok "read gate block: an empty no-op gate fails both stages"
 else
-  echo "skip read gate (python3 is not installed here)"
+  bad "read gate block accepts an empty no-op gate: $RG_NOOP"
 fi
+RG_NOPY=$( (PATH="$RG_TOOLS"; rg_stage "$ROOT/tests/read-gate.py" "$ROOT") 2>&1 )
+if printf '%s\n' "$RG_NOPY" | grep -q '^FAIL read gate needs python3' && ! printf '%s\n' "$RG_NOPY" | grep -q '^ok '; then
+  ok "read gate block: a missing python3 is a failure, not a skip"
+else
+  bad "read gate block passes without python3: $RG_NOPY"
+fi
+declare -f rg_stage | sed 's/ && printf .*; then$/; then/' > "$RG_T/mutant.sh"
+RG_MUT=$( (. "$RG_T/mutant.sh"; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
+if printf '%s\n' "$RG_MUT" | grep -q '^FAIL'; then bad "read gate block: the summary checks are not pinned (the mutant still fails): $RG_MUT"; else ok "read gate block: with the summary checks removed an empty no-op passes (so the checks are what stops it)"; fi
+rm -rf "$RG_T"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
