@@ -35,9 +35,9 @@
 #  52. temps and write failures (PATH-shim faults for mktemp, awk, cksum, rm and python3): nothing half-written is left as a state file
 #  53. exclusive create: the raw noclobber create has one winner among racers; wr_create accepts a loser only after the recheck
 #  54. guard mark restore: a failed post puts the old mark (or "-") back; a restore that itself fails keeps the new mark and says so
-#  55. a failed filter or checksum consumes nothing: the waiter stays up, the position does not move, the line is delivered later
-#  59. (mutants) the checks of 45-50 and 51-55 each fail when their one line is removed (touchlast, legacytemp, mvreplace,
-#      oldrollback, restorerm, nofiltercheck are the B mutants)
+#  55. injected poll filter/checksum failures keep the waiter alive and its position unchanged until retry delivers; arm and tail checksum failures exit without advancing their saved state, and empty-board tail succeeds.
+#  59. selected fixtures fail on deliberately mutated copies of bin/ and hooks/ and pass on the pristine copy; the failing assertion is printed.
+#      touchlast, legacytemp, mvreplace, oldrollback, restorerm and nofiltercheck are the six B write/filter mutants.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
