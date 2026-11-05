@@ -12,9 +12,9 @@ mkdir -p ~/warroom-run && : >> ~/warroom-run/board.md
 3. **Hooks.** They go in your Claude Code settings file, `settings.json` in `$CLAUDE_CONFIG_DIR`, or else in the `.claude` folder of your home folder, and apply to every session that reads it. Set `f` to that file (run this line even if the file does not exist yet); the second line saves a uniquely named copy when the file exists and prints nothing when it does not:
 ```
 f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-[ -f "$f" ] && cp "$f" "$f.before-warroom-$(date +%s)"
+[ -f "$f" ] && cp "$f" "$f.before-warroom-$(date +%Y%m%d-%H%M%S)-$$"
 ```
-Replace `/ABSOLUTE/PATH/TO/warroom` below with the full path of this clone, keeping the single quotes. Merge the `"hooks"` property into the file: no file yet, make this block the whole file; no `"hooks"` key, add this one; a `"hooks"` key already there, keep every event and entry in it and add only these as new groups at the end of each event's list. Never add a second `"hooks"` key or a second JSON document.
+Replace `/ABSOLUTE/PATH/TO/warroom` below with the full path of this clone, keeping the single quotes. The path must not contain a single quote: move the clone first if it does. Merge the `"hooks"` property into the file: no file yet, make this block the whole file; no `"hooks"` key, add this one; a `"hooks"` key already there, keep every event and entry in it and add only these as new groups at the end of each event's list. Never add a second `"hooks"` key or a second JSON document.
 
 ```json
 {
@@ -37,7 +37,7 @@ Replace `/ABSOLUTE/PATH/TO/warroom` below with the full path of this clone, keep
 ```
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$f" && echo parses
 ```
-Compare the file with your copy: `diff "$f".before-warroom-* "$f"` (skip this if step 3 made no copy; with several copies, name one instead of the `*`). Keep the copy until step 5 passes.
+Compare the file with your copy: `diff "$f".before-warroom-* "$f"` (skip this if step 3 made no copy; with several copies, name one instead of the `*`). Keep the copy until step 5 passes. The parse check proves JSON, not shape: under `"hooks"` each event must be a list of groups, and each group an object with a `"hooks"` list, as in the block above. If yours differed before your edit, stop and show the diff to your Claude Code session.
 
 5. **Two fresh sessions, then the wake check.** Open a new Claude Code session (an open one may need a restart before it uses the hooks) and paste this as its first message, once per seat, with the seat name in place of `BOSS` (use `W1` in the second session) and your clone path in place of the placeholder:
 
