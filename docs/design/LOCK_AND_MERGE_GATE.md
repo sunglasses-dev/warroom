@@ -1,7 +1,6 @@
 # Design: the writer lock and the merge gate
 
-Status: **DESIGN GO (r3d3), Part A and Part B, no BLOCKER.** The implementation must also do r3d3 FIX 1-3 and RIDER 1 (section *r3d3 implementation requirements* at the end). History: r3d returned DESIGN NO GO and Part B became the demotion the maintainers ruled: the public tool watches and reports, it never merges. r3d2 returned DESIGN NO GO with one BLOCKER, lock identity through a leaf symlink, plus FIX 1-6 and RIDER 1. All of them are answered below, and the changed places carry an "(r3d2 …)" tag. Repo line references are at main ec57546.
-**r3d3 is the last design round for the lock (lead ruling, 11-04 11:40).** If r3d3 is not GO, the shared lock leaves public v1: the docs say "one writer per board; the lock is ours", and Part B (`pr-watch.sh`) ships alone.
+Status: accepted design, Part A (the writer lock) and Part B (the PR watcher). This note is the design record: where it and the scripts, README or PROTOCOL differ, those are current. An earlier draft had a merge helper; the public tool watches and reports, it never merges. Tags in parentheses, such as "(r3d2 FIX 6)", mark the places changed after a round of design review. Repo line references are at main ec57546.
 Scope: `bin/_common.sh` (`wr_lock`, `wr_unlock`, `wr_reclaim`) and `bin/merge-daemon.sh` (replaced by `bin/pr-watch.sh`), plus the README / PROTOCOL / SECURITY wording about them.
 
 ## Why this is a design doc and not a patch
@@ -70,14 +69,14 @@ State is two plain shell variables, not exported: `_WR_SLOT8` and `_WR_SLOT9`. E
 | `wr_unlock` on a FILE that is in no slot | no-op, return 0 |
 | `wr_unlock` on a FILE in a slot | closes that one descriptor (`exec N>&-`) and empties that slot. The other slot is untouched, so release order does not matter |
 
-- Lock file = `FILE.flock`. It is opened with `>>`, so it is created if missing and never truncated. It is **never removed or renamed** by any code, docs or cleanup step. Removing a held lock file would let the next opener lock a new inode.
+- Lock file = `FILE.flock`. It is opened with `>>`, so it is created if missing and never truncated. No code removes or renames it. **Never unlink a sidecar while any participant can run:** removing a held lock file would let the next opener lock a new inode. Deleting the stopped, retired run directory removes the sidecars too.
 - The wait is one helper call that loops `LOCK_EX|LOCK_NB` against a `time.monotonic()` deadline, so a wall-clock change cannot shorten or stretch it, and ordinary contention returns 1 instead of hanging. The helper exits 0 (locked), 1 (deadline passed) or 3 (error, reason on stderr), so the shell prints the matching line from the table. A full open + lock + close cycle is about 15 ms on this Mac (bash 3.2.57, python 3.14).
 - Descriptors 8 and 9 are reserved. Scripts in this repo must not use them for anything else, and a smoke grep checks for `[89][<>]` outside `_common.sh`.
 - Deleted outright: `wr_reclaim`, the `owner` file, the 10-second ownerless rule, and the "a reused pid looks alive" limit.
 
 #### Protection identity (r3d2 BLOCKER 1)
 
-r3d2 showed that the r3d2 rule (logical `pwd` of the parent plus the base name) gives a file and a leaf symlink to it two different sidecars. Two independent writers could then hold "the board" at once. We choose the narrow scope: **one stable pathname per protected file, and no alias support.**
+r3d2 showed that the r3d2 rule (logical `pwd` of the parent plus the base name) gives a file and a leaf symlink to it two different sidecars. Two independent writers could then hold "the board" at once. We choose the narrow scope: **no leaf symlink or hard-link aliases; stable symlinked parents resolve to the physical parent.**
 
 | case | behaviour |
 |---|---|
@@ -91,22 +90,24 @@ Not supported, and written in the limits: hard links to a protected file, re-poi
 
 #### What each caller does when the lock is not taken
 
-Today several callers fail silently (r3d FIX 3). The contract is: never write without the lock, and always leave a visible line saying the work was skipped.
+Before this design, several callers failed silently (r3d FIX 3). The contract is: never write without the lock, and always leave a visible line saying the work was skipped.
 
-| caller | today | contract |
+The middle column is the historical baseline, the code before this design; the contract column is what the code does now.
+
+| caller | before this design (historical baseline) | contract |
 |---|---|---|
 | `wr_append` (board post) | returns 1 and prints a reason | unchanged |
 | `board.sh tail` anchor | exits 1 and prints a reason | unchanged |
 | `waiter.sh` cursor, arming | exits 1 and prints a reason | unchanged |
-| `waiter.sh` cursor, delivery (`waiter.sh:82`) | skips this poll silently and tries again on the next | unchanged: the wake is delivered on a later poll; the cursor lock covers the cursor and the wake timestamp `.lastwake-SEAT` together, and the timestamp is updated with `touch`, never truncated |
+| `waiter.sh` cursor, delivery (`waiter.sh:82`) | skips this poll silently and tries again on the next | the wake is delivered on a later poll, and the failed lock prints a diagnostic (`wr_lock` reports it, and the waiter keeps its stderr); the cursor lock covers the cursor and the wake timestamp `.lastwake-SEAT` together, and the timestamp is updated with `touch`, never truncated |
 | `waiter.sh` registry | exits 1 and prints a reason, after releasing the cursor | unchanged |
 | `waiter.sh` ledger check (`waiter.sh:66`, `pids.sh check >/dev/null 2>&1`) | stderr thrown away | stderr kept through this outer call too, so a ledger lock failure reaches the waiter's own output (r3d2 FIX 3) |
 | `pids.sh add / done / check` | `exit 1`, prints nothing | prints `pids.sh: could not lock the job ledger; nothing changed` and exits 1 |
 | `pids.sh check` nested post (`pids.sh:46`) | stderr thrown away | the post runs through `wr_run`, and its stderr is kept. A row is dropped only when its post succeeded. A failed post, a failed board lock included, keeps the row for the next check, as the code does today |
-| `board-guard.sh` mark | `continue`, prints nothing, exits 0 | prints `board-guard: skipped SEAT (mark busy), will retry on the next prompt` and still exits 0, so a busy lock never blocks the prompt. The nested post (`board-guard.sh:39`) runs through `wr_run` and keeps its stderr. The mark is written only after the post succeeded, as today, so a failed post leaves the mark unchanged and the seat is named again on the next prompt. The hook runs on every prompt. This makes the line visible in the script's output; how the host shows hook stderr is not something this design promises |
+| `board-guard.sh` mark | `continue`, prints nothing, exits 0 | prints `board-guard: skipped SEAT (mark busy), will retry on the next prompt` and still exits 0, so a busy lock never blocks the prompt. The nested post (`board-guard.sh:39`) runs through `wr_run` and keeps its stderr. The mark is saved before the post, and nothing is posted when it cannot be saved. When the post fails, the old mark is put back, so the seat is named again on the next prompt. Limits: a crash between saving the mark and posting loses that reminder, with no alert; if putting the old mark back fails, the mark is removed instead; and a post that reports failure after its line reached the board is posted again. A reminder can be lost or repeated; there is no exactly-once delivery. The hook runs on every prompt. This makes the line visible in the script's output; how the host shows hook stderr is not something this design promises |
 | board bootstrap (`_common.sh:22`) | `[ -e "$BOARD_FILE" ] \|\| : > "$BOARD_FILE"`: an unlocked check, then a truncating create, so a slow starter can empty a board another process has just written | `: >> "$BOARD_FILE"`: creates the file if it is missing and never truncates it (r3d2 FIX 3) |
 
-Each acquisition waits at most the `wr_lock` bound. The waiter's delivery skips that poll and tries again on the next one, and the waiter runs its job check (`pids.sh check`) again at every poll.
+Under ordinary contention an acquisition times out at the `wr_lock` deadline; a stopped or stalled helper can make it wait longer, with no bound (the disclosed residual in *The release rule*). The waiter's delivery skips that poll and tries again on the next one, and the waiter runs its job check (`pids.sh check`) again at every poll.
 
 "Never write without the lock" means: never change a protected file's **contents** without that file's lock. Three things happen without the lock, and none of them can change contents:
 
@@ -146,7 +147,7 @@ These results come from two sets of experiments. One set was run on this Mac bef
 
 ### Upgrading from the old lock
 
-The old `FILE.lock` directories and the new `FILE.flock` files do not exclude each other. So the upgrade is **quiescent**, for **all participants using this run directory**: close every seat session first, because hooks also take locks. Then stop the waiters, every job that posts, and anything run from another clone that points at the same run directory. Update, and start again. The README says this. That README line documents the step. It does not prove anyone stopped their processes, and there is no runtime check that keeps an old writer out (r3d2 Q4: none is needed). After the upgrade, a leftover `FILE.lock` directory is inert and may be deleted. A `FILE.flock` is never deleted, not even by cleanup instructions.
+The old `FILE.lock` directories and the new `FILE.flock` files do not exclude each other. So the upgrade is **quiescent**, for **all participants using this run directory**: close every seat session first, because hooks also take locks. Then stop the waiters, every job that posts, and anything run from another clone that points at the same run directory. Update, and start again. The README says this. That README line documents the step. It does not prove anyone stopped their processes, and there is no runtime check that keeps an old writer out (r3d2 Q4: none is needed). After the upgrade, a leftover `FILE.lock` directory is inert and may be deleted. Never unlink a `FILE.flock` while any participant can run; deleting the stopped, retired run directory removes them too.
 
 ### Limits that stay (written in the README and the `_common.sh` header)
 
@@ -194,7 +195,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
 
 1. **It only reads.** The only GitHub call it makes is `gh pr view` (repo, state, head, base, checks). It never calls `gh pr merge`, `gh api` with a method, or any other write. It cannot merge, approve, enqueue or enable auto-merge.
 2. **One look per poll.** Each look is one `gh pr view` response, and that response is the unit of observation. The tool records when the response arrived and reports "the returned PR data showed …". It does not claim the response is one atomic moment on the server (the old `merge-daemon.sh:5` claim is not carried over). The "second confirming look" is removed: it was an observation dressed as a gate (r3d2 FIX 6).
-3. **Green rule (unchanged).** A check counts as green when it is SUCCESS, NEUTRAL or SKIPPED. A finished check with any other result is red. **Every** row of the response is judged, required or not, and rows are never merged into a map keyed by name: if two rows share a name and either one is red or pending, that name is red or pending. A legacy status context is green only on SUCCESS (NEUTRAL and SKIPPED apply to check runs only); PENDING and EXPECTED keep waiting; any other state is red. A check row that lacks a field the verdict needs (its name, status, conclusion or state) makes that look unreadable: the look is not green and the watch keeps polling until the timeout; a missing workflow name, base branch or repository only reads `not reported` in the receipt. Every `--require` name must appear and be green; names are compared exactly as GitHub returned them (only the receipt's display text has control characters replaced). Zero checks counts as pending, so a PR with no checks times out and is never reported green.
+3. **Green rule (unchanged).** A check counts as green when it is SUCCESS, NEUTRAL or SKIPPED. A finished check with any other result is red. **Every** row of the response is judged, required or not, and rows are never merged into a map keyed by name: if two rows share a name and either one is red or pending, that name is red or pending. A legacy status context is green only on SUCCESS (NEUTRAL and SKIPPED apply to check runs only); PENDING and EXPECTED keep waiting; any other state is red. A check row that lacks a field the verdict needs (its name, status, conclusion or state) makes that look unreadable: incomplete rows prevent green, and the watch keeps polling until the timeout, but a red row in the same response may stop the watch before that retry; a missing workflow name, base branch or repository only reads `not reported` in the receipt. Every `--require` name must appear and be green; names are compared exactly as GitHub returned them (only the receipt's display text has control characters replaced). Zero checks counts as pending, so a PR with no checks times out and is never reported green.
 4. **Stops when:**
    - the head is not `--head`;
    - a check is red;
@@ -205,7 +206,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
    - `WATCH GREEN`, for example: `WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt …)`.
    - `WATCH FAIL`, followed by the reason, for example `WATCH FAIL PR 12: merged outside this tool`.
 
-   A green result never uses `POSTCONDITION` or `PASS`, and never claims that a merge happened or that one is safe. The negative sentence "this tool did not merge or modify the PR" is required, so the word itself is not banned: only positive merge claims are (r3d2 FIX 6).
+   The fixed template text of a result never uses `POSTCONDITION` or `PASS`, and never claims that a merge happened or that one is safe. Response fields (check names and other data GitHub returned) are printed into the receipt as untrusted display, so a check named `PASS` can appear there. The negative sentence "this tool did not merge or modify the PR" is required, so the word itself is not banned: only positive merge claims are (r3d2 FIX 6).
 6. **The receipt** records:
    - the repo and the PR's base branch as GitHub reported them;
    - the pinned head;
@@ -228,7 +229,7 @@ pr-watch.sh PR --head SHA [--require CHECK]... [--repo OWNER/REPO] [--seat SEAT]
 |---|---|---|
 | W1 | the tool makes no write to GitHub | the only `gh` subcommand in the script is `pr view`; a smoke grep and a gh stub that fails on any other subcommand both check this |
 | W2 | `WATCH GREEN` is posted only after one response that showed: the PR open, the head equal to `--head`, every check row green, every required name present (compared exactly), and at least one check | `judge` evaluates every row (no name-keyed map) and returns ready only in that case. Every other path ends in `WATCH FAIL` or keeps waiting |
-| W3 | no output claims that this tool merged anything, that a merge is safe, or that the result is a gate (a report that a PR was merged outside this tool is allowed) | the help text, receipt and board line come from fixed templates. The test checks the template text with check names and other response data replaced by placeholders, so a check named `PASS` or `guarantee` cannot fail it. The negative phrases "not a gate", "not a guarantee" and "did not merge" are allowed (r3d2 FIX 6) |
+| W3 | no fixed template text claims that this tool merged anything, that a merge is safe, or that the result is a gate (a report that a PR was merged outside this tool is allowed); response fields are displayed as untrusted evidence and are not covered | the help text, receipt and board line come from fixed templates. The test checks the template text with check names and other response data replaced by placeholders, so a check named `PASS` or `guarantee` cannot fail it. The negative phrases "not a gate", "not a guarantee" and "did not merge" are allowed (r3d2 FIX 6) |
 
 ### Acceptance tests for Part B (gh stubbed, no network)
 
@@ -264,12 +265,12 @@ These lines change in the same pull request as the code, so no doc describes beh
 | README:84, examples/4-seat/sample-board.md:10 | `[10:34 · BOSS] WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)` |
 | README:115 | "`pr-watch.sh` watches one pull request at a pinned head and reports when its checks are green or one fails; it never merges, and a green report is an observation, not a guarantee. Whether an unchecked merge is possible is decided by your branch protection." |
 | PROTOCOL:29 | `\| waiting is done by scripts \| pr-watch.sh polls a pull request's checks at a pinned head and posts the result; an agent should not poll for green itself (convention). The tool never merges. Who may merge, and whether unchecked merges are possible, is your branch protection's job \|` |
-| PROTOCOL:37 | `\| a watched PR \| a finished watch writes $WARROOM_DIR/receipts/watch_<PR>_<time>_<pid>.md and posts a board line that starts WATCH GREEN or WATCH FAIL and ends with the receipt path; if either cannot be written the run ends with exit 1 \|` |
+| PROTOCOL:37 | `\| a watched PR \| a finished watch writes $WARROOM_DIR/receipts/watch_<PR>_<time>_<pid>.md and posts a stamped board line that starts WATCH GREEN or WATCH FAIL and ends with the receipt path in parentheses; if the receipt cannot be written or read back, or the board line cannot be posted, the run ends with exit 1 and no green line is posted (when the receipt itself cannot be written, the board line says so instead of giving a path) \|` |
 | SECURITY:18 | "- pr-watch.sh making any write to GitHub, or reporting WATCH GREEN for a PR that was not open at the pinned head with every check green" |
 | SECURITY:24 | "the read-only `gh pr view` calls pr-watch.sh makes" replaces "the `gh` calls the merge daemon makes" |
 | CONTRIBUTING:21, examples/4-seat/BOSS.md:7 | "`gh` for pr-watch" and "use `bin/pr-watch.sh` to wait for checks" |
 | `_common.sh` header | The Part A contract: L1-L7, the release rule and its residual (stopped helper included), the slot rules and supported call forms, protection identity and its refusals, reserved fds 8 and 9, never delete a `.flock`, the advisory and local-file-system scope, and the quiescent upgrade |
-| README (new lines) | The quiescent-upgrade step "for all participants using this run directory", the advisory scope, "one name per protected file: do not symlink or hard-link the board or the run files", and "`.flock` files are never deleted" |
+| README (new lines) | The quiescent-upgrade step "for all participants using this run directory", the advisory scope, "one name per protected file: do not symlink or hard-link the board or the run files", and "never unlink a `.flock` file while any participant can run; deleting the stopped, retired run directory removes them too" |
 | `pids.sh`, `waiter.sh`, `board-guard.sh`, `_common.sh:22` | Diagnostics and the bootstrap as in the Part A caller table |
 | tests/smoke.sh case 11 (`:122-131`) and case 13, plus header lines 13 and 15 | Replaced by the Part A and Part B tests |
 
