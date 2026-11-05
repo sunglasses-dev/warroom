@@ -15,7 +15,7 @@
 # start time cannot be read (ps failed), the job is neither: its row is kept, the check says so on stderr and exits 3,
 # and the next check looks again. Start times have a resolution of one second. Limit: one machine.
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"
-P="$W/pids.tsv"; touch "$P" || { echo "cannot write the ledger $P" >&2; exit 1; }; TAB="$(printf '\t')"
+P="$W/pids.tsv"; wr_create "$P" || { echo "cannot write the ledger $P" >&2; exit 1; }; TAB="$(printf '\t')"
 case "${1:-}" in
   add)
     l=${2:?label}; p=${3:?pid}; o=${4:?owner}
@@ -26,26 +26,30 @@ case "${1:-}" in
     kill -0 "$p" 2>/dev/null || { echo "pid $p is not alive" >&2; exit 2; }
     s=$(wr_started "$p") || { echo "cannot read the start time of pid $p (ps failed), so a reused pid could not be told apart: not registered" >&2; exit 2; }
     wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }          # drop the old row and add the new one in ONE step
-    if awk -F'\t' -v l="$l" '$1!=l' "$P" > "$P.tmp.$$" && printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$P.tmp.$$" && mv "$P.tmp.$$" "$P"; then
+    led_t=""; if wr_temp "$P"; then led_t=$_WR_TMP; fi
+    if [ -n "$led_t" ] && awk -F'\t' -v l="$l" '$1!=l' "$P" > "$led_t" && printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$led_t" && wr_replace "$led_t" "$P"; then
       wr_unlock "$P"; echo "registered $l $p $o"
     else
-      rm -f "$P.tmp.$$"; wr_unlock "$P"; echo "could not write the ledger $P: $l NOT registered, ledger unchanged" >&2; exit 1
+      wr_drop "$led_t"; wr_unlock "$P"; echo "could not write the ledger $P: $l NOT registered, ledger unchanged" >&2; exit 1
     fi ;;
   done)
     l=${2:?label}
     wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }
-    if awk -F'\t' -v l="$l" '$1!=l' "$P" > "$P.tmp.$$" && mv "$P.tmp.$$" "$P"; then
+    led_t=""; if wr_temp "$P"; then led_t=$_WR_TMP; fi
+    if [ -n "$led_t" ] && awk -F'\t' -v l="$l" '$1!=l' "$P" > "$led_t" && wr_replace "$led_t" "$P"; then
       wr_unlock "$P"; echo "removed $l"
     else
-      rm -f "$P.tmp.$$"; wr_unlock "$P"; echo "could not write the ledger $P: $l NOT removed, ledger unchanged" >&2; exit 1
+      wr_drop "$led_t"; wr_unlock "$P"; echo "could not write the ledger $P: $l NOT removed, ledger unchanged" >&2; exit 1
     fi ;;
   list) cat "$P" ;;
   check)
     # Every waiter runs this on every poll, so two seats can check at the same moment. The whole check runs under the
     # ledger lock: only one caller sees a dead row, posts its wake, then drops it.
-    keep="$P.tmp.$$"; bad=0; unk=0
+    bad=0; unk=0
     wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }
-    : > "$keep" || bad=1
+    # the new ledger is built in a temp this call made (keep); without one nothing is posted or dropped
+    wr_temp "$P" || { wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; }
+    keep=$_WR_TMP
     while IFS="$TAB" read -r l p o s; do
       [ -n "$l" ] || continue
       st=$(wr_proc "$p" "$s")
@@ -61,8 +65,8 @@ case "${1:-}" in
       fi
     done < "$P"
     # a failed write to the new ledger means it is incomplete: keep the old one (a wake may then repeat) and say so
-    if [ "$bad" = 0 ] && mv "$keep" "$P"; then wr_unlock "$P"; [ "$unk" = 0 ] || exit 3
-    else rm -f "$keep"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; fi ;;
+    if [ "$bad" = 0 ] && wr_replace "$keep" "$P"; then wr_unlock "$P"; [ "$unk" = 0 ] || exit 3
+    else wr_drop "$keep"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; fi ;;
   -h|--help|help|"") sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) echo "unknown command (add|done|list|check|--help)" >&2; exit 2 ;;
 esac

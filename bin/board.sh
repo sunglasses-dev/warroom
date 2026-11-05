@@ -28,22 +28,31 @@ EOT
     seat=${2:-}; [ -n "$seat" ] || { echo "usage: board.sh tail SEAT" >&2; exit 2; }
     wr_seat_arg "$seat"; a="$W/.anchor-$seat"          # a seat becomes part of a path: it must be in SEATS before any lock or file
     wr_lock "$a" || { echo "could not lock the anchor for $seat" >&2; exit 1; }     # two tails never write an older line over a newer one
-    g=$(wr_generation "$BOARD_FILE"); n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
+    g=$(wr_generation "$BOARD_FILE") || { echo "could not read the board $BOARD_FILE: nothing marked as read" >&2; wr_unlock "$a"; exit 1; }
+    n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
     last=$(wr_cursor_get "$a" "$BOARD_FILE" 31536000); [ "$last" = none ] && last=0
-    # print what is new; the anchor remembers where, and a checksum of everything, it read
-    chunk="$a.chunk.$$"; snap="$a.snap.$$"
-    # one read: the lines and their sum are the same bytes; scratch files that cannot be written end the read before anything is marked
-    if ! { head -n "$n" "$BOARD_FILE" > "$snap" && sum=$(wr_sumstdin < "$snap") && tail -n "$((n-last))" "$snap" > "$chunk"; }; then
-      echo "could not write a scratch file for $seat in $W (full or read-only?): nothing marked as read" >&2
-      rm -f "$chunk" "$snap"; wr_unlock "$a"; exit 1
+    # print what is new; the anchor remembers where, and a checksum of everything, it read. The two scratch files are temps
+    # this call made (snap_t, chunk_t) and removes; a temp that cannot be removed is reported with its path.
+    snap_t=""; chunk_t=""
+    if wr_temp "$a"; then
+      snap_t=$_WR_TMP
+      if wr_temp "$a"; then chunk_t=$_WR_TMP; else wr_drop "$snap_t"; snap_t=""; fi
+    fi
+    # one read: the lines and their sum are the same bytes; a scratch file or a sum that fails ends the read before anything is marked.
+    # An empty board (n = 0) gets an empty snapshot without head -n 0, which macOS rejects.
+    if [ -z "$chunk_t" ] || ! { if [ "$n" -gt 0 ]; then head -n "$n" "$BOARD_FILE" > "$snap_t"; else : > "$snap_t"; fi \
+        && sum=$(wr_sumstdin < "$snap_t") && if [ "$((n-last))" -gt 0 ]; then tail -n "$((n-last))" "$snap_t" > "$chunk_t"; else : > "$chunk_t"; fi; }; then
+      echo "could not write a scratch file or checksum the board for $seat in $W (full or read-only?): nothing marked as read" >&2
+      wr_drop "$chunk_t"; wr_drop "$snap_t"; wr_unlock "$a"; exit 1
     fi
     # print first, then save the position: a line is marked as read only after it was written out. If the output fails
-    # (closed pipe, full disk) the anchor stays, exit 1, and the lines come again. If only the anchor cannot be saved the
-    # lines were printed and come once more (at-least-once, never lost); the exit code says so.
-    if ! cat "$chunk"; then echo "could not write the lines for $seat to the output: nothing marked as read" >&2; rc=1
+    # (closed pipe, full disk) the anchor stays and the exit is 1; a retry can repeat lines the reader already got. If only
+    # the anchor cannot be saved the lines were printed and a retry can show them again (at-least-once, not exactly once);
+    # the exit code says so.
+    if ! cat "$chunk_t"; then echo "could not write the lines for $seat to the output: not marked as read (a retry can repeat some of them)" >&2; rc=1
     elif wr_cursor_put "$a" "$g" "$n" "$sum"; then rc=0
-    else echo "could not save the read position of $seat ($a): the lines above were printed but NOT marked as read; they come again" >&2; rc=1; fi
-    rm -f "$chunk" "$snap"; wr_unlock "$a"; exit "$rc" ;;
+    else echo "could not save the read position of $seat ($a): the lines above were printed but NOT marked as read; a retry shows them again" >&2; rc=1; fi
+    wr_drop "$chunk_t"; wr_drop "$snap_t"; wr_unlock "$a"; exit "$rc" ;;
   read) n=${2:-20}; tail -n "$n" "$BOARD_FILE" ;;
   path) echo "$BOARD_FILE" ;;
   -h|--help|help|"") sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;

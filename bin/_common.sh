@@ -124,6 +124,57 @@ wr_seat_arg() {
   wr_seat_ok "$1" && return 0
   echo "unknown seat '$1' (seats: $SEATS${2:-})" >&2; exit 2
 }
+# --- Writing state: create, temp, replace, stamp -------------------------------------------------------------------
+# Data and state files are made and changed through these four functions. Each caller copies the result of wr_temp into its own
+# variable at once, so one helper never overwrites the temp another caller recorded.
+_wr_links() { # FILE -> its link count, "" if unreadable (GNU stat first, see wr_mtime)
+  _wr_n=$(stat -c %h "$1" 2>/dev/null) || _wr_n=$(stat -f %l "$1" 2>/dev/null) || _wr_n=""
+  case "$_wr_n" in ''|*[!0-9]*) echo "" ;; *) echo "$_wr_n" ;; esac
+}
+# wr_leaf_ok FILE: 0 when FILE is a regular file with one name and is not a link
+wr_leaf_ok() { [ ! -L "$1" ] && [ -f "$1" ] && [ "$(_wr_links "$1")" = 1 ]; }
+# wr_create FILE: make an empty FILE with an exclusive create (noclobber is O_CREAT|O_EXCL: it never truncates, and it fails on
+# any existing entry, a dangling link too). An existing entry, or a lost race, is accepted only when it is a regular file with one name.
+wr_create() {
+  if [ -L "$1" ]; then echo "$1 is a symlink; a protected file has one name" >&2; return 1; fi
+  if [ ! -e "$1" ]; then ( set -C; : > "$1" ) 2>/dev/null && return 0; fi
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    wr_leaf_ok "$1" && return 0
+    echo "$1 exists and is not a regular file with one name; refusing to use it" >&2; return 1
+  fi
+  echo "could not create $1" >&2; return 1
+}
+# wr_temp FINAL: make an exclusive temp file (mode 0600) in FINAL's folder. _WR_TMP holds its name; on failure _WR_TMP is empty,
+# the return is 1, and the caller writes, replaces and cleans up nothing under any temp name.
+wr_temp() {
+  _WR_TMP=""
+  _wr_tn=$(mktemp "$(dirname "$1")/.wrtmp.XXXXXXXX" 2>/dev/null) || return 1
+  [ -n "$_wr_tn" ] && [ -f "$_wr_tn" ] || return 1
+  _WR_TMP=$_wr_tn
+}
+# wr_drop TMP: remove a temp this caller made and recorded (only a .wrtmp.* name, never a final name). A temp that cannot be
+# removed is reported with its path. Safe to call twice and with an empty name.
+wr_drop() {
+  [ -n "${1:-}" ] || return 0
+  case "${1##*/}" in .wrtmp.*) ;; *) return 0 ;; esac
+  rm -f -- "$1" 2>/dev/null
+  { [ -e "$1" ] || [ -L "$1" ]; } || return 0
+  echo "could not remove the temporary file $1; it is left in place" >&2; return 1
+}
+# wr_replace TMP FINAL: rename TMP over FINAL (rename(2): a directory at FINAL is an error, not a move into it). FINAL, when it
+# exists, must be a regular file with one name. On refusal or failure FINAL is untouched, only the recorded TMP is removed (a
+# removal that fails is reported with the temp's path) and the return is 1. Process termination and power loss have the crash
+# limits in SECURITY.md: rename gives the old file or the new one after a crash, with no fsync.
+wr_replace() {
+  _wr_rt=$1; _wr_rf=$2
+  if [ -L "$_wr_rf" ] || { [ -e "$_wr_rf" ] && ! wr_leaf_ok "$_wr_rf"; }; then
+    echo "refusing to replace $_wr_rf: it must be a regular file with one name" >&2; wr_drop "$_wr_rt"; return 1
+  fi
+  _wr_re=$(python3 -I -S -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "$_wr_rt" "$_wr_rf" 2>&1) && return 0
+  echo "could not replace $_wr_rf: ${_wr_re##*: }" >&2; wr_drop "$_wr_rt"; return 1
+}
+# wr_stamp FILE: the gap marker. Create (exclusive, checked) and touch; a failed touch can still leave a fresh file with a fresh time.
+wr_stamp() { wr_create "$1" || return 1; touch -- "$1"; }
 wr_need_python
 WR_C_SEL=$(wr_config_path)
 if [ -z "${WARROOM_ENV:-}" ]; then case "${HOME:-}" in /*) ;; *) wr_refuse "cannot locate warroom.env: HOME is not an absolute path (set WARROOM_ENV to an absolute path)" ;; esac; fi
@@ -152,12 +203,13 @@ wr_resolve "$BOARD_FILE" file || wr_refuse "BOARD '$BOARD_FILE' $_WR_WHY"
 WR_B_RES=$_WR_RES
 wr_validate_paths
 readonly W BOARD_FILE WR_W_RES WR_B_RES WR_C_SEL WR_C_RES
-# Create a missing board with >>, which never truncates: two scripts that both find it missing must not erase each
-# other's first post. If the run directory or the board cannot be created, say so and stop (a hook exits 1, not 2).
+# Create a missing board with an exclusive create, which never truncates: two scripts that both find it missing must not
+# erase each other's first post (the one that loses the race accepts the winner's file). If the run directory or the board
+# cannot be created, say so and stop (a hook exits 1, not 2).
 mkdir -p "$W" 2>/dev/null
 if [ ! -e "$BOARD_FILE" ]; then
   mkdir -p "$(dirname "$BOARD_FILE")" 2>/dev/null
-  : >> "$BOARD_FILE" 2>/dev/null || { echo "cannot create the board $BOARD_FILE" >&2; exit "$WR_CONFIG_EXIT"; }
+  wr_create "$BOARD_FILE" || { echo "cannot create the board $BOARD_FILE" >&2; exit "$WR_CONFIG_EXIT"; }
 fi
 # shellcheck disable=SC2034
 BOSS_SEAT=${SEATS%% *}
@@ -201,10 +253,6 @@ _WR_SLOT8=""; _WR_SLOT9=""
 _wr_path() { # FILE -> _WR_KEY = physical parent folder + base name (no checks)
   _wr_d=$(cd -P "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1
   _WR_KEY="$_wr_d/$(basename "$1")"
-}
-_wr_links() { # FILE -> its link count, "" if unreadable (GNU stat first, see wr_mtime)
-  _wr_n=$(stat -c %h "$1" 2>/dev/null) || _wr_n=$(stat -f %l "$1" 2>/dev/null) || _wr_n=""
-  case "$_wr_n" in ''|*[!0-9]*) echo "" ;; *) echo "$_wr_n" ;; esac
 }
 _wr_sub_ok() { # every lock function refuses inside a subshell, before it touches anything
   [ "${BASH_SUBSHELL:-0}" = 0 ] && return 0

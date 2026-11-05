@@ -20,7 +20,7 @@ REG="$W/seats.tsv"; TAB="$(printf '\t')"
 [ "$SEAT" = NONE ] || wr_seat_arg "$SEAT" ", or NONE"        # before the registry is created or any per-seat path is built
 case "$SID" in ''|unknown) echo "a session id is required: waiter.sh SEAT SESSION_ID (see README, quick start)" >&2; exit 2 ;; esac
 case "$SID" in *[!A-Za-z0-9._-]*) echo "the session id may hold only letters, digits, '.', '_' and '-'" >&2; exit 2 ;; esac
-touch "$REG"
+wr_create "$REG" || { echo "cannot create the seat registry $REG" >&2; exit 1; }
 CUR="$W/.cursor-$SEAT"; LAST="$W/.lastwake-$SEAT"
 # No row without an identity: the waiter's own start time must be readable before it takes anything. Without it a row could
 # only be judged by its pid, and a reused pid would then look like a live waiter.
@@ -32,8 +32,9 @@ if [ "$SEAT" != NONE ]; then wr_lock "$CUR" || { echo "could not lock the cursor
 # Look at the holder and take the seat under ONE lock, so two arms at the same moment cannot both win.
 wr_lock "$REG" || { [ "$SEAT" = NONE ] || wr_unlock "$CUR"; echo "could not lock the seat registry" >&2; exit 1; }
 # Every state write is checked: when one fails the waiter says so and exits 1 without arming, and the file it was writing
-# is exactly as it was (temp file, then rename).
-armfail() { rm -f "$REG.tmp.$$"; wr_unlock "$REG"; [ "$SEAT" = NONE ] || wr_unlock "$CUR"; echo "$1" >&2; exit 1; }
+# is as it was (a temp made by this arm, then a rename; only that temp is removed, and one that cannot be removed is reported).
+reg_t=""
+armfail() { wr_drop "$reg_t"; wr_unlock "$REG"; [ "$SEAT" = NONE ] || wr_unlock "$CUR"; echo "$1" >&2; exit 1; }
 if [ "$SEAT" != NONE ]; then
   # a holder is the waiter process the row names: same pid AND same start time (column 5), so a stale row whose pid now
   # belongs to an unrelated process does not block the seat. A row with an empty start time (not written by this version)
@@ -48,18 +49,23 @@ if [ "$SEAT" != NONE ]; then
     esac
   done < <(awk -F'\t' -v s="$SID" -v seat="$SEAT" 'BEGIN{OFS="\t"} $2==seat && $1!=s {print $3, ($5==""?"-":$5), NF}' "$REG")
   # the position first: it only repeats what the next arm would compute, so a failed registry write after it changes nothing
-  gen=$(wr_generation "$BOARD_FILE"); base=$(wc -l < "$BOARD_FILE" | tr -d ' ')
+  gen=$(wr_generation "$BOARD_FILE") || armfail "could not read the board $BOARD_FILE: not armed"
+  base=$(wc -l < "$BOARD_FILE" | tr -d ' ')
   c=$(wr_cursor_get "$CUR" "$BOARD_FILE" "$AGE"); [ "$c" = none ] || base=$c
-  lastck=$(wr_prefixsum "$BOARD_FILE" "$base")
+  lastck=$(wr_prefixsum "$BOARD_FILE" "$base") || armfail "could not checksum the board $BOARD_FILE: not armed"
   wr_cursor_put "$CUR" "$gen" "$base" "$lastck" || armfail "could not save the position of seat $SEAT ($CUR): not armed. Is $W writable and not full?"
+fi
+wr_temp "$REG" || armfail "could not create a temporary file next to the seat registry: not armed"
+reg_t=$_WR_TMP
+if [ "$SEAT" != NONE ]; then
   # a real seat replaces this session's old row and any other row of the seat
-  awk -F'\t' -v s="$SID" -v seat="$SEAT" '$1!=s && $2!=seat' "$REG" > "$REG.tmp.$$" || armfail "could not write the seat registry: not armed"
+  awk -F'\t' -v s="$SID" -v seat="$SEAT" '$1!=s && $2!=seat' "$REG" > "$reg_t" || armfail "could not write the seat registry: not armed"
 else
   # NONE is a shared marker, not a seat: replace only this session's own row, never another session's opt-out
-  awk -F'\t' -v s="$SID" '$1!=s' "$REG" > "$REG.tmp.$$" || armfail "could not write the seat registry: not armed"
+  awk -F'\t' -v s="$SID" '$1!=s' "$REG" > "$reg_t" || armfail "could not write the seat registry: not armed"
 fi
 # row: session, seat, waiter pid, armed at, waiter start time (never empty: see START above)
-printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$SEAT" "$$" "$(wr_now)" "$START" >> "$REG.tmp.$$" && mv "$REG.tmp.$$" "$REG" || armfail "could not update the seat registry $REG: not armed"
+printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$SEAT" "$$" "$(wr_now)" "$START" >> "$reg_t" && wr_replace "$reg_t" "$REG" || armfail "could not update the seat registry $REG: not armed"
 wr_unlock "$REG"
 [ "$SEAT" = NONE ] && { echo "this session opted out of board triggers"; exit 0; }
 wr_unlock "$CUR"
@@ -75,23 +81,34 @@ filter() {
 }
 mine()     { grep -q "${TAB}${SEAT}${TAB}$$${TAB}" "$REG" 2>/dev/null; }    # still the seat's waiter?
 replaced() { echo "[WAITER REPLACED] a newer waiter holds seat $SEAT; this one stops (exit 3). It is not a wake." >&2; exit 3; }
-chunk="$W/.poll-$SEAT.$$"; snap="$W/.snap-$SEAT.$$"; trap 'rm -f "$chunk" "$snap"' EXIT
+# the two scratch files of one poll are temps this waiter made (snap_t, chunk_t): removed after each poll and at exit; a temp
+# that cannot be removed is reported with its path
+snap_t=""; chunk_t=""; trap 'wr_drop "$chunk_t"; wr_drop "$snap_t"' EXIT
 pend=""
 while :; do
   sleep "$POLL"
   mine || replaced
   "$HERE/pids.sh" check >/dev/null || true      # stdout dropped, stderr kept: a ledger lock failure is shown
-  g2=$(wr_generation "$BOARD_FILE"); n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
-  # board replaced, shorter, or changed anywhere in the part already read: read it from the start
-  if [ "$g2" != "$gen" ] || [ "$n" -lt "$base" ] || { [ "$base" -gt 0 ] && [ "$(wr_prefixsum "$BOARD_FILE" "$base")" != "$lastck" ]; }; then base=0; gen=$g2; fi
+  g2=$(wr_generation "$BOARD_FILE") || { echo "[WAITER] could not read the board $BOARD_FILE; nothing consumed, will look again" >&2; continue; }
+  n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
+  # board replaced, shorter, or changed anywhere in the part already read: read it from the start. A sum that cannot be
+  # computed consumes nothing: the checkpoint stays and the next poll tries again.
+  pk=""; if [ "$base" -gt 0 ]; then pk=$(wr_prefixsum "$BOARD_FILE" "$base") || { echo "[WAITER] could not checksum the board in $W; nothing consumed, will look again" >&2; continue; }; fi
+  if [ "$g2" != "$gen" ] || [ "$n" -lt "$base" ] || { [ "$base" -gt 0 ] && [ "$pk" != "$lastck" ]; }; then base=0; gen=$g2; fi
   if [ "$n" -gt "$base" ]; then
-    # one read: the new lines and the sum of everything read come from the same bytes. If the scratch files cannot be
-    # written nothing is consumed: base stays, and the next poll tries again.
-    if ! { head -n "$n" "$BOARD_FILE" > "$snap" && lastck_new=$(wr_sumstdin < "$snap") && tail -n "$((n-base))" "$snap" > "$chunk"; }; then
-      echo "[WAITER] could not write a scratch file in $W (full or read-only?); will look again" >&2; continue
+    # one read: the new lines and the sum of everything read come from the same bytes. The checkpoint (lastck, base) moves only
+    # after the snapshot, the sum and the filter all succeeded; if any of them fails nothing is consumed and the next poll tries again.
+    snap_t=""; chunk_t=""
+    if wr_temp "$CUR"; then
+      snap_t=$_WR_TMP
+      if wr_temp "$CUR"; then chunk_t=$_WR_TMP; else wr_drop "$snap_t"; snap_t=""; fi
     fi
+    if [ -z "$chunk_t" ] || ! { head -n "$n" "$BOARD_FILE" > "$snap_t" && lastck_new=$(wr_sumstdin < "$snap_t") && tail -n "$((n-base))" "$snap_t" > "$chunk_t" && new=$(filter < "$chunk_t"); }; then
+      wr_drop "$chunk_t"; wr_drop "$snap_t"; snap_t=""; chunk_t=""
+      echo "[WAITER] could not write a scratch file or read the board in $W (full or read-only?); nothing consumed, will look again" >&2; continue
+    fi
+    wr_drop "$chunk_t"; wr_drop "$snap_t"; snap_t=""; chunk_t=""
     lastck=$lastck_new
-    new=$(filter < "$chunk")
     base=$n
     [ -n "$new" ] && pend="${pend:+$pend
 }$new"
@@ -108,7 +125,7 @@ while :; do
     # be saved the wake is NOT reported as delivered (exit 1, the held lines are printed), and the saved position is still
     # the old one, so the next arm reads the lines again. The other order moved the position and then failed on the marker,
     # which lost the wake.
-    if ! { touch "$LAST" && { wr_cursor_put "$CUR" "$gen" "$base" "$lastck" || { rm -f "$LAST"; false; }; }; }; then   # no marker without a saved position
+    if ! { wr_stamp "$LAST" && { wr_cursor_put "$CUR" "$gen" "$base" "$lastck" || { rm -f "$LAST"; false; }; }; }; then   # no marker without a saved position
       wr_unlock "$CUR"
       echo "[WAITER ERROR] could not save the position of seat $SEAT in $W (full or read-only?). The wake below was NOT marked as delivered; re-arm after fixing it and these lines come again." >&2
       printf '%s\n' "$pend"
