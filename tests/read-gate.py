@@ -1081,6 +1081,29 @@ class Analyzer:
                         continue        # an entry script runs a named sibling: "$HERE/x.sh" (HERE is the canonical line, checked above)
                     if not (w0 == '"$@"' and fn is not None and (f, fn.name) in self.ENV_RUNNERS):
                         bad(f, nd, 'E4', 'a computed command word is outside the envelope (one "$@" runner is listed by file and function)')
+        # a literal trap action is code that runs wherever its signal, DEBUG or EXIT lands, so the text inside it is held to the
+        # same exec and word rules as the statements around it (an exec in an action changes the descriptors of whatever runs next)
+        for f in sorted(self.files):
+            root = self.files[f][2]
+            for d in walk(root):
+                if d.k != 'simple' or not d.words or unwrapped(d)[0] != 'trap':
+                    continue
+                args = unwrapped(d)[1]
+                if args and args[0] == '--':
+                    args = args[1:]
+                if len(args) < 2 or args[0] is None or args[0] in ('-', '-p', '-l'):
+                    continue
+                try:
+                    tree = Parser(args[0]).parse_script()
+                except ParseError:
+                    bad(f, d, 'E4', 'a trap action must parse as a script')
+                    continue
+                link(tree)
+                for nd in walk(tree):
+                    if nd.k != 'simple' or not nd.words:
+                        continue
+                    if unwrapped(nd)[0] in ('exec', 'eval', 'source', '.', 'command', 'builtin', 'trap', '$') or cmd_name(nd) in ('command', 'builtin'):
+                        bad(f, d, 'E4', 'a trap action holds only plain calls (no exec, eval, source, wrapper, nested trap or computed word)')
         for path, why in self.out_files:
             self.env.append((path, 0, 'E1', why))
         # a file outside the envelope runs in the same shell as everything it sources and everything that sources it: it can
@@ -2962,6 +2985,8 @@ TREE_CASES.update({
                                                            "trap 'rm -f x' EXIT\n"}), 1, '!ENVELOPE E4'),
     'env_control_runner_and_sibling': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
                                                    'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/a.sh" check\n'}), 1, '!ENVELOPE E4'),
+    'env_control_trap_action_plain_calls': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'wr_drop \"$a\"; wr_drop \"$b\"' EXIT\n"}), 1, '!ENVELOPE E4'),
+    'env_trap_action_exec_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'exec 2>\"$1\"' DEBUG\n"}), 1, 'a trap action holds only plain calls'),
     'env_control_high_descriptors': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 9>>"$WR_ROOT/x.lock"\nexec 8>&-\nexec 9>&-\n'}), 1, '!ENVELOPE E3'),
     # a file outside the envelope shares its shell with every file it sources and every file that sources it: no row there stands
     'env_shared_shell_library_fails': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 2>>"$WR_ROOT/log"\n',
@@ -3113,6 +3138,8 @@ CODE_MUTANTS = [
     ('code-e4-eval', "elif name == 'eval':\n                    bad(", "elif False:\n                    bad(", 'neg_envelope_eval.sh', 'ENVELOPE E4: eval'),
     ('code-e4-command-builtin', "elif name in ('command', 'builtin') or cmd_name(nd) in ('command', 'builtin'):", "elif False:",
      'neg_envelope_command_wrapper.sh', 'command and builtin wrappers'),
+    ('code-e4-trap-action-text', "if unwrapped(nd)[0] in ('exec', 'eval', 'source', '.', 'command', 'builtin', 'trap', '$')", "if False and unwrapped(nd)[0] in ('exec',",
+     'neg_envelope_trap_action_exec_debug.sh', 'a trap action holds only plain calls'),
     ('code-e4-trap-computed', "if not args or any(a is None for a in args):", "if False:", 'neg_envelope_trap_computed.sh', 'literal action'),
     ('code-e4-computed-word', """if not (w0 == '"$@"' and fn is not None and (f, fn.name) in self.ENV_RUNNERS):""", "if False:",
      'neg_envelope_computed_word.sh', 'computed command word'),
