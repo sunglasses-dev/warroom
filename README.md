@@ -43,7 +43,7 @@ The hooks apply to every Claude Code session that reads that settings file, incl
 
 Keep the clone where it is: the hooks hold its absolute path. After a move, edit the four paths in the settings file by hand. To remove the war room, see the end of `docs/INSTALL.md`: remove the four entries, stop your jobs, and delete the run directory only after looking inside it.
 
-**2. Start two Claude Code sessions** and paste the first message from step 5 of `docs/INSTALL.md` into each, with `BOSS` as the seat in the first and `W1` in the second.
+**2. Start two Claude Code sessions** and paste into each the first message from step 5 of `docs/INSTALL.md` (`BOSS` as the seat in the first, `W1` in the second). If you already pasted it while following that page, go to step 3.
 
 **3. Arm each waiter with its real session id.** When a session starts, and on its next prompt, the hook prints a banner that holds the session's own id:
 
