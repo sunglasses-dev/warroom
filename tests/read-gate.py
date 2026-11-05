@@ -990,9 +990,65 @@ class Analyzer:
                         if len(q) == 1 and q[0][0] == 'var' and q[0][1] in REFUSE_VARS:
                             return True
                 return False
-            if name in self.refusing:
+            if name in self.refusing and self.defined_here(name, item):
                 return True
         return False
+
+    # --- does the helper exist where it is used? ---
+    def sourced_from(self, fname):
+        """{file: offset of the earliest top-level `. file` that makes it available to `fname`} (resolved by the file name at
+        the end of the argument; an argument with no literal tail resolves to nothing)."""
+        reach = {}
+        todo = [(fname, -1)]
+        seen = set()
+        while todo:
+            cur, base = todo.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            for nd in walk(self.files[cur][2]):
+                if nd.k != 'simple' or cmd_name(nd) not in ('.', 'source') or len(nd.words) != 2:
+                    continue
+                if any(a.k == 'func' for a in self.ancestors(nd)):
+                    continue        # only available once that function has run
+                w = nd.words[1]
+                tail = None
+                for part in reversed(w.parts):
+                    t = part[1] if isinstance(part, tuple) and part[0] in ('lit', 'sq') else (
+                        ''.join(q[1] for q in part.parts if isinstance(q, tuple) and q[0] == 'lit') if isinstance(part, Node) and part.k == 'dq' else None)
+                    if t:
+                        tail = t
+                        break
+                if not tail:
+                    continue
+                want = os.path.basename(tail)
+                at = nd.start if cur == fname else base
+                for other in self.files:
+                    if other != cur and os.path.basename(other) == want and other not in reach:
+                        reach[other] = at
+                        todo.append((other, at))
+        return reach
+
+    def ancestors(self, node):
+        p = node.parent
+        while p is not None:
+            yield p
+            p = p.parent
+
+    def defined_here(self, name, use):
+        """True when `name` exists at the place `use` runs: defined in the same file (before the use, unless the use is inside
+        a function that is called later), or defined in a file this one sources (the `.` before the use). Functions of other files
+        that are never sourced here do not exist here."""
+        defs = self.funcs.get(name, [])
+        if not defs:
+            return False        # (a name defined twice never reaches here: compute_refusing keeps only single definitions)
+        def_file, def_node = defs[0]
+        use_file = self.fname_of(use)
+        in_func = any(a.k == 'func' for a in self.ancestors(use))
+        if def_file == use_file:
+            return in_func or def_node.start < use.start
+        at = self.sourced_from(use_file).get(def_file)
+        return at is not None and (in_func or at < use.start)
 
     def refusal_list(self, lst, bare_ok=False):
         # a bare exit/return returns the status of the command before it: only a branch that is nothing else keeps the read's status
@@ -1364,6 +1420,14 @@ class Analyzer:
             name = cmd_name(nd)
             args = [word_lit(w) for w in nd.words[1:]]
             inner = self.nearest_sub(nd) is not None
+            if name in self.funcs:
+                kind = self.async_call(nd)
+                if kind == 'bg':
+                    yield 'ACALL', nd
+                    return
+                if kind == 'pipe' and name not in self.propagating:
+                    yield 'FCALL', nd       # judged like any command: does the pipeline's status reach a refusal?
+                    return
             if name == '$':
                 yield 'DISPATCH', nd
             elif name == 'command' and len(args) == 2 and args[0] == '-v' and args[1] is not None:
@@ -1396,6 +1460,21 @@ class Analyzer:
             elif name in self.propagating:
                 yield 'HCALL', nd
 
+    def async_call(self, nd):
+        """'bg' when this call of a script function runs in the background (whatever it refuses ends that process only and the
+        shell goes on); 'pipe' when it is a stage of a pipeline; else None."""
+        n, kind = nd, None
+        while n is not None:
+            if getattr(n, 'bg', False):
+                return 'bg'
+            p = n.parent
+            if p is None or p.k in ('cs', 'ps', 'func', 'script'):
+                return kind
+            if p.k == 'pipe' and len(p.cmds) > 1:
+                kind = 'pipe'
+            n = p
+        return kind
+
     def read_from_memory(self, sm):
         for r in sm.redirs:
             if r.op == '<<<' or r.heredoc:
@@ -1422,6 +1501,8 @@ class Analyzer:
             inner = self.inner_verdict(n)
             if inner is not None:
                 res = inner
+        elif o.kind == 'ACALL':
+            res = self.bad('a script function is called in the background: its refusal ends only that process')
         elif o.kind == 'DISPATCH':
             res = self.bad('dispatch through a variable, eval, xargs, command or a shell -c string cannot be audited')
         elif o.kind == 'HERE':
@@ -2138,16 +2219,46 @@ MUTANTS = [
 ]
 
 
+# Small trees (a file of helpers and a script that uses them): name -> (files, expected exit status, diagnostic)
+LIB = '#!/usr/bin/env bash\ndie() { echo "$1" >&2; exit 1; }\n'
+TREE_CASES = {
+    'tree_helper_never_sourced': ({'bin/a.sh': LIB, 'bin/b.sh': 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'},
+                                  1, 'falls back'),
+    'tree_helper_sourced_after_use': ({'bin/a.sh': LIB, 'bin/b.sh': 'HERE=${0%/*}\nF=${1:-}\nx=$(cat "$F") || die "cannot read"\n'
+                                       '. "$HERE/a.sh" || exit 1\necho "$x" > out\n'}, 1, 'falls back'),
+    'tree_helper_sourced_control': ({'bin/a.sh': LIB, 'bin/b.sh': 'HERE=${0%/*}\n. "$HERE/a.sh" || exit 1\nF=${1:-}\n'
+                                     'x=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}, 0, ''),
+}
+
+
+def run_tree(me, tmpd, name):
+    """Write one tree case to a fresh folder and run the gate on it as its own process."""
+    files, _, _ = TREE_CASES[name]
+    root = os.path.join(tmpd, name)
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+    return subprocess.run([sys.executable, '-I', me, '--enforce', '--root', root, '--allow', os.path.join(root, 'none')],
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+
+
 # Mutants of this file: take a check out, and the fixture that pins it must stop failing. (name, old text, new text, fixture)
 CODE_MUTANTS = [
     ('code-no-background-in-branch', "len(item.parts) != 1 or getattr(item, 'bg', False)", 'len(item.parts) != 1', 'neg_proc_background_exit.sh'),
-    ('code-no-background-in-chain', "if getattr(n, 'bg', False):", 'if False:', 'neg_proc_background_list.sh'),
+    ('code-no-background-in-chain', "if getattr(n, 'bg', False):\n                return False", 'if False:\n                return False', 'neg_proc_background_list.sh'),
     ('code-no-pipe-stage-check', "if p.k == 'pipe' and len(p.cmds) > 1:\n                return False", 'if False:\n                return False', 'neg_proc_group_pipe_stage.sh'),
     ('code-return-anywhere', 'return False        # outside a function', 'pass        # outside a function', 'neg_proc_toplevel_return.sh'),
     ('code-no-exit-trap-check', "if name == 'trap':", 'if False:', 'neg_proc_exit_trap_rewrites.sh'),
     ('code-no-function-shadow-check', "if nd.k == 'func' and nd.name in REFUSAL_WORDS:", 'if False:', 'neg_shadow_exit_function.sh'),
     ('code-no-return-shadow-check', "if nd.k == 'func' and nd.name in REFUSAL_WORDS:", 'if False:', 'neg_shadow_return_function.sh'),
     ('code-no-unset-check', "if '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):", 'if False:', 'neg_shadow_unset_function.sh'),
+    ('code-no-background-call-check', "if getattr(n, 'bg', False):\n                return 'bg'", "if False:\n                return 'bg'", 'neg_func_called_in_background.sh'),
+    ('code-no-pipe-stage-call-check', "if kind == 'pipe' and name not in self.propagating:", 'if False:', 'neg_func_pipe_stage_unchecked.sh'),
+    ('code-no-definition-order', 'return in_func or def_node.start < use.start', 'return True', 'neg_helper_defined_after_use.sh'),
+    ('code-global-function-table', 'return at is not None and (in_func or at < use.start)', 'return True', 'tree:tree_helper_never_sourced'),
+    ('code-no-source-order', 'return at is not None and (in_func or at < use.start)', 'return at is not None', 'tree:tree_helper_sourced_after_use'),
     ('code-redefined-helper', 'name in self.refusing or len(defs) != 1', 'name in self.refusing or len(defs) < 1', 'neg_shadow_helper_redefined.sh'),
 ]
 
@@ -2238,6 +2349,17 @@ def self_test(here):
             continue
         check('mutant %s (fails)' % mid, bool(diag), 'the mutant was accepted')
         check('mutant %s (diagnostic %r)' % (mid, want), any(want.lower() in x.lower() for x in diag), 'got: %s' % diag[:3])
+    # trees: helpers resolve per file, in order
+    tdir = tempfile.mkdtemp(prefix='read-gate-tree-')
+    try:
+        for tname, (_, want_rc, want_diag) in sorted(TREE_CASES.items()):
+            pr = run_tree(me, tdir, tname)
+            check(tname, pr.returncode == want_rc, 'expected exit %d, got %d: %s' % (want_rc, pr.returncode, pr.stdout.strip()[:200]))
+            if want_diag:
+                check(tname + ' (diagnostic %r)' % want_diag, want_diag in pr.stdout.lower() or want_diag in pr.stdout,
+                      'diagnostic missing from: %s' % pr.stdout.strip()[:300])
+    finally:
+        shutil.rmtree(tdir, ignore_errors=True)
     # code mutants: the gate with one check removed must accept the fixture that pins that check
     with open(me, encoding='utf-8') as fh:
         src = fh.read()
@@ -2246,21 +2368,22 @@ def self_test(here):
     tmpd = tempfile.mkdtemp(prefix='read-gate-mut-')
     try:
         for mid, old, new, fx in CODE_MUTANTS:
-            if fx not in texts:
+            if not fx.startswith('tree:') and fx not in texts or fx.startswith('tree:') and fx[5:] not in TREE_CASES:
                 fails.append('code mutant %s: fixture %s is missing' % (mid, fx))
                 continue
             if src.count(old) != 1:
                 fails.append('code mutant %s: the change was not applied (%d matches)' % (mid, src.count(old)))
                 continue
-            want_rc = 2 if parse_header(texts[fx])[0][0] == 'error' else 1
             mpath = os.path.join(tmpd, 'mutant.py')
             with open(mpath, 'w', encoding='utf-8') as fh:
                 fh.write(src.replace(old, new))
-            pr = subprocess.run([sys.executable, '-I', mpath, '--enforce', '--fixture', os.path.join(fx_dir, fx)],
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            if fx.startswith('tree:'):
+                pr = run_tree(mpath, tmpd, fx[5:])
+            else:
+                pr = subprocess.run([sys.executable, '-I', mpath, '--enforce', '--fixture', os.path.join(fx_dir, fx)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
             check('code mutant %s (the fixture %s is accepted)' % (mid, fx), pr.returncode == 0,
                   'exit %d (a fixture that still fails means the check is not pinned): %s' % (pr.returncode, pr.stdout.strip()[:160]))
-            _ = want_rc
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)
     # a gate that is broken must not look like a pass: parse failure and a missing file are tool errors (exit 2)
@@ -2270,7 +2393,7 @@ def self_test(here):
     pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--root', os.path.join(fx_dir, 'no-such-root')],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
     check('empty discovery is a tool error', pr.returncode == 2, 'exit %d' % pr.returncode)
-    print('read-gate self-test: %d checks passed, %d failed (%d fixtures, %d mutants, %d code mutants)' % (passes, len(fails), len(names), len(MUTANTS), len(CODE_MUTANTS)))
+    print('read-gate self-test: %d checks passed, %d failed (%d fixtures, %d trees, %d mutants, %d code mutants)' % (passes, len(fails), len(names), len(TREE_CASES), len(MUTANTS), len(CODE_MUTANTS)))
     for f in fails:
         print('  FAIL: %s' % f)
     return 1 if fails else 0
