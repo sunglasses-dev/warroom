@@ -38,6 +38,9 @@
 #  55. injected poll filter/checksum failures keep the waiter alive and its position unchanged until retry delivers; arm and tail checksum failures exit without advancing their saved state, and empty-board tail succeeds.
 #  59. selected fixtures fail on deliberately mutated copies of bin/ and hooks/ and pass on the pristine copy; the failing assertion is printed.
 #      touchlast, legacytemp, mvreplace, oldrollback, restorerm and nofiltercheck are the six B write/filter mutants.
+#  60. read gate (report mode): tests/read-gate.py checks its own fixtures and mutants, then lists every read in bin/ and hooks/ whose
+#      failure can reach a state change. It prints the inventory and never fails on it yet; a tool error (unparsable script, empty
+#      discovery) or a failed self-test does fail.
 # Some hosts (a Node-based CI runner, for one) start every child with SIGPIPE ignored, and bash cannot restore a signal that was
 # ignored when it started, so `trap '' PIPE` changes nothing there and the closed-pipe tests mean something else. Seats run in
 # terminals, where SIGPIPE is at its default. When the probe sees otherwise, the suite restarts itself once through python3,
@@ -1568,6 +1571,20 @@ else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process st
 fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }
 _f0=$fail; pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant skipctl (control: this fixture always skips)$' "$T/skipctl.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skipctl.out")" = 0 ] && ok "mutants: a skipped fixture makes pa_mut print a skip and count neither ok nor FAIL" || bad "mutants: pa_mut on a skipped fixture: $(cat "$T/skipctl.out")"
+# 60. read gate, report mode (enforcing after the repairs)
+if command -v python3 >/dev/null 2>&1; then
+  RG_OUT=$(python3 -I "$ROOT/tests/read-gate.py" --self-test 2>&1); RG_RC=$?
+  if [ "$RG_RC" = 0 ]; then ok "read gate self-test: $(printf '%s\n' "$RG_OUT" | head -1)"; else bad "read gate self-test (rc $RG_RC): $(printf '%s\n' "$RG_OUT" | head -8)"; fi
+  RG_OUT=$(python3 -I "$ROOT/tests/read-gate.py" --root "$ROOT" 2>&1); RG_RC=$?
+  if [ "$RG_RC" = 0 ]; then
+    ok "read gate inventory (report only): $(printf '%s\n' "$RG_OUT" | head -1)"
+    printf '%s\n' "$RG_OUT" | sed -n '2,$p' | sed 's/^/     /'
+  else
+    bad "read gate could not run (rc $RG_RC): $(printf '%s\n' "$RG_OUT" | head -8)"
+  fi
+else
+  echo "skip read gate (python3 is not installed here)"
+fi
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
