@@ -26,12 +26,18 @@
 #  40. process identity: ps failing is "unknown" (row kept, seat not taken, guard silent, hook says so), never "dead"; a
 #      reused pid holds no seat
 #  41-43. position integrity (a rewrite anywhere in the part already read is noticed), every state write checked (fault
-#         injection with a stub mv), the board bootstrap under a forced race (with a wrong-code control)
+#         injection with a python3 shim that refuses the rename), the board bootstrap under a forced race (with a wrong-code control)
 #  44. the sample board, replayed through real waiters, wakes W1, W2 and BOSS by exactly their own handoffs
 #  45-50. destinations: the run folder, board and config file are resolved from metadata and checked before anything is made
 #         (settings names, the config folder, reserved state names, aliases, absolute paths, readonly values), seat arguments
 #         that become paths, python3 required, hook exit codes
-#  59. (mutants) the checks of 45-50 each fail when their one line is removed
+#  51. links and hard links at state leaves are refused, the link target is never created or written, and the temp is cleaned up
+#  52. temps and write failures (PATH-shim faults for mktemp, awk, cksum, rm and python3): nothing half-written is left as a state file
+#  53. exclusive create: the raw noclobber create has one winner among racers; wr_create accepts a loser only after the recheck
+#  54. guard mark restore: a failed post puts the old mark (or "-") back; a restore that itself fails keeps the new mark and says so
+#  55. a failed filter or checksum consumes nothing: the waiter stays up, the position does not move, the line is delivered later
+#  59. (mutants) the checks of 45-50 and 51-55 each fail when their one line is removed (touchlast, legacytemp, mvreplace,
+#      oldrollback, restorerm, nofiltercheck are the B mutants)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0

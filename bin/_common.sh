@@ -133,8 +133,8 @@ _wr_links() { # FILE -> its link count, "" if unreadable (GNU stat first, see wr
 }
 # wr_leaf_ok FILE: 0 when FILE is a regular file with one name and is not a link
 wr_leaf_ok() { [ ! -L "$1" ] && [ -f "$1" ] && [ "$(_wr_links "$1")" = 1 ]; }
-# wr_create FILE: make an empty FILE with an exclusive create (noclobber is O_CREAT|O_EXCL: it never truncates, and it fails on
-# any existing entry, a dangling link too). An existing entry, or a lost race, is accepted only when it is a regular file with one name.
+# wr_create FILE: make an empty FILE with a noclobber create (it never truncates a regular file, and it fails on an existing
+# regular file or a dangling link; a non-regular entry planted at the name is outside this tool's scope and is refused by the recheck). An existing entry, or a lost race, is accepted only when it is a regular file with one name.
 wr_create() {
   if [ -L "$1" ]; then echo "$1 is a symlink; a protected file has one name" >&2; return 1; fi
   if [ ! -e "$1" ]; then ( set -C; : > "$1" ) 2>/dev/null && return 0; fi

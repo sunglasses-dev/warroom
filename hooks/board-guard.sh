@@ -42,7 +42,8 @@ for seat in $SEATS; do
   # restore itself fails the new mark stays, the next reminder for this silence may be skipped, and the hook says so. No mark
   # file is ever unlinked.
   wr_lock "$mark" || { echo "board-guard: skipped $seat (mark busy), will retry on the next prompt" >&2; continue; }
-  here="$(wr_generation "$BOARD_FILE") $lineno $(printf '%s\n' "$line" | wr_sum)"
+  gen=$(wr_generation "$BOARD_FILE") || { wr_unlock "$mark"; echo "board-guard: skipped $seat (could not read the board), will retry on the next prompt" >&2; continue; }
+  here="$gen $lineno $(printf '%s\n' "$line" | wr_sum)"
   prev=$(cat "$mark" 2>/dev/null)
   if [ "$prev" != "$here" ]; then
     mark_t=""
