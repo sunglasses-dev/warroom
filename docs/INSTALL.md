@@ -1,6 +1,6 @@
 # Install by hand
 
-Five steps, run from the clone. You need git, bash, python3 and Claude Code, signed in; python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; W equal to its physical directory and the listed W/B settings basenames are refused, while dedicated subdirectories remain allowed.
+Five steps, run from the clone. You need git, bash, python3 and Claude Code, signed in; python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; a run folder that is the config folder itself (compared by its physical path) and a run folder or board named like a settings file are refused, while dedicated subfolders remain allowed.
 1. **Config.** Copy the example and edit the seats, run directory and board name. It is read as data, never run. An existing `~/.warroom/warroom.env` is kept as it is: edit it instead.
 ```
 mkdir -p ~/.warroom && { [ -e ~/.warroom/warroom.env ] || cp warroom.env.example ~/.warroom/warroom.env; }

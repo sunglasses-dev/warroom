@@ -310,7 +310,7 @@ f="$T/i17/good.json" sh -c "$pc" >/dev/null 2>&1; g=$?; f="$T/i17/broken.json" s
 
 # (17, re-read against the destination checks) line 3 carries the PATH requirement for python3 once, and names the refusals it makes true
 l3=$(sed -n 3p "$D"); np=$(cat "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT"/docs/*.md | grep -c 'python3 must be on the PATH your Claude Code hooks run with')
-case "$l3" in *"python3 must be on the PATH your Claude Code hooks run with"*"listed W/B settings basenames are refused"*) [ "$np" = 1 ] && ok "INSTALL.md line 3: python3 must be on the hooks' PATH (said once in the docs) and the refused settings names are stated" || bad "python3 PATH sentence appears $np times" ;; *) bad "INSTALL.md line 3 lost the python3 PATH or settings-name sentence: $l3" ;; esac
+case "$l3" in *"python3 must be on the PATH your Claude Code hooks run with"*"named like a settings file are refused"*) [ "$np" = 1 ] && ok "INSTALL.md line 3: python3 must be on the hooks' PATH (said once in the docs) and the refused settings names are stated" || bad "python3 PATH sentence appears $np times" ;; *) bad "INSTALL.md line 3 lost the python3 PATH or settings-name sentence: $l3" ;; esac
 
 # 21. a hook never exits 2 on a bad config: Claude Code would block the prompt, in every session on the machine
 hr=""; for h in board-guard board-tail waiter-check; do
@@ -713,6 +713,16 @@ fx_r7c() { # a child started with BOARD=settings.json re-validates and is refuse
   pa_want 'settings file' 2 WARROOM_DIR="$PAW/r7" bash -c 'BOARD=settings.json "$1" path' _ "$PB/board.sh"
 }
 
+fx_r8() { # a HOME with a trailing / (or HOME=/) is the same HOME: the default config path and ~/ values add no second /
+  pa_setup
+  pa_pass HOME="$PAH/" WARROOM_DIR="$PAW/r8a" bash -c 'unset WARROOM_ENV; exec "$@"' _ "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAW/r8a/board.md" ] || { PA_WHY="HOME with a trailing /: board '$PA_OUT'"; return 1; }
+  pa_pass HOME=/ WARROOM_DIR="$PAW/r8b" bash -c 'unset WARROOM_ENV; exec "$@"' _ "$PB/board.sh" path || return 1
+  printf 'WARROOM_DIR=~/sub\n' > "$PAW/r8.env"
+  pa_pass HOME="$PAH/" WARROOM_ENV="$PAW/r8.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAH/sub/board.md" ] || { PA_WHY="a home-relative value under HOME with a trailing /: board '$PA_OUT'"; return 1; }
+}
+
 # 47. settings names, reserved state names, the board's own aliases (N1-N5)
 fx_n1() {
   pa_setup; mkdir -p "$PAW/n1b"; printf 'keep' > "$PAW/n1b/settings.json"; _k=$(cksum < "$PAW/n1b/settings.json")
@@ -867,6 +877,7 @@ pa_run_fx fx_r6 "absolute paths: a relative WARROOM_DIR or WARROOM_ENV, and BOAR
 pa_run_fx fx_r7a "readonly: a script that sourced _common.sh cannot reassign W"
 pa_run_fx fx_r7b "readonly: a script that sourced _common.sh cannot reassign BOARD_FILE"
 pa_run_fx fx_r7c "readonly: a child started with BOARD=settings.json re-validates and is refused"
+pa_run_fx fx_r8 "HOME: a trailing / (or HOME=/) is accepted; the default config path and a ~/ value in warroom.env add no second /"
 pa_run_fx fx_n1 "settings names: the four Claude Code settings file names (any case) are refused for W and B by post, waiter and the hooks; an unlocatable config folder is refused"
 pa_run_fx fx_n2 "reserved names: all 12 families, nested and mixed case, are refused for the board; board.tmp.md, x.tmp.d/ and a plain subfolder are not"
 pa_run_fx fx_n3 "aliases: the board as the config file, as a hard link of a state entry, or reached through a symlinked run folder, is refused"
