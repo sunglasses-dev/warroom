@@ -132,7 +132,7 @@ Optional helper beside the board: `pids.sh` notices when a registered job's proc
 | it is not | so |
 |---|---|
 | a framework or an agent library | no code of yours imports it |
-| a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts and one Python watchdog |
+| a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts with short python3 helpers |
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
 | a way to get more from your plan | it avoids spending model turns on repeatedly checking for work; your plan and its limits still apply |
 | a lock for every writer | the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard's marks are locked against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked. A misconfigured path or link is outside this lock. Give each protected file one name (no symlinked or hard-linked board) and never unlink a `.flock` file while any participant can run; deleting the stopped, retired run directory removes them too. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
