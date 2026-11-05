@@ -1091,6 +1091,76 @@ o=$(WARROOM_DIR="$L51/w" PATH="$SH55:$PATH" "$B/board.sh" tail BOSS 2>"$L51/e");
 l51_base; : > "$L51/w/board.md"; o=$(WARROOM_DIR="$L51/w" "$B/board.sh" tail BOSS 2>"$L51/e"); r=$?
 [ $r = 0 ] && [ -z "$o" ] && [ -z "$(cat "$L51/e")" ] && [ -f "$L51/w/.anchor-BOSS" ] && ok "consume: tail on an EMPTY board works (rc 0, nothing printed, no head -n 0, an anchor is saved)" || bad "consume: empty-board tail: rc $r, out '$o', err '$(cat "$L51/e")'"
 
+# 55b. write faults AFTER the temp exists (PR B): a mktemp shim hands out a read-only temp on the Nth call, so the printf/head/cp into it
+#      fails while the allocation and the rename would have worked. "N" counts every mktemp; "N waiter.sh" counts only those made by a
+#      process whose command line has that word (pids.sh check also makes temps on every poll). Stages: cursor, anchor, snapshot, chunk, guard mark. Each: the final
+#      file is as it was, the message is exact, the fault was reached (hit marker), and a retry without the fault delivers.
+SHRO="$T/shimro"; mkdir -p "$SHRO"; FRO="$T/faultro"; _rmk=$(command -v mktemp)
+cat > "$SHRO/mktemp" <<SHIM
+#!/bin/sh
+f="$FRO"
+if [ -f "\$f" ]; then
+  k=\$(cat "\$f"); n=\${k%% *}; pat=\${k#* }; [ "\$pat" = "\$k" ] && pat=""
+  if [ -n "\$pat" ]; then par=\$(ps -o command= -p \$PPID 2>/dev/null); case "\$par" in *"\$pat"*) ;; *) exec $_rmk "\$@" ;; esac; fi
+  c=\$(cat "\$f.cnt" 2>/dev/null || echo 0); c=\$((c+1)); echo "\$c" > "\$f.cnt"
+  if [ "\$n" = "\$c" ]; then p=\$($_rmk "\$@") || exit 1; chmod 444 "\$p"; echo "\$c" >> "\$f.hit"; echo "\$p"; exit 0; fi
+fi
+exec $_rmk "\$@"
+SHIM
+chmod +x "$SHRO/mktemp"
+ro_set() { rm -f "$FRO.cnt" "$FRO.hit"; printf '%s\n' "$1" > "$FRO"; }
+ro_clear() { rm -f "$FRO" "$FRO.cnt"; }
+ro_hit() { [ -s "$FRO.hit" ]; }
+f2_base() { rm -rf "$L51/w"; mkdir -p "$L51/w"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] three words here\n' > "$L51/w/board.md"; }
+f2_tail() { WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/board.sh" tail BOSS 2>"$L51/e"; }
+if [ "$(id -u)" != 0 ]; then
+for st in "snapshot 1 scratch" "chunk 2 scratch" "anchor 3 position"; do
+  set -- $st; name=$1; nth=$2; kind=$3
+  f2_base; WARROOM_DIR="$L51/w" "$B/board.sh" tail BOSS >/dev/null; printf '[00:00 · W1] fresh %s\n' "$name" >> "$L51/w/board.md"; a0=$(cksum < "$L51/w/.anchor-BOSS")
+  ro_set "$nth"; o=$(f2_tail); r=$?; ro_clear
+  want="could not write a scratch file"; [ $kind = position ] && want="could not save the read position"
+  o2=$(WARROOM_DIR="$L51/w" "$B/board.sh" tail BOSS 2>&1); r2=$?
+  pr=n; if [ $kind = scratch ]; then [ -z "$o" ] && pr=y; else case "$o" in *"fresh $name"*) pr=y ;; esac; fi
+  [ $r = 1 ] && ro_hit && [ $pr = y ] && grep -q "$want" "$L51/e" && [ -z "$(find "$L51/w" -name '.wrtmp.*')" ] && case "$o2" in *"fresh $name"*) true ;; *) false ;; esac && [ $r2 = 0 ] && [ "$(cksum < "$L51/w/.anchor-BOSS")" != "$a0" ] \
+    && ok "write fault: a failed $name write in board.sh tail exits 1 with '$want', the fault was reached, no temp is left, and the retry shows the line and moves the anchor" || bad "write fault $name: rc $r, out '$o', err '$(cat "$L51/e")', hit $(ro_hit && echo y || echo n), retry rc $r2 '$o2'"
+  [ $kind = position ] && { [ "$(cksum < "$L51/w/.anchor-BOSS")" != "$a0" ] || bad "write fault anchor: the retry did not move the anchor"; }
+done
+# the anchor test above also needs: while the write failed, the anchor was as it was
+f2_base; WARROOM_DIR="$L51/w" "$B/board.sh" tail BOSS >/dev/null; printf '[00:00 · W1] fresh keep\n' >> "$L51/w/board.md"; a0=$(cksum < "$L51/w/.anchor-BOSS"); ro_set 3; f2_tail >/dev/null; ro_clear
+[ "$(cksum < "$L51/w/.anchor-BOSS")" = "$a0" ] && ok "write fault: after a failed anchor write the old anchor is byte-equal" || bad "write fault anchor: the old anchor changed"
+# guard mark: the mark temp cannot be written: nothing is posted, no mark is saved, it says so, and the next prompt posts and saves it
+f2_base; printf '[00:00 · W1] a\n[00:00 · W1] working on this longer line\n' > "$L51/w/board.md"; b0=$(cksum < "$L51/w/board.md"); ro_set 1
+e=$(WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null 2>&1 >/dev/null); r=$?; ro_clear
+if [ $r = 0 ] && ro_hit && [ "$(cksum < "$L51/w/board.md")" = "$b0" ] && [ ! -e "$L51/w/.guard-W1" ] && case "$e" in *"could not save the mark"*) true ;; *) false ;; esac && [ -z "$(find "$L51/w" -name '.wrtmp.*')" ]; then
+  WARROOM_DIR="$L51/w" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null >/dev/null 2>&1
+  [ -s "$L51/w/.guard-W1" ] && [ "$(cksum < "$L51/w/board.md")" != "$b0" ] && ok "write fault: a failed guard-mark write posts nothing and saves no mark (said so, no temp left), and the next prompt posts and saves it" || bad "write fault guard: the retry did not post and save the mark"
+else bad "write fault guard: rc $r, hit $(ro_hit && echo y || echo n), mark '$(cat "$L51/w/.guard-W1" 2>/dev/null)', err '$e'"; fi
+else echo "skip write faults: read-only temps do not stop root (running as root)"; fi
+if [ "$PS_OK" = 1 ] && [ "$(id -u)" != 0 ]; then
+# waiter: the arm-time cursor write fails: exit 1 'not armed', cursor and registry byte-equal; the retry arms
+f2_base; WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-w0 >/dev/null 2>&1 & WP=$!; sleep 2; kill $WP 2>/dev/null; wait $WP 2>/dev/null
+s0=$(cksum < "$L51/w/seats.tsv"); c0=$(cksum < "$L51/w/.cursor-W1"); ro_set "1 waiter.sh"
+WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-w1 >/dev/null 2>"$L51/e" & WP=$!; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?; ro_clear; s1=$(cksum < "$L51/w/seats.tsv"); c1=$(cksum < "$L51/w/.cursor-W1")
+WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-w2 >/dev/null 2>&1 & WP=$!; sleep 2; kill -0 $WP 2>/dev/null && armed=1 || armed=0; kill $WP 2>/dev/null; wait $WP 2>/dev/null
+[ $r = 1 ] && ro_hit && grep -q "could not save the position of seat W1" "$L51/e" && grep -q "not armed" "$L51/e" && [ "$s1" = "$s0" ] && [ "$c1" = "$c0" ] && [ -z "$(find "$L51/w" -name '.wrtmp.*')" ] && [ $armed = 1 ] \
+  && ok "write fault: a failed arm-time cursor write exits 1 'not armed' (fault reached, no temp left) and the retry arms" || bad "write fault arm cursor: rc $r, hit $(ro_hit && echo y || echo n), armed $armed, err '$(cat "$L51/e")'"
+# waiter poll: the snapshot (call 1) and the chunk (call 2) cannot be written: the waiter stays up, the position is kept, it says so, the line comes on the next good poll
+for st in "snapshot 1" "chunk 2"; do
+  set -- $st; name=$1; nth=$2
+  f2_base; rm -f "$L51/w/seats.tsv"; WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-p$name > "$L51/o" 2>"$L51/e" & WP=$!; sleep 2
+  ro_set "$nth waiter.sh"; WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: wf $name line" >/dev/null
+  wait_exit $WP 10 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; ro_clear; said=$(grep -c "nothing consumed" "$L51/e")
+  [ "$said" -ge 1 ] && grep -q "wf $name line" "$L51/o" && ro_hit \
+    && ok "write fault: an unwritable $name in the waiter poll consumes nothing (said so, fault reached) and the same line is delivered by the next poll" || bad "write fault waiter $name: said $said, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")'"
+done
+# waiter delivery: the position write (call 3 of the run: snapshot, chunk, cursor) fails: exit 1 'NOT marked as delivered', lines printed, position kept, re-arm gets them again
+f2_base; rm -f "$L51/w/seats.tsv"; WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-pd > "$L51/o" 2>"$L51/e" & WP=$!; sleep 2
+ro_set "3 waiter.sh"; WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: wf deliver line" >/dev/null; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?; ro_clear
+WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-pd2 > "$L51/o2" 2>/dev/null & WP=$!; sleep 3; kill $WP 2>/dev/null; wait $WP 2>/dev/null
+[ $r = 1 ] && ro_hit && grep -q "NOT marked as delivered" "$L51/e" && grep -q "wf deliver line" "$L51/o" && grep -q "wf deliver line" "$L51/o2" \
+  && ok "write fault: a failed position write at delivery exits 1 'NOT marked as delivered' (line printed, fault reached) and the re-arm delivers it again" || bad "write fault waiter delivery: rc $r, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")', retry '$(cat "$L51/o2")'"
+else echo "skip write faults in the waiter: cursor, snapshot, chunk, delivery position (no ps start times, or running as root)"; fi
+
 # 59. mutants of the checks above: each is a copy of bin/ and hooks/ in $T with ONE change (asserted by grep -c); the copy
 # without the change passes the fixture, the copy with it fails the fixture at the printed assert.
 MA="$T/mutA"; mkdir -p "$MA"
@@ -1174,6 +1244,113 @@ fx_k11() { # the filter fails: nothing is consumed and the line is delivered on 
   wait_exit $WPA 8 || { kill $WPA 2>/dev/null; wait $WPA 2>/dev/null; PA_WHY="K11: the line was not delivered after the fault ended (it was consumed by the failed filter)"; return 1; }; wait $WPA 2>/dev/null
   grep -q "k11 line" "$PAW/o" || { PA_WHY="K11: the waiter ended without the line"; return 1; }
 }
+# --- F9 and F1 fixtures: the fault hits the exact call (a cksum or awk shim keyed on the call's input or program), leaves a hit marker, and the diagnostic is the exact one ---
+pa_ck() { # cksum shim: while $PAW/ckfault holds SIZE (or "all"), a cksum whose input has SIZE bytes fails and leaves a line in ckfault.hit
+  mkdir -p "$PAW/shim"; _ck=$(command -v cksum)
+  cat > "$PAW/shim/cksum" <<SHIM
+#!/bin/sh
+f="$PAW/ckfault"
+if [ -f "\$f" ]; then
+  k=\$(cat "\$f"); in="\$f.in.\$\$"; cat > "\$in"; sz=\$(wc -c < "\$in" | tr -d " ")
+  if [ "\$k" = all ] || [ "\$k" = "\$sz" ]; then rm -f "\$in"; echo hit >> "\$f.hit"; echo "shim: cksum refused" >&2; exit 1; fi
+  $_ck < "\$in"; r=\$?; rm -f "\$in"; exit \$r
+fi
+exec $_ck "\$@"
+SHIM
+  chmod +x "$PAW/shim/cksum"
+}
+pa_ckset() { rm -f "$PAW/ckfault.hit"; printf '%s\n' "$1" > "$PAW/ckfault"; }
+pa_ckoff() { rm -f "$PAW/ckfault"; }
+pa_ckhit() { [ -s "$PAW/ckfault.hit" ]; }
+pa_b2() { pa_setup; pa_w; printf '[00:00 · BOSS] one\n[00:00 · BOSS] three words here\n' > "$PW/board.md"; pa_ck; }
+fx_f9a() { # board.sh tail: the prefix checksum of a saved anchor fails: nothing printed, anchor kept, exit 1, the next tail shows only the new line
+  pa_b2; pa_run WARROOM_DIR="$PW" "$PB/board.sh" tail BOSS >/dev/null; printf '[00:00 · W1] fresh f9a\n' >> "$PW/board.md"; _a0=$(cksum < "$PW/.anchor-BOSS")
+  pa_ckset "$(head -n 2 "$PW/board.md" | wc -c | tr -d ' ')"
+  _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" tail BOSS 2>"$PAW/e"); _r=$?; pa_ckoff
+  { [ "$_r" = 1 ] && [ -z "$_o" ]; } || { PA_WHY="F9a: rc $_r, out '$_o' (want rc 1, nothing printed)"; return 1; }
+  { pa_ckhit && grep -q "could not checksum the board" "$PAW/e"; } || { PA_WHY="F9a: the fault was not reached or the diagnostic differs: '$(cat "$PAW/e")'"; return 1; }
+  { [ "$(cksum < "$PW/.anchor-BOSS")" = "$_a0" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="F9a: the anchor moved or a temp is left"; return 1; }
+  _o=$(pa_run WARROOM_DIR="$PW" "$PB/board.sh" tail BOSS)
+  case "$_o" in *"fresh f9a"*) ;; *) PA_WHY="F9a: the retry does not show the new line"; return 1 ;; esac
+  case "$_o" in *"three words here"*) PA_WHY="F9a: the retry printed the whole board"; return 1 ;; esac
+}
+fx_f9b() { # board.sh tail: an anchor from the older version (checksum of the last line) whose line checksum fails
+  pa_b2; _ino=$(stat -c %i "$PW/board.md" 2>/dev/null || stat -f %i "$PW/board.md"); _gc=$(head -n 1 "$PW/board.md" | cksum | cut -d' ' -f1); _ls=$(sed -n 2p "$PW/board.md" | cksum | cut -d' ' -f1)
+  printf '%s:%s 2 %s %s\n' "$_ino" "$_gc" "$(date +%s)" "$_ls" > "$PW/.anchor-BOSS"; printf '[00:00 · W1] fresh f9b\n' >> "$PW/board.md"; _a0=$(cksum < "$PW/.anchor-BOSS")
+  pa_ckset "$(sed -n 2p "$PW/board.md" | wc -c | tr -d ' ')"
+  _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" tail BOSS 2>"$PAW/e"); _r=$?; pa_ckoff
+  { [ "$_r" = 1 ] && [ -z "$_o" ]; } || { PA_WHY="F9b: rc $_r, out '$_o' (want rc 1, nothing printed)"; return 1; }
+  { pa_ckhit && grep -q "could not checksum the board" "$PAW/e" && [ "$(cksum < "$PW/.anchor-BOSS")" = "$_a0" ]; } || { PA_WHY="F9b: fault not reached, diagnostic differs, or the anchor moved: '$(cat "$PAW/e")'"; return 1; }
+  _o=$(pa_run WARROOM_DIR="$PW" "$PB/board.sh" tail BOSS)
+  case "$_o" in *"fresh f9b"*) ;; *) PA_WHY="F9b: the retry does not show the new line"; return 1 ;; esac
+  case "$_o" in *"three words here"*) PA_WHY="F9b: the retry printed the whole board (the older anchor is not accepted)"; return 1 ;; esac
+}
+fx_f9c() { # board-tail.sh (the prompt hook): a failed generation or prefix checksum in the cursor check shows no count and says why
+  pa_b2; pa_run WARROOM_DIR="$PW" "$PB/board.sh" tail BOSS >/dev/null; printf 'sid-f9c\tBOSS\t1\t00:00\n' > "$PW/seats.tsv"; printf '[00:00 · W1] @BOSS fresh f9c\n' >> "$PW/board.md"
+  _o=$(printf '{"session_id":"sid-f9c"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/board-tail.sh" 2>/dev/null)
+  case "$_o" in *"1 new line"*) ;; *) PA_WHY="F9c: the control without a fault does not show '1 new line': '$_o'"; return 1 ;; esac
+  for _v in gen prefix; do
+    if [ $_v = gen ]; then pa_ckset "$(head -n 1 "$PW/board.md" | wc -c | tr -d ' ')"; else pa_ckset "$(head -n 2 "$PW/board.md" | wc -c | tr -d ' ')"; fi
+    _o=$(printf '{"session_id":"sid-f9c"}' | pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash "$PHK/board-tail.sh" 2>"$PAW/e"); pa_ckoff
+    { [ -z "$_o" ] && pa_ckhit && grep -q "could not checksum the board" "$PAW/e"; } || { PA_WHY="F9c ($_v): out '$_o', hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+  done
+}
+fx_f9d() { # waiter arm: a saved cursor whose prefix checksum fails: exit 1 'not armed', registry and cursor byte-equal
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; rm -f "$PW/seats.tsv"; pa_run WARROOM_DIR="$PW" "$PB/waiter.sh" W1 sid-f9d1 >/dev/null 2>&1 & _wp=$!; sleep 2; kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-f9d1" 2>/dev/null; sleep 1
+  [ -s "$PW/.cursor-W1" ] || { PA_WHY="F9d: the first arm saved no cursor"; return 1; }
+  _s0=$(cksum < "$PW/seats.tsv"); _c0=$(cksum < "$PW/.cursor-W1"); pa_ckset "$(wc -c < "$PW/board.md" | tr -d ' ')"
+  pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-f9d2 >/dev/null 2>"$PAW/e" & _wp=$!
+  wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pa_ckoff; PA_WHY="F9d: the waiter armed although the cursor checksum failed"; return 1; }; wait $_wp 2>/dev/null; _r=$?; pa_ckoff
+  { [ "$_r" = 1 ] && pa_ckhit && grep -q "could not checksum the board" "$PAW/e" && grep -q "not armed" "$PAW/e"; } || { PA_WHY="F9d: rc $_r, hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+  { [ "$(cksum < "$PW/seats.tsv")" = "$_s0" ] && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ]; } || { PA_WHY="F9d: the registry or the cursor changed"; return 1; }
+}
+fx_f9e() { # board-guard: the checksum of the post line fails: nothing posted, no mark saved, said so; the next prompt posts and saves the mark
+  pa_b2; printf '[00:00 · W1] a\n[00:00 · W1] working on this longer line\n' > "$PW/board.md"; _b0=$(cksum < "$PW/board.md")
+  pa_ckset "$(tail -n 1 "$PW/board.md" | wc -c | tr -d ' ')"
+  _e=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" WARROOM_IDLE_MIN=0 bash "$PHK/board-guard.sh" </dev/null 2>&1 >/dev/null); _r=$?; pa_ckoff
+  { [ "$_r" = 0 ] && pa_ckhit && [ "$(cksum < "$PW/board.md")" = "$_b0" ] && [ ! -e "$PW/.guard-W1" ]; } || { PA_WHY="F9e: rc $_r, hit $(pa_ckhit && echo y || echo n), board changed or a mark exists: '$_e'"; return 1; }
+  case "$_e" in *"could not checksum the post"*) ;; *) PA_WHY="F9e: no diagnostic: '$_e'"; return 1 ;; esac
+  pa_run WARROOM_DIR="$PW" WARROOM_IDLE_MIN=0 bash "$PHK/board-guard.sh" </dev/null >/dev/null 2>&1
+  { [ -s "$PW/.guard-W1" ] && [ "$(cksum < "$PW/board.md")" != "$_b0" ]; } || { PA_WHY="F9e: the next prompt did not post and save the mark"; return 1; }
+}
+fx_f1a() { # waiter arm: the registry rewrite (awk) fails, and only that awk call: exit 1 with the registry diagnostic, registry byte-equal, hit marker
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; printf 'other-sid\tBOSS\t1\t00:00\n' > "$PW/seats.tsv"; _s0=$(cksum < "$PW/seats.tsv"); mkdir -p "$PAW/shim"; _aw=$(command -v awk)
+  cat > "$PAW/shim/awk" <<SHIM
+#!/bin/sh
+if [ -f "$PAW/awkfault" ]; then
+  case "\$*" in *'\$1!=s && \$2!=seat'*) echo hit >> "$PAW/awkfault.hit"; echo "shim: awk refused" >&2; exit 1 ;; esac
+fi
+exec $_aw "\$@"
+SHIM
+  chmod +x "$PAW/shim/awk"; : > "$PAW/awkfault"
+  pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-f1a >/dev/null 2>"$PAW/e" & _wp=$!
+  wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; PA_WHY="F1a: the waiter armed although the registry rewrite failed"; return 1; }; wait $_wp 2>/dev/null; _r=$?; rm -f "$PAW/awkfault"
+  { [ "$_r" = 1 ] && [ -s "$PAW/awkfault.hit" ] && grep -q "could not write the seat registry: not armed" "$PAW/e"; } || { PA_WHY="F1a: rc $_r, hit $([ -s "$PAW/awkfault.hit" ] && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+  { [ "$(cksum < "$PW/seats.tsv")" = "$_s0" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="F1a: the registry changed or a temp is left"; return 1; }
+}
+fx_f1b() { # waiter arm: the arm-time prefix checksum fails (a fresh seat: no cursor, the generation call works): exit 1 with the checksum diagnostic, no cursor, registry byte-equal
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; printf 'other-sid\tBOSS\t1\t00:00\n' > "$PW/seats.tsv"; _s0=$(cksum < "$PW/seats.tsv"); pa_ckset "$(wc -c < "$PW/board.md" | tr -d ' ')"
+  pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-f1b >/dev/null 2>"$PAW/e" & _wp=$!
+  wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pa_ckoff; PA_WHY="F1b: the waiter armed although the arm-time checksum failed"; return 1; }; wait $_wp 2>/dev/null; _r=$?; pa_ckoff
+  { [ "$_r" = 1 ] && pa_ckhit && grep -q "could not checksum the board" "$PAW/e" && grep -q "not armed" "$PAW/e"; } || { PA_WHY="F1b: rc $_r, hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+  { [ ! -e "$PW/.cursor-W1" ] && [ "$(cksum < "$PW/seats.tsv")" = "$_s0" ]; } || { PA_WHY="F1b: a cursor was saved or the registry changed"; return 1; }
+}
+fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 with the generation diagnostic ('could not read the board'), no anchor
+  pa_b2; pa_ckset all
+  _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" tail BOSS 2>"$PAW/e"); _r=$?; pa_ckoff
+  { [ "$_r" = 1 ] && [ -z "$_o" ] && pa_ckhit && grep -q "could not read the board" "$PAW/e" && [ ! -e "$PW/.anchor-BOSS" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="F1c: rc $_r, out '$_o', hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+}
+pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
+pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
+pa_run_fx fx_f9c "F9: a failed generation or prefix checksum in the prompt hook shows no count and says why"
+pa_run_fx fx_f9d "F9: a failed cursor checksum while arming exits 1 'not armed' (no re-read from line 1), registry and cursor byte-equal"
+pa_run_fx fx_f9e "F9: a failed checksum of the post line in board-guard posts nothing, saves no mark and says why; the next prompt posts and saves it"
+pa_run_fx fx_f1a "F1: a failed registry rewrite (only that awk call) exits 1 with the registry diagnostic, registry byte-equal, no temp left"
+pa_run_fx fx_f1b "F1: a failed arm-time prefix checksum (no cursor yet) exits 1 with the checksum diagnostic, no cursor saved, registry byte-equal"
+pa_run_fx fx_f1c "F1: a failed generation checksum in board.sh tail exits 1 with the generation diagnostic and saves no anchor"
 # --- B mutants ---
 if [ "$PS_OK" = 1 ]; then
 pa_mcopy touchlast; pa_msed touchlast bin/waiter.sh 's|if ! { wr_stamp "\$LAST" \&\& {|if ! { touch "$LAST" \&\& {|'
@@ -1191,6 +1368,30 @@ if [ "$PS_OK" = 1 ]; then
 pa_mcopy nofiltercheck; pa_msed nofiltercheck bin/waiter.sh 's|&& new=$(filter < "$chunk_t"); }; then|\&\& { new=$(filter < "$chunk_t" \|\| true); }; }; then|'
 [ "$(grep -c 'filter < "\$chunk_t" || true' "$MA/nofiltercheck/bin/waiter.sh")" = 1 ] && pa_mut nofiltercheck fx_k11 || bad "mutant nofiltercheck: the change was not applied"
 else echo "skip mutant nofiltercheck (ps cannot read process start times here, so a waiter cannot arm)"; fi
+
+# --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
+pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
+[ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9tail/bin/board.sh")" = 1 ] && pa_mut f9tail fx_f9a || bad "mutant f9tail: the change was not applied"
+pa_mcopy f9prefix; pa_msed f9prefix bin/_cursor.sh 's/\(_cs=\$(wr_prefixsum "\$2" "\$_l")\) || return 1/\1/'
+[ "$(grep -c '_cs=\$(wr_prefixsum "\$2" "\$_l") ;;' "$MA/f9prefix/bin/_cursor.sh")" = 1 ] && pa_mut f9prefix fx_f9a || bad "mutant f9prefix: the change was not applied"
+pa_mcopy f9line; pa_msed f9line bin/_cursor.sh 's/\(_cs=\$(wr_linesum "\$2" "\$_l")\) || return 1/\1/'
+[ "$(grep -c '_cs=\$(wr_linesum "\$2" "\$_l") ;;' "$MA/f9line/bin/_cursor.sh")" = 1 ] && pa_mut f9line fx_f9b || bad "mutant f9line: the change was not applied"
+pa_mcopy f9gen; pa_msed f9gen bin/_cursor.sh 's/\(_cg=\$(wr_generation "\$2")\) || return 1/\1/'
+[ "$(grep -c '^  _cg=\$(wr_generation "\$2")$' "$MA/f9gen/bin/_cursor.sh")" = 1 ] && pa_mut f9gen fx_f9c || bad "mutant f9gen: the change was not applied"
+pa_mcopy f9hook; pa_msed f9hook hooks/board-tail.sh 's/^\(n=.*; last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
+[ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9hook/hooks/board-tail.sh")" = 1 ] && pa_mut f9hook fx_f9c || bad "mutant f9hook: the change was not applied"
+pa_mcopy f9guard; pa_msed f9guard hooks/board-guard.sh 's/^\(  lsum=.*wr_sum)\) || {.*$/\1 || true/'
+[ "$(grep -c '^  lsum=.*wr_sum) || true$' "$MA/f9guard/hooks/board-guard.sh")" = 1 ] && pa_mut f9guard fx_f9e || bad "mutant f9guard: the change was not applied"
+pa_mcopy f1tailgen; pa_msed f1tailgen bin/board.sh 's/^\(    g=\$(wr_generation "\$BOARD_FILE")\) || {.*$/\1 || true/'
+[ "$(grep -c '^    g=\$(wr_generation "\$BOARD_FILE") || true$' "$MA/f1tailgen/bin/board.sh")" = 1 ] && pa_mut f1tailgen fx_f1c || bad "mutant f1tailgen: the change was not applied"
+if [ "$PS_OK" = 1 ]; then
+pa_mcopy f9arm; pa_msed f9arm bin/waiter.sh 's/^\(  c=\$(wr_cursor_get [^)]*)\) || armfail .*$/\1/'
+[ "$(grep -c '^  c=\$(wr_cursor_get "\$CUR" "\$BOARD_FILE" "\$AGE")$' "$MA/f9arm/bin/waiter.sh")" = 1 ] && pa_mut f9arm fx_f9d || bad "mutant f9arm: the change was not applied"
+pa_mcopy f1reg; pa_msed f1reg bin/waiter.sh 's/ || armfail "could not write the seat registry: not armed"//'
+[ "$(grep -c 'could not write the seat registry' "$MA/f1reg/bin/waiter.sh")" = 0 ] && pa_mut f1reg fx_f1a || bad "mutant f1reg: the change was not applied"
+pa_mcopy f1arm; pa_msed f1arm bin/waiter.sh 's/^\(  lastck=.*\) || armfail "could not checksum the board \$BOARD_FILE: not armed"$/\1/'
+[ "$(grep -c '^  lastck=.*armfail' "$MA/f1arm/bin/waiter.sh")" = 0 ] && [ "$(grep -c '^  lastck=' "$MA/f1arm/bin/waiter.sh")" = 1 ] && pa_mut f1arm fx_f1b || bad "mutant f1arm: the change was not applied"
+else echo "skip mutants f9arm, f1reg, f1arm (ps cannot read process start times here, so a waiter cannot arm)"; fi
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail

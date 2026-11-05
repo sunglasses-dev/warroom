@@ -43,7 +43,8 @@ for seat in $SEATS; do
   # file is ever unlinked.
   wr_lock "$mark" || { echo "board-guard: skipped $seat (mark busy), will retry on the next prompt" >&2; continue; }
   gen=$(wr_generation "$BOARD_FILE") || { wr_unlock "$mark"; echo "board-guard: skipped $seat (could not read the board), will retry on the next prompt" >&2; continue; }
-  here="$gen $lineno $(printf '%s\n' "$line" | wr_sum)"
+  lsum=$(printf '%s\n' "$line" | wr_sum) || { wr_unlock "$mark"; echo "board-guard: skipped $seat (could not checksum the post), will retry on the next prompt" >&2; continue; }
+  here="$gen $lineno $lsum"
   prev=$(cat "$mark" 2>/dev/null)
   if [ "$prev" != "$here" ]; then
     mark_t=""

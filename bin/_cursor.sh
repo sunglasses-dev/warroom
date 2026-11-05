@@ -31,28 +31,33 @@ wr_prefixsum() {
   [ -n "$_ps" ] || return 1
   echo "$_ps"
 }
-# wr_linesum BOARD N — checksum of line N alone (only to read a cursor written by an older version)
+# wr_linesum BOARD N — checksum of line N alone (only to read a cursor written by an older version); nothing is printed and
+# the status is 1 when the read or the checksum fails
 wr_linesum() {
-  case "$2" in ''|*[!0-9]*) echo 0; return ;; esac
-  if [ "$2" -gt 0 ]; then sed -n "${2}p;${2}q" "$1" 2>/dev/null | wr_sum; else echo 0; fi
+  case "$2" in ''|*[!0-9]*) echo 0; return 0 ;; esac
+  if [ "$2" -gt 0 ]; then ( set -o pipefail; sed -n "${2}p;${2}q" "$1" 2>/dev/null | wr_sum ); else echo 0; fi
 }
 # wr_cursor_get CURSOR_FILE BOARD MAX_AGE_SECONDS
 #   prints the line to resume from; 0 when the board was replaced, shrank or changed in the part already read (all of it
 #   is new to this reader); "none" when there is no usable cursor (first run, unreadable, or older than MAX_AGE_SECONDS).
+#   A checksum that cannot be computed is not "the board changed": nothing is printed and the status is 1, and the caller
+#   consumes nothing.
 wr_cursor_get() {
-  _g=""; _l=""; _t=""; _s=""
+  _g=""; _l=""; _t=""; _s=""; _cg=""; _cs=""
   [ -r "$1" ] || { echo none; return; }                     # a missing cursor is normal on the first arm: say nothing
   read -r _g _l _t _s < "$1" 2>/dev/null || { echo none; return; }
   case "$_l$_t" in ''|*[!0-9]*) echo none; return ;; esac
   [ $(( $(date +%s) - _t )) -le "${3:-86400}" ] || { echo none; return; }
-  if [ "$_g" = "$(wr_generation "$2")" ]; then
+  _cg=$(wr_generation "$2") || return 1
+  if [ "$_g" = "$_cg" ]; then
     _n=$(wc -l < "$2" | tr -d ' ')
     if [ "$_l" -le "$_n" ]; then
       if [ "$_l" -eq 0 ] || [ -z "$_s" ]; then echo "$_l"; return; fi     # nothing read yet, or a cursor without SUM (accepted once)
       case "$_s" in
-        *-*) [ "$_s" = "$(wr_prefixsum "$2" "$_l")" ] && { echo "$_l"; return; } ;;
-        *)   [ "$_s" = "$(wr_linesum "$2" "$_l")" ] && { echo "$_l"; return; } ;;   # older cursor: the last line only
+        *-*) _cs=$(wr_prefixsum "$2" "$_l") || return 1 ;;
+        *)   _cs=$(wr_linesum "$2" "$_l") || return 1 ;;                   # older cursor: the last line only
       esac
+      [ "$_s" = "$_cs" ] && { echo "$_l"; return; }
     fi
   fi
   echo 0

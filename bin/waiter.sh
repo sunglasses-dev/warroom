@@ -51,7 +51,8 @@ if [ "$SEAT" != NONE ]; then
   # the position first: it only repeats what the next arm would compute, so a failed registry write after it changes nothing
   gen=$(wr_generation "$BOARD_FILE") || armfail "could not read the board $BOARD_FILE: not armed"
   base=$(wc -l < "$BOARD_FILE" | tr -d ' ')
-  c=$(wr_cursor_get "$CUR" "$BOARD_FILE" "$AGE"); [ "$c" = none ] || base=$c
+  c=$(wr_cursor_get "$CUR" "$BOARD_FILE" "$AGE") || armfail "could not checksum the board $BOARD_FILE: not armed"
+  [ "$c" = none ] || base=$c
   lastck=$(wr_prefixsum "$BOARD_FILE" "$base") || armfail "could not checksum the board $BOARD_FILE: not armed"
   wr_cursor_put "$CUR" "$gen" "$base" "$lastck" || armfail "could not save the position of seat $SEAT ($CUR): not armed. Is $W writable and not full?"
 fi

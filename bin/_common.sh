@@ -163,8 +163,8 @@ wr_drop() {
 }
 # wr_replace TMP FINAL: rename TMP over FINAL (rename(2): a directory at FINAL is an error, not a move into it). FINAL, when it
 # exists, must be a regular file with one name. On refusal or failure FINAL is untouched, only the recorded TMP is removed (a
-# removal that fails is reported with the temp's path) and the return is 1. Process termination and power loss have the crash
-# limits in SECURITY.md: rename gives the old file or the new one after a crash, with no fsync.
+# removal that fails is reported with the temp's path) and the return is 1. After a process crash FINAL is the old file or the
+# new one (rename); there is no fsync and no power-loss guarantee.
 wr_replace() {
   _wr_rt=$1; _wr_rf=$2
   if [ -L "$_wr_rf" ] || { [ -e "$_wr_rf" ] && ! wr_leaf_ok "$_wr_rf"; }; then
