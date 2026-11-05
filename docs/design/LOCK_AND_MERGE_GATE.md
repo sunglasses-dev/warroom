@@ -305,4 +305,4 @@ These lines change in the same pull request as the code, so no doc describes beh
   - `flock(1)` availability is a difference between the stock platforms, not a rule.
 - Also (review note from the PR #10 CI runs): 8 simultaneous `board.sh post` to a missing board must all land on Linux CI.
 
-Out of scope here: installer ownership (PRs #11 and #12, merged) and the FIX bundle (PRs #9 and #10, merged).
+Out of scope here: the Claude Code settings file (nothing in this repository writes it) and earlier fixes to the waiter, cursor and ledger.

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # bin/_config.sh — reads warroom.env as DATA. The file is never sourced or run, so nothing written in it can execute.
-# Sourced by bin/_common.sh and install.sh; bin/cpu-sentinel.py implements the same rules in Python.
+# Sourced by bin/_common.sh; bin/cpu-sentinel.py implements the same rules in Python.
 # Where: $WARROOM_ENV when it is set, otherwise ~/.warroom/warroom.env. No other place is read (not the current folder).
 # Grammar, one setting per line; blank lines and lines starting with # are skipped:
 #   KEY=VALUE    KEY: SEATS WARROOM_DIR BOARD WARROOM_POLL WARROOM_MIN_GAP WARROOM_IDLE_MIN WARROOM_LONG

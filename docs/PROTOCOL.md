@@ -9,7 +9,7 @@ Skeleton for v0.1. This page separates what a script in `bin/` or `hooks/` does 
 | first seat in `SEATS` | the boss: rulings, merges, anything that needs a decision (convention). The scripts send it guard alerts when no job owner is known. |
 | other seats | take rows, do the work, post results (convention). |
 
-Seat names are set in `warroom.env` and default to `BOSS MANAGER W1 W2`; the examples and the installer use those defaults.
+Seat names are set in `warroom.env` and default to `BOSS MANAGER W1 W2`; the examples and `warroom.env.example` use those defaults.
 
 ## Board grammar
 
