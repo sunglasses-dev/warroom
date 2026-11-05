@@ -1542,6 +1542,10 @@ else echo "skip mutants warm, wpoll (ps cannot read process start times here, so
 if [ "$PS_OK" = 1 ]; then
 pa_mcopy krm; pa_msed krm bin/waiter.sh 's|if ! wr_cursor_put "\$CUR" "\$gen" "\$base" "\$lastck"; then|if ! wr_cursor_put "$CUR" "$gen" "$base" "$lastck"; then rm -f "$LAST";|'
 [ "$(grep -c 'then rm -f "\$LAST";' "$MA/krm/bin/waiter.sh")" = 1 ] && pa_mut krm fx_k1 || bad "mutant krm: the change was not applied"
+# F3 root control (id double): K1's own root skip reaches pa_mut as a skip, counted as neither ok nor FAIL
+mkdir -p "$T/idroot" && printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exec /usr/bin/id "$@"' > "$T/idroot/id" && chmod +x "$T/idroot/id"
+_f0=$fail; _p0=$PATH; PATH="$T/idroot:$PATH"; pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0
+[ "$fail" = "$_f0" ] && grep -q '^skip mutant krm (running as root: mode 444 does not block root)$' "$T/skiproot.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skiproot.out")" = 0 ] && ok "mutants: K1 under an id double that reports root skips; pa_mut prints the skip and counts neither ok nor FAIL" || bad "mutants: K1 root-skip control: $(cat "$T/skiproot.out")"
 pa_mcopy khdr; pa_msed khdr bin/waiter.sh 's|^    if ! echo \(".*"\); then$|    echo \1; if false; then|'
 [ "$(grep -c 'if false; then$' "$MA/khdr/bin/waiter.sh")" = 1 ] && pa_mut khdr fx_k2 || bad "mutant khdr: the change was not applied"
 pa_mcopy knotrap; pa_msed knotrap bin/waiter.sh "s|^trap '' PIPE.*\$|:|"
