@@ -826,6 +826,22 @@ def cmd_name(simple):
     return unesc(t) if t is not None else '$'
 
 
+def unwrapped(simple):
+    """(name, args) of a simple command with any `command`/`builtin` wrappers and their options peeled off. A computed word
+    after a wrapper (or as the command) has the name '$'."""
+    words = list(simple.words)
+    while words:
+        t = word_lit(words[0])
+        name = unesc(t) if t is not None else '$'
+        if name in ('command', 'builtin'):
+            words = words[1:]
+            while words and (word_lit(words[0]) or '').startswith('-') and word_lit(words[0]) != '-':
+                words = words[1:]
+            continue
+        return name, [word_lit(w) for w in words[1:]]
+    return 'command', []
+
+
 def normalize(text):
     out, i, n = [], 0, len(text)
     q = None
@@ -902,9 +918,10 @@ class Analyzer:
                 if nd.k == 'func' and nd.name in TAINT_NAMES:
                     why = '%s: a function named %s shadows the shell word a refusal relies on' % (where, nd.name)
                 elif nd.k == 'simple' and nd.words:
-                    name = cmd_name(nd)
-                    args = [word_lit(w) for w in nd.words[1:]]
-                    if name in SHADOW_CMDS:
+                    name, args = unwrapped(nd)
+                    if name == '$' and cmd_name(nd) in ('command', 'builtin'):
+                        why = '%s: a computed word after command/builtin can be eval, trap or unset' % where
+                    elif name in SHADOW_CMDS:
                         why = '%s: %s can change what exit, return or a helper means' % (where, name)
                     elif name == 'eval':
                         why = '%s: eval can define or remove any of them' % where
@@ -955,7 +972,8 @@ class Analyzer:
         return None
 
     def check_trap(self, where, args):
-        """The reason an EXIT/ERR/DEBUG/RETURN trap can rewrite the exit status, or None."""
+        """The reason a trap action can end the shell or rewrite the exit status, or None. Any signal counts: a signal can be sent
+        from inside a substitution, and a closed pipe raises PIPE."""
         if any(a is None for a in args):
             return '%s: trap with a computed argument' % where
         if not args or args[0] in ('-p', '-l'):
@@ -968,7 +986,7 @@ class Analyzer:
         for x in sigs:
             if x not in TRAP_SPECIAL and not re.fullmatch(r'[0-9]{1,2}', x) and re.sub(r'^SIG', '', x) not in TRAP_SIGNALS:
                 return '%s: trap on %s, which is not a signal name this gate knows' % (where, x)
-        if not sigs or action == '' or not any(x in TRAP_SPECIAL for x in sigs):
+        if not sigs or action in ('', '-'):
             return None
         try:
             tree = Parser(action).parse_script()
@@ -981,7 +999,7 @@ class Analyzer:
             if c.k == 'simple' and c.words:
                 nm = cmd_name(c)
                 if nm not in TRAP_SAFE:
-                    return '%s: an EXIT trap may rewrite the exit status; only %s are allowed in its action, not %s' % (
+                    return '%s: a trap action may end the shell or rewrite the exit status; only %s are allowed in it, not %s' % (
                         where, ' '.join(sorted(TRAP_SAFE)), nm)
                 if self.can_exit(nm, set()):
                     return '%s: trap helper %s can end the shell' % (where, nm)
@@ -996,7 +1014,7 @@ class Analyzer:
             for d in walk(fn):
                 if d.k == 'simple' and d.words:
                     nm = cmd_name(d)
-                    if nm in ('exit', 'kill', 'exec') or (nm in self.funcs and self.can_exit(nm, seen)):
+                    if nm in ('exit', 'kill', 'exec', 'command', 'builtin', 'eval', '$') or (nm in self.funcs and self.can_exit(nm, seen)):
                         return True
         return False
 
@@ -1054,10 +1072,12 @@ class Analyzer:
         """A word that is only literals, quotes and plain `$name` references: expanding it cannot fail or run anything."""
         for p in w.parts:
             if isinstance(p, Node) and p.k == 'dq':
-                if not all(isinstance(q, tuple) and q[0] in ('lit', 'var') for q in p.parts):
+                if not all(isinstance(q, tuple) and q[0] in ('lit', 'var') and not (q[0] == 'lit' and '$' in q[1]) for q in p.parts):
                     return False
             elif not (isinstance(p, tuple) and p[0] in ('lit', 'sq', 'var')):
                 return False
+            if isinstance(p, tuple) and p[0] == 'lit' and '$' in p[1]:
+                return False        # `$[1/0]` and other `$` forms the parser keeps as text
         return True
 
     def in_function(self, node):
@@ -1091,6 +1111,8 @@ class Analyzer:
         if sm.assigns or not sm.words:
             return False
         name = cmd_name(sm)
+        if any(d.k in ('cs', 'ps', 'bt') for d in walk(sm)):
+            return False        # a substitution can run anything, even a kill that fires a trap
         return name in INERT and not self.can_exit(name, set())
 
     def refusal_stmt(self, item, bare_ok=False):
@@ -1671,6 +1693,8 @@ class Analyzer:
             p = n.parent
             if p is None or p.k in ('cs', 'ps', 'func', 'script'):
                 return kind
+            if p.k == 'subshell':
+                return 'bg'     # its own process: a refusal in it ends that process only
             if p.k == 'pipe' and len(p.cmds) > 1:
                 kind = 'pipe'
             n = p
@@ -2496,9 +2520,17 @@ CODE_MUTANTS = [
     ('code-no-unset-check', "if any(a is None for a in args) or '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):", 'if False:', 'neg_shadow_unset_function.sh'),
     ('code-no-exit-trap-check', "elif name == 'trap':\n                        why = self.check_trap(where, args)", "elif False:\n                        why = self.check_trap(where, args)",
      'neg_proc_exit_trap_rewrites.sh'),
-    ('code-inert-helper-may-exit', "if nm in ('exit', 'kill', 'exec') or (nm in self.funcs and self.can_exit(nm, seen)):", 'if False:', 'neg_allow_cleanup_helper_exits_zero.sh'),
+    ('code-inert-helper-may-exit', "if nm in ('exit', 'kill', 'exec', 'command', 'builtin', 'eval', '$') or (nm in self.funcs and self.can_exit(nm, seen)):", 'if False:', 'neg_allow_cleanup_helper_exits_zero.sh'),
     ('code-no-alias-check', 'if name in SHADOW_CMDS:', 'if False:', 'neg_allow_alias.sh'),
-    ('code-no-unknown-signal-check', "return '%s: trap on %s, which is not a signal name this gate knows' % (where, x)", 'continue', 'neg_allow_trap_sigexit.sh'),
+    ('code-no-unknown-signal-check', "return '%s: trap on %s, which is not a signal name this gate knows' % (where, x)", 'continue', 'neg_allow_trap_unknown_signal_harmless.sh'),
+    # round 4: what the first allowlist head missed
+    ('code-r4-trap-every-signal', "if not sigs or action in ('', '-'):\n            return None", "if not sigs or action in ('', '-') or not any(x in TRAP_SPECIAL for x in sigs):\n            return None", 'neg_allow_trap_pipe_exit0.sh'),
+    ('code-r4-subshell-call', "if p.k == 'subshell':\n                return 'bg'", "if False:\n                return 'bg'", 'neg_allow_subshell_call_of_refusing_function.sh'),
+    ('code-r4-plain-word-dollar-text', "if isinstance(p, tuple) and p[0] == 'lit' and '$' in p[1]:", "if isinstance(p, tuple) and p[0] == 'lit' and False:", 'neg_allow_helper_arg_old_arith.sh'),
+    ('code-r4-plain-word-dollar-text-quoted', "q[0] in ('lit', 'var') and not (q[0] == 'lit' and '$' in q[1])", "q[0] in ('lit', 'var')", 'neg_allow_helper_arg_old_arith_quoted.sh'),
+    # the next two leave a dispatch line behind in their fixtures, so they are pinned by the diagnostic that must disappear
+    ('code-r4-unwrap-command', "if name in ('command', 'builtin'):\n            words = words[1:]", "if False:\n            words = words[1:]", 'neg_allow_command_eval_redefines_exit.sh', 'hides or redefines'),
+    ('code-r4-can-exit-wrappers', "'exec', 'command', 'builtin', 'eval', '$')", "'exec')", 'neg_allow_cleanup_helper_command_exit.sh', 'falls back'),
     # calls of script functions
     ('code-no-background-call-check', "if getattr(n, 'bg', False):\n                return 'bg'", "if False:\n                return 'bg'", 'neg_func_called_in_background.sh'),
     ('code-no-pipe-stage-call-check', "if kind == 'pipe' and name not in self.propagating:", 'if False:', 'neg_func_pipe_stage_unchecked.sh'),
@@ -2610,7 +2642,7 @@ def self_test(here):
     src = src[:i0] + src[src.index('\n]\n', i0) + 3:]       # the table names the texts it changes: look past it
     tmpd = tempfile.mkdtemp(prefix='read-gate-mut-')
     try:
-        for mid, old, new, fx in CODE_MUTANTS:
+        for mid, old, new, fx, *gone in CODE_MUTANTS:
             if not fx.startswith('tree:') and fx not in texts or fx.startswith('tree:') and fx[5:] not in TREE_CASES:
                 fails.append('code mutant %s: fixture %s is missing' % (mid, fx))
                 continue
@@ -2625,6 +2657,10 @@ def self_test(here):
             else:
                 pr = subprocess.run([sys.executable, '-I', mpath, '--enforce', '--fixture', os.path.join(fx_dir, fx)],
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            if gone:
+                check('code mutant %s (the diagnostic %r is gone for %s)' % (mid, gone[0], fx), gone[0] not in pr.stdout,
+                      'the diagnostic is still there, so the check is not pinned: %s' % pr.stdout.strip()[:160])
+                continue
             check('code mutant %s (the fixture %s is accepted)' % (mid, fx), pr.returncode == 0,
                   'exit %d (a fixture that still fails means the check is not pinned): %s' % (pr.returncode, pr.stdout.strip()[:160]))
     finally:
