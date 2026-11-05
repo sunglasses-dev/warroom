@@ -1,6 +1,6 @@
 # Install by hand
 
-Five steps, run from the clone. Nothing here edits your Claude Code settings for you: you (or your Claude Code session) make the one edit in step 3, with a copy saved first.
+Five steps, run from the clone. There is no settings installer; add the hook entries by hand after saving a copy, and keep the run directory and board away from your settings files.
 1. **Config.** Copy the example and edit the seats, run directory and board name. It is read as data, never run. An existing `~/.warroom/warroom.env` is kept as it is: edit it instead.
 ```
 mkdir -p ~/.warroom && { [ -e ~/.warroom/warroom.env ] || cp warroom.env.example ~/.warroom/warroom.env; }
