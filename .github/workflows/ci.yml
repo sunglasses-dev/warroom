@@ -9,8 +9,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: shellcheck (warnings and errors fail the build)
         run: shellcheck -S warning bin/*.sh hooks/*.sh tools/*.sh tests/*.sh
-      - name: python compiles
-        run: python3 -m py_compile bin/*.py
       - name: smoke test (throwaway board in a temp dir)
         run: bash tests/smoke.sh
   # macOS runs on pull requests and on main, not on other branch pushes (its minutes bill 10x Linux)
@@ -20,7 +18,5 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: python compiles
-        run: python3 -m py_compile bin/*.py
       - name: smoke test (throwaway board in a temp dir)
         run: bash tests/smoke.sh

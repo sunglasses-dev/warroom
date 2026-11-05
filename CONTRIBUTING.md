@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for looking. This project is small on purpose: a board file, a waiter, a job ledger, a reopen ritual, and a few hooks. A change that keeps it small is the best kind.
+Thanks for looking. This project is small on purpose: a board file, a waiter, a job ledger, and a few hooks. A change that keeps it small is the best kind.
 
 ## Before you open a pull request
 
@@ -9,16 +9,14 @@ Run the same three checks CI runs. All three must pass.
 ```bash
 bash tools/leak-check.sh          # 0 hits for the configured patterns; it does not read git history, so check names, credentials and history yourself
 shellcheck -S warning bin/*.sh hooks/*.sh tools/*.sh tests/*.sh
-bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse, dead job, guard, reopen
+bash tests/smoke.sh               # throwaway board in a temp dir: wake, refuse, dead job, guard
 ```
-
-`python3 -m py_compile bin/*.py` covers the one Python file.
 
 ## What a good pull request looks like
 
 - **One mechanism per pull request.** A waiter fix and a new hook are two pull requests.
 - **Say how you proved it.** The command you ran and what it printed. If you fixed a bug, add a check to `tests/smoke.sh` that fails without your fix.
-- **No new dependencies.** bash, python3, and `gh` for pr-watch. That is the whole list.
+- **No new dependencies.** bash and python3. That is the whole list.
 - **Plain words in docs.** Say what a thing does, not how good it is.
 
 ## How review works

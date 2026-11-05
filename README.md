@@ -1,7 +1,7 @@
 
 # warroom
 
-Coordinate several Claude Code sessions through one text file. A shell waiter delivers a matching first-line `ACTION` post to a seat, and optional helpers watch a pull request's checks and leave a receipt of what they saw, and post a wake line to a job's owner when it ends. How many sessions you can run depends on your plan.
+Coordinate several Claude Code sessions through one text file. A shell waiter delivers a matching first-line `ACTION` post to a seat, and a job check posts a wake line to a job's owner when it ends. How many sessions you can run depends on your plan.
 
 ## What is it for
 
@@ -16,12 +16,12 @@ Coordinate several Claude Code sessions through one text file. A shell waiter de
 | A text file is the chat | messages live in `board.md`; seats use `board.sh` to post and read, and helper state (seat registry, job ledger) sits in the run directory |
 | Models need not poll | a local shell waiter checks the board for each seat; the seat starts it as a background task and then sleeps |
 | The waiting loop makes no model calls | the waiter normally exits when a matching line arrives; it also exits when another waiter replaces it (exit 3, which is not a wake) and on errors |
-| A long job can post a wake, a PR can be watched | while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone (a process whose start time cannot be read is left in the ledger, not treated as gone), and keeps the ledger row if the post fails; `pr-watch.sh` posts `WATCH GREEN` or `WATCH FAIL` when a pull request's checks settle at a pinned head. It reports, it never merges |
-| Reopen prepares fresh sessions | `reopen.sh` asks every seat for a card and builds one paste message per seat (it exits 1 instead of posting READY when the sheet cannot be written); you save each card and check it before closing a session |
+| A long job can post a wake | while a waiter is running, its job check posts a wake line to the owner of a registered job when that process is gone (a process whose start time cannot be read is left in the ledger, not treated as gone), and keeps the ledger row if the post fails |
+| Reopen is a convention | no script runs it: each seat saves a card and posts that it is banked, and you paste one message per seat into fresh sessions (see docs/PROTOCOL.md) |
 
 ## Quick start: two sessions
 
-You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for `pr-watch.sh`, which you can leave for later.
+You need git, bash, python3 and Claude Code, signed in.
 
 **1. Install.** There is no installer script: you make one edit to your Claude Code settings, by hand or with your Claude Code session, and [docs/INSTALL.md](docs/INSTALL.md) has the exact commands and the hook block. In short:
 
@@ -79,7 +79,6 @@ against the copy and run the parse command from the document.
 I am seat BOSS. Take my session id from the waiter banner (if there is none, tell me to restart this
 session) and start my waiter as a Claude Code background task. I will open a second session for W1
 with the first message from the document; then run the two-session wake check from the Quick start.
-Leave pr-watch.sh and cpu-sentinel.py alone.
 ```
 
 Nothing in this repo is piped from the internet into a shell. Read `docs/INSTALL.md` and the three hook scripts (four hook entries) first; they are short.
@@ -95,7 +94,7 @@ A synthetic board (`examples/4-seat/sample-board.md`):
 [09:31 · W1] R1 done. Flag is --export. 1 file, +14/-2. Receipt receipts/r1.md
 [09:32 · W1] @W2 ACTION: R2 can start, flag name above.
 [10:13 · MANAGER] @BOSS ACTION: R1 and R2 are ready for your read. PR 12.
-[10:34 · BOSS] WATCH GREEN PR 12 at <head>: the PR data returned at 10:34 showed every check green (observed, not a gate; this tool did not merge or modify the PR) (receipt receipts/watch_12.md)
+[10:34 · BOSS] Merged PR 12 at the head I read. R3 is next.
 ```
 
 A waiter reads only the first line of a post, right after its stamp. A post wakes a seat when that line starts with `@SEAT ACTION:` or `@ALL ACTION:` and the author is another seat. A mention in prose, a quoted directive and any later line of a post wake nobody.
@@ -126,24 +125,24 @@ A waiter reads only the first line of a post, right after its stamp. A post wake
   the session, and the seat then reads the line, acts, and starts its waiter again
 ```
 
-Optional helpers beside the board: `pids.sh` notices when a registered job's process is gone, `pr-watch.sh` watches one pull request at a pinned head and reports when its checks are green or one fails (it never merges, and a green report is an observation, not a guarantee: whether an unchecked merge is possible is decided by your branch protection), `cpu-sentinel.py` reports selected processes that stay hot, `reopen.sh` prepares the cards and paste messages for fresh sessions.
+Optional helper beside the board: `pids.sh` notices when a registered job's process is gone.
 
 ## What it is not
 
 | it is not | so |
 |---|---|
 | a framework or an agent library | no code of yours imports it |
-| a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts and one Python watchdog |
+| a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts with short python3 helpers |
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
 | a way to get more from your plan | it avoids spending model turns on repeatedly checking for work; your plan and its limits still apply |
-| a lock for every writer | the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard's marks are locked against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked, and the sentinel's strike file and log are written without that lock; the reopen files (marker, paste sheet, ledger) are written in place, without that lock and not by temp file and rename. A misconfigured path or link is outside this lock. Give each protected file one name (no symlinked or hard-linked board) and never unlink a `.flock` file while any participant can run; deleting the stopped, retired run directory removes them too. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
+| a lock for every writer | the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard's marks are locked against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked. A misconfigured path or link is outside this lock. Give each protected file one name (no symlinked or hard-linked board) and never unlink a `.flock` file while any participant can run; deleting the stopped, retired run directory removes them too. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
 | a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. Arming after `WARROOM_CURSOR_MAX_AGE` seconds starts at the end of the board, and the lines in between are not shown. The scripts do not check that a seat acted on a line. When a waiter or `board.sh tail` cannot save its position it exits 1, and a timely re-arm retries from the retained position if the board and the saved state are still there. Output can repeat, so a line can be shown more than once. The scripts print the lines; whether Claude Code delivered them to the session is not acknowledged |
 
 ## FAQ
 
 | question | answer |
 |---|---|
-| Does it work with one seat? | Yes. One seat gets the board, the receipts and the job ledger, and can still receive `GUARD` job and idle alerts. More seats add handoffs between roles. |
+| Does it work with one seat? | Yes. One seat gets the board and the job ledger, and can still receive `GUARD` job and idle alerts. More seats add handoffs between roles. |
 | Does it need a particular plan? | Not tested on every plan. It uses Claude Code sessions you already have; how many you can run depends on your plan. |
 | Windows? | Not yet. The scripts need bash and python3. |
 | pip or pipx? | Roadmap, not in v0.1. |

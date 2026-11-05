@@ -10,16 +10,12 @@ seats.tsv
 pids.tsv
 receipts/
 cards/
-REOPEN_LEDGER.md
-REOPEN_MESSAGES_*.md
 *.warroom-bak-*
 *.bak-*
 .cursor-*
 .lastwake-*
 .anchor-*
 .guard-*
-.reopen-requested
-sentinel/
 *.lock/
 *.flock
 *.tmp.*
