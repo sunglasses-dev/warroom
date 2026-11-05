@@ -38,6 +38,9 @@
 #  55. injected poll filter/checksum failures keep the waiter alive and its position unchanged until retry delivers; arm and tail checksum failures exit without advancing their saved state, and empty-board tail succeeds.
 #  59. selected fixtures fail on deliberately mutated copies of bin/ and hooks/ and pass on the pristine copy; the failing assertion is printed.
 #      touchlast, legacytemp, mvreplace, oldrollback, restorerm and nofiltercheck are the six B write/filter mutants.
+#  60. read gate (report mode): tests/read-gate.py checks its own fixtures and mutants, then lists every read in bin/ and hooks/ whose
+#      failure can reach a state change. It prints the inventory and never fails on it yet; a tool error (unparsable script, empty
+#      discovery) or a failed self-test does fail.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -1476,6 +1479,21 @@ pa_mcopy warm; pa_msed warm bin/waiter.sh 's/^\(  base=\$(wr_lines "\$BOARD_FILE
 pa_mcopy wpoll; pa_msed wpoll bin/waiter.sh 's/^\(  n=\$(wr_lines "\$BOARD_FILE")\) || {.*$/\1 || true/'
 [ "$(grep -c '^  n=\$(wr_lines "\$BOARD_FILE") || true$' "$MA/wpoll/bin/waiter.sh")" = 1 ] && pa_mut wpoll fx_w4 || bad "mutant wpoll: the change was not applied"
 else echo "skip mutants warm, wpoll (ps cannot read process start times here, so a waiter cannot arm)"; fi
+
+# 60. read gate, report mode (enforcing after the repairs)
+if command -v python3 >/dev/null 2>&1; then
+  RG_OUT=$(python3 -I "$ROOT/tests/read-gate.py" --self-test 2>&1); RG_RC=$?
+  if [ "$RG_RC" = 0 ]; then ok "read gate self-test: $(printf '%s\n' "$RG_OUT" | head -1)"; else bad "read gate self-test (rc $RG_RC): $(printf '%s\n' "$RG_OUT" | head -8)"; fi
+  RG_OUT=$(python3 -I "$ROOT/tests/read-gate.py" --root "$ROOT" 2>&1); RG_RC=$?
+  if [ "$RG_RC" = 0 ]; then
+    ok "read gate inventory (report only): $(printf '%s\n' "$RG_OUT" | head -1)"
+    printf '%s\n' "$RG_OUT" | sed -n '2,$p' | sed 's/^/     /'
+  else
+    bad "read gate could not run (rc $RG_RC): $(printf '%s\n' "$RG_OUT" | head -8)"
+  fi
+else
+  echo "skip read gate (python3 is not installed here)"
+fi
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
