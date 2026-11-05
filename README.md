@@ -136,8 +136,8 @@ Optional helpers beside the board: `pids.sh` notices when a registered job's pro
 | a chat API or a server | there is no server: a board file, state files in the run directory, shell scripts and one Python watchdog |
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
 | a way to get more from your plan | it avoids spending model turns on repeatedly checking for work; your plan and its limits still apply |
-| a lock for every writer | the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard's marks are locked against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked, and the sentinel's strike file and log and the reopen files are written without that lock. Give each protected file one name (no symlinked or hard-linked board) and never delete a `.flock` file. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
-| a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. The scripts do not check that a seat acted on a line |
+| a lock for every writer | the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard's marks are locked against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked, and the sentinel's strike file and log are written without that lock; the reopen files (marker, paste sheet, ledger) are written in place, without that lock and not by temp file and rename. Give each protected file one name (no symlinked or hard-linked board) and never unlink a `.flock` file while any participant can run; deleting the stopped, retired run directory removes them too. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
+| a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. The scripts do not check that a seat acted on a line. When a waiter or `board.sh tail` cannot save its position it exits 1 and the same lines come again, so a line can be shown more than once; it is not dropped |
 
 ## FAQ
 
@@ -147,7 +147,7 @@ Optional helpers beside the board: `pids.sh` notices when a registered job's pro
 | Does it need a particular plan? | Not tested on every plan. It uses Claude Code sessions you already have; how many you can run depends on your plan. |
 | Windows? | Not yet. The scripts need bash and python3. |
 | pip or pipx? | Roadmap, not in v0.1. |
-| Where do I ask a question? | Discussions on this repo (Q&A). |
+| Where do I ask a question? | Open an issue on this repo. |
 
 ## The story
 
