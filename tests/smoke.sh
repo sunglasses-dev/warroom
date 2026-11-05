@@ -240,10 +240,10 @@ for k in 1 2 3 4 5 6 7 8; do WARROOM_DIR="$R3" bash -c '. "$1"' _ "$C" >/dev/nul
 [ "$(cksum < "$R3/board.md")" = "$b0" ] && ok "lock: sourcing _common.sh never changes a board that has content" || bad "lock: bootstrap changed the board"
 
 # a BOARD configured as the waiter's own marker name (.lastwake-W1) is refused before anything runs (was: the wake left its bytes intact)
-R4="$LD/run4"; mkdir -p "$R4"; printf '%s\n' "[00:00 · BOSS] forty-four bytes of board here." > "$R4/.lastwake-W1"; h0=$(head -c 44 "$R4/.lastwake-W1" | cksum)
+R4="$LD/run4"; mkdir -p "$R4"; printf '%s\n' "[00:00 · BOSS] forty-four bytes of board here." > "$R4/.lastwake-W1"; cp "$R4/.lastwake-W1" "$LD/w4.orig"
 WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/waiter.sh" W1 sid-l > "$LD/w4.out" 2>&1; r1=$?
 WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/board.sh" post BOSS "@W1 ACTION: post on a board named like the marker" > "$LD/p4.out" 2>&1; r2=$?
-[ "$(head -c 44 "$R4/.lastwake-W1" | cksum)" = "$h0" ] && [ "$(wc -c < "$R4/.lastwake-W1" | tr -d ' ')" = 48 ] && [ $r1 = 2 ] && [ $r2 = 2 ] && grep -q "at a name this tool writes" "$LD/w4.out" && grep -q "at a name this tool writes" "$LD/p4.out" && ok "lock: a board named .lastwake-SEAT is refused by the waiter and by post (exit 2), and its bytes are untouched" || bad "lock: marker-named board: rc $r1/$r2, $(wc -c < "$R4/.lastwake-W1") bytes, waiter: $(head -c 120 "$LD/w4.out")"
+cmp -s "$R4/.lastwake-W1" "$LD/w4.orig" && [ $r1 = 2 ] && [ $r2 = 2 ] && grep -q "at a name this tool writes" "$LD/w4.out" && grep -q "at a name this tool writes" "$LD/p4.out" && ok "lock: a board named .lastwake-SEAT is refused by the waiter and by post (exit 2), and the whole file is byte-identical" || bad "lock: marker-named board: rc $r1/$r2, $(wc -c < "$R4/.lastwake-W1") bytes, waiter: $(head -c 120 "$LD/w4.out")"
 ! grep -nE '(^|[;&|] *): > "\$LAST"' "$B/waiter.sh" >/dev/null && ok "lock: the waiter never truncates its wake timestamp" || bad "lock: waiter.sh still truncates \$LAST"
 
 # lock_order_and_upgrade_boundary (lint only, not evidence of safety)
@@ -310,7 +310,8 @@ f="$T/i17/good.json" sh -c "$pc" >/dev/null 2>&1; g=$?; f="$T/i17/broken.json" s
 
 # (17, re-read against the destination checks) line 3 carries the PATH requirement for python3 once, and names the refusals it makes true
 l3=$(sed -n 3p "$D"); np=$(cat "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT"/docs/*.md | grep -c 'python3 must be on the PATH your Claude Code hooks run with')
-case "$l3" in *"python3 must be on the PATH your Claude Code hooks run with"*"named like a settings file are refused"*) [ "$np" = 1 ] && ok "INSTALL.md line 3: python3 must be on the hooks' PATH (said once in the docs) and the refused settings names are stated" || bad "python3 PATH sentence appears $np times" ;; *) bad "INSTALL.md line 3 lost the python3 PATH or settings-name sentence: $l3" ;; esac
+want3='Five steps, run from the clone. You need git, bash, python3 and Claude Code, signed in; python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; a run folder that is the config folder itself (compared by its physical path) and a run folder or board named like a settings file are refused, while dedicated subfolders remain allowed.'
+case "$l3" in "$want3") [ "$np" = 1 ] && [ "$(wc -l < "$D" | tr -d ' ')" = 60 ] && ok "INSTALL.md line 3 is exactly the ruled line (python3 PATH said once in the docs) and the page is exactly 60 lines" || bad "python3 PATH sentence appears $np times, or the page is not 60 lines" ;; *) bad "INSTALL.md line 3 is not the ruled line: $l3" ;; esac
 
 # 21. a hook never exits 2 on a bad config: Claude Code would block the prompt, in every session on the machine
 hr=""; for h in board-guard board-tail waiter-check; do
@@ -721,6 +722,11 @@ fx_r8() { # a HOME with a trailing / (or HOME=/) is the same HOME: the default c
   printf 'WARROOM_DIR=~/sub\n' > "$PAW/r8.env"
   pa_pass HOME="$PAH/" WARROOM_ENV="$PAW/r8.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
   [ "$PA_OUT" = "$PAH/sub/board.md" ] || { PA_WHY="a home-relative value under HOME with a trailing /: board '$PA_OUT'"; return 1; }
+  # a bare ~ stays HOME as written (line 23 of _config.sh): HOME with a trailing / still gives HOME/board.md, HOME=/ is refused
+  printf 'WARROOM_DIR=~\n' > "$PAW/r8c.env"
+  pa_pass HOME="$PAH/" WARROOM_ENV="$PAW/r8c.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAH/board.md" ] || { PA_WHY="a bare ~ with HOME ending in /: board '$PA_OUT'"; return 1; }
+  pa_want 'names no folder or file' 2 HOME=/ WARROOM_ENV="$PAW/r8c.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
 }
 
 # 47. settings names, reserved state names, the board's own aliases (N1-N5)

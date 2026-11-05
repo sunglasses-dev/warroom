@@ -19,6 +19,7 @@ wr_config_path() { if [ -n "${WARROOM_ENV:-}" ]; then printf '%s\n' "$WARROOM_EN
 # shellcheck disable=SC2088  # the quoted ~ is on purpose: it matches a literal ~ written in the file
 wr_check_value() {
   _cv_p=""; _cv_r=$1
+  # a bare ~ or $HOME stays $HOME as written: stripping its trailing / would turn HOME=/ into an empty prefix
   case "$1" in
     "~"|'$HOME') _cv_p=$HOME; _cv_r="" ;;
     "~/"*)       _cv_p="${HOME%/}/"; _cv_r=${1#"~/"} ;;
