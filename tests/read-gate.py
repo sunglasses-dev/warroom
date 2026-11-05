@@ -28,6 +28,7 @@ unparsable script, no files, an unreadable file. Python 3.8+, standard library o
 import argparse
 import hashlib
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -931,14 +932,12 @@ class Analyzer:
                     elif name == 'trap':
                         why = self.check_trap(where, args)
                     elif name in ('.', 'source'):
-                        tgt = self.source_target(nd)
+                        tgt = self.resolve_source(fname, nd)
                         if tgt is None:
-                            why = '%s: a sourced file with no literal name cannot be read' % where
-                        else:
-                            for other in self.files:
-                                if other != fname and os.path.basename(other) == tgt:
-                                    edges[fname].add(other)
-                                    edges.setdefault(other, set()).add(fname)
+                            why = '%s: a sourced file the gate cannot resolve to one of the scanned files' % where
+                        elif tgt != fname:
+                            edges[fname].add(tgt)
+                            edges.setdefault(tgt, set()).add(fname)
                 if why and fname not in self.taint:
                     self.taint[fname] = why
         # the files that source each other run in one shell: one hidden word taints them all
@@ -960,16 +959,64 @@ class Analyzer:
                     self.taint[x] = bad[0]
         self.edges = edges
 
-    def source_target(self, nd):
-        """The file name at the end of a `. word` argument (the part after the last slash), or None."""
+    # the only spellings of "the folder this script lives in" the gate resolves; the value is how many folders up the result is
+    DIR_FORMS = {
+        '$(dirname "$0")': 0,
+        '"$(dirname "$0")"': 0,
+        '"$(cd "$(dirname "$0")" && pwd)"': 0,
+        '"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"': 0,
+        '"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"': 1,
+        '"$(cd "$(dirname "$0")/.." && pwd)"': 1,
+    }
+
+    def resolve_source(self, fname, nd):
+        """The scanned file that a `. "$VAR/rel/path"` brings in, or None. VAR must be assigned exactly once in this file, by a
+        top-level statement before the `.`, in one of DIR_FORMS, and never touched by another command; the path is then worked
+        out from this file's own folder. Anything else (a basename match, another folder, a file the gate does not scan) is None."""
         if len(nd.words) != 2:
             return None
-        for part in reversed(nd.words[1].parts):
-            t = part[1] if isinstance(part, tuple) and part[0] in ('lit', 'sq') else (
-                ''.join(q[1] for q in part.parts if isinstance(q, tuple) and q[0] == 'lit') if isinstance(part, Node) and part.k == 'dq' else None)
-            if t:
-                return os.path.basename(t)
-        return None
+        parts = nd.words[1].parts
+        if len(parts) == 1 and isinstance(parts[0], Node) and parts[0].k == 'dq':
+            parts = parts[0].parts
+        if len(parts) < 2 or not (isinstance(parts[0], tuple) and parts[0][0] == 'var'):
+            return None
+        if not all(isinstance(q, tuple) and q[0] == 'lit' for q in parts[1:]):
+            return None
+        var = parts[0][1]
+        rel = ''.join(q[1] for q in parts[1:])
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', var) or not rel.startswith('/') or '$' in rel:
+            return None
+        src, _, root = self.files[fname]
+        hits = [a for d in walk(root) if d.k == 'simple' for a in d.assigns if a.name == var]
+        if len(hits) != 1 or hits[0].parent is None or hits[0].parent.k != 'simple' or hits[0].parent.words:
+            return None
+        up = self.DIR_FORMS.get(src[hits[0].value.start:hits[0].value.end].strip())
+        if up is None:
+            return None
+        # a top-level statement, before the `.` and not inside anything
+        top = None
+        for n, it in enumerate(root.body.items):
+            if any(x is hits[0] for x in walk(it)):
+                top = n
+        dot = nd
+        while dot.parent is not None and dot.parent is not root.body:
+            dot = dot.parent
+        if top is None or dot.parent is None or root.body.items.index(dot) <= top:
+            return None
+        if not (root.body.items[top].k == 'andor' and len(root.body.items[top].parts) <= 2):
+            return None
+        # nothing else may write the variable
+        for d in walk(root):
+            if d.k == 'simple' and d.words and any(w_ is not None and (w_ == var or w_.startswith(var + '=') or w_.endswith(' ' + var))
+                                                  for w_ in (word_lit(w) for w in d.words[1:])):
+                return None
+            if d.k == 'for' and getattr(d, 'var', None) == var:
+                return None
+        here = posixpath.dirname(fname)
+        for _ in range(up):
+            here = posixpath.dirname(here)
+        path = posixpath.normpath(posixpath.join(here, rel.lstrip('/')))
+        return path if path in self.files else None
 
     def check_trap(self, where, args):
         """The reason a trap action can end the shell or rewrite the exit status, or None. Any signal counts: a signal can be sent
@@ -1190,8 +1237,9 @@ class Analyzer:
             if not self.plain_exit(rhs):
                 break
             if c.words and cmd_name(c) in ('.', 'source'):
-                tgt = self.source_target(c)
-                srcs.extend(o for o in self.files if o != fname and os.path.basename(o) == tgt)
+                tgt = self.resolve_source(fname, c)
+                if tgt is not None and tgt != fname:
+                    srcs.append(tgt)
                 continue
             if not c.words and len(c.assigns) == 1 and not self.calls_script_function(c):
                 continue
@@ -1281,15 +1329,43 @@ class Analyzer:
                 idx = p.items.index(n)
                 state = False
                 for it in p.items[:idx]:
-                    st = self.set_stmt(it)
-                    if st is not None:
-                        state = st
+                    eff = self.opt_effect(it)
+                    if eff is not None:
+                        state = (eff == 'on')
                 if state:
                     return True
                 o = p.parent
                 if o is not None and o.k in ('cs', 'ps', 'subshell', 'func', 'script'):
                     return False
             n = p
+        return False
+
+    def opt_effect(self, item):
+        """'on' for a top-level `set -o pipefail`; 'off' for anything that holds, or calls a function that holds, a `set`, `shopt`,
+        `eval`, `.` or `source` that could switch pipefail off, even inside an if, a loop, a group or after `||`; else None."""
+        if self.set_stmt(item):
+            return 'on'
+        for d in walk(item):
+            if d.k == 'simple' and d.words:
+                name, args = unwrapped(d)
+                if name in ('set', 'shopt', 'eval', '.', 'source', '$') and not (name == 'set' and args == ['-o', 'pipefail']):
+                    return 'off'
+                if name in self.funcs and self.touches_options(name, set()):
+                    return 'off'
+        return None
+
+    def touches_options(self, name, seen):
+        if name in seen:
+            return False
+        seen.add(name)
+        for _, fn in self.funcs.get(name, []):
+            for d in walk(fn):
+                if d.k == 'simple' and d.words:
+                    nm, args = unwrapped(d)
+                    if nm in ('set', 'shopt', 'eval', '.', 'source', '$') and not (nm == 'set' and args == ['-o', 'pipefail']):
+                        return True
+                    if nm in self.funcs and self.touches_options(nm, seen):
+                        return True
         return False
 
     def set_stmt(self, item):
@@ -1514,11 +1590,11 @@ class Analyzer:
         return item if item.k in ('if', 'case') else None
 
     def first_test(self, cond, var):
-        if not cond.items:
-            return None
+        if len(cond.items) != 1:
+            return None         # the branch runs on the status of the LAST command of the condition
         a = cond.items[0]
-        if a.k != 'andor' or any(o != '||' for o in a.ops):
-            return None
+        if a.k != 'andor' or a.ops:
+            return None         # `[ .. ] || true` and `[ .. ] && x` change the status the branch sees
         sm = self.single_simple_pipe(a.parts[0])
         if sm is None or cmd_name(sm) != '[':
             return None
@@ -1910,9 +1986,35 @@ class Contracts:
     def __init__(self, an):
         self.an = an
 
+    OUT_OPS = ('>', '>>', '>|', '&>', '&>>', '<>')
+
     def check(self, o, e):
+        if o.kind == 'DISPATCH':
+            return 'a dispatch line cannot be listed: nothing says what it runs, whatever the reason'
+        why = self.enclosing(o)
+        if why:
+            return why
         fn = getattr(self, 'c_' + e.reason)
         return fn(o, e)
+
+    def enclosing(self, o):
+        """Every reason holds only for the statement as written in its place: nothing around it may send its output to a file,
+        make it a stage of a pipeline, or run it in the background. (The entry is bound to the statement's text; this binds it
+        to where the statement sits, so moving it into a redirected group or a pipe voids the entry.)"""
+        n = o.node
+        while n is not None and n.k not in ('func', 'script'):
+            p = n.parent
+            if p is None:
+                break
+            if p.k == 'pipe' and len(p.cmds) > 1 and not (n.k == 'simple' and n is o.node):
+                return 'the statement is a stage of a pipeline: its output may go anywhere'
+            if getattr(n, 'bg', False) and n is not o.node:
+                return 'the statement runs in the background'
+            for r in getattr(p, 'redirs', None) or ():
+                if r.op in self.OUT_OPS and (r.target is None or word_lit(r.target) != '/dev/null'):
+                    return 'an enclosing %s sends its output to a file (%s)' % (p.k, r.op)
+            n = p
+        return None
 
     def stmt_text(self, o):
         return self.an.text(o.file, o.stmt) if o.stmt is not None else ''
@@ -2412,7 +2514,7 @@ MUTANTS = [
     ('ck-fallback', 'pos_ck_command.sh', 'head -n 3 "$F" > /dev/null || exit 1', 'head -n 3 "$F" > /dev/null || true', 'falls back'),
     ('ck-test-negated', 'pos_ck_test.sh', '[ -e "$F" ] ||', '[ ! -e "$F" ] ||', 'metadata test'),
     ('ck-test-fallback', 'pos_ck_test.sh', '|| { echo "missing or unreadable: $F" >&2; exit 1; }', '|| echo missing', 'metadata test'),
-    ('src-unchecked', 'pos_src_checked.sh', '. "$HERE/_common.sh" || exit 1', '. "$HERE/_common.sh"', 'last statement'),
+    ('src-unchecked', 'pos_src_checked.sh', '. "$HERE/pos_src_checked.sh" || exit 1', '. "$HERE/pos_src_checked.sh"', 'last statement'),
     ('prop-helper-fallback', 'pos_prop.sh', 'x=$(rd "$F") || exit 1', 'x=$(rd "$F") || x=none', 'falls back'),
     ('prop-helper-not-last', 'pos_prop.sh', 'rd() { cat "$1"; }', 'rd() { cat "$1"; echo end; }', 'statement after it'),
     # reasons: an entry names a place, the contract checks what the place does
@@ -2425,7 +2527,7 @@ MUTANTS = [
     ('v-duplicate-statement', 'pos_v_case.sh', '  *) echo usage >&2 ;;', '  tailx) n=${2:-20}; tail -n "$n" "$B" ;;\n  *) echo usage >&2 ;;', 'matches 2 occurrences'),
     ('v-pipefail-removed', 'pos_v_pipe.sh', 'set -o pipefail\n', '', 'no set -o pipefail'),
     ('v-pipeline-grep', 'pos_v_pipe.sh', 'sed -n "2,9p" "$B"', 'grep a "$B"', '@grep'),
-    ('d-printed-to-file', 'pos_d_display.sh', 'echo "at $(date +%H:%M)"', 'echo "at $(date +%H:%M)" > "$LOG"', '@echo or printf'),
+    ('d-printed-to-file', 'pos_d_display.sh', 'echo "at $(date +%H:%M)"', 'echo "at $(date +%H:%M)" > "$LOG"', '@sends its output to a file'),
     ('d-held-in-variable', 'pos_d_display.sh', 'echo "at $(date +%H:%M)"', 'x="at $(date +%H:%M)"', '@echo or printf'),
     ('d-other-format', 'pos_d_display.sh', '$(date +%H:%M)', '$(date +%s)', '@allows only date'),
     ('k-not-a-tab', 'pos_k_tab.sh', "printf '\\t'", "printf '%s' x", '@literal tab'),
@@ -2457,6 +2559,12 @@ TREE_CASES = {
                                       'x=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}, 1, 'falls back'),
     'tree_taint_in_sourced_file': ({'bin/a.sh': '#!/usr/bin/env bash\nexit() { :; }\n', 'bin/b.sh': 'HERE=$(dirname "$0") || exit 1\n. "$HERE/a.sh" || exit 1\n'
                                     'F=${1:-}\nx=$(cat "$F") || exit 1\necho "$x" > out\n'}, 1, 'hides or redefines'),
+    'tree_source_same_name_other_folder': ({'bin/lib.sh': LIB, 'hooks/lib.sh': ':\n', 'bin/b.sh': 'HERE=$(dirname "$0") || exit 1\n. "$HERE/../hooks/lib.sh" || exit 1\n'
+                                            'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}, 1, 'falls back'),
+    'tree_source_computed_path': ({'bin/lib.sh': LIB, 'bin/b.sh': '. "$1/lib.sh" || exit 1\nF=${2:-}\nx=$(cat "$F") || exit 1\necho "$x" > out\n'}, 1, 'cannot resolve'),
+    'tree_hooks_failing_read': ({'bin/a.sh': ':\n', 'hooks/h.sh': 'x=$(cat "$1")\necho "$x" > out\n'}, 1, 'files=2 occurrences=1'),
+    'tree_missing_hooks_dir': ({'bin/a.sh': ':\n'}, 2, 'a whole class'),
+    'tree_missing_bin_dir': ({'hooks/h.sh': ':\n'}, 2, 'a whole class'),
     'tree_crossfile_unsourced_helper': ({'bin/a.sh': LIB + 'echo lib\n', 'bin/b.sh': '#!/usr/bin/env bash\nF=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n',
                                          'hooks/h.sh': '#!/usr/bin/env bash\necho hi\n'}, 1, 'falls back'),
 }
@@ -2465,6 +2573,12 @@ TREE_CASES = {
 def run_tree(me, tmpd, name):
     """Write one tree case to a fresh folder and run the gate on it as its own process."""
     files, _, _ = TREE_CASES[name]
+    files = dict(files)
+    if not name.startswith('tree_missing_'):
+        # the gate refuses a tree with no script in bin/ or in hooks/: give a case that has none a harmless one
+        for d in ('bin', 'hooks'):
+            if not any(f.startswith(d + '/') for f in files):
+                files[d + '/noop.sh'] = ':\n'
     root = os.path.join(tmpd, name)
     for rel, text in files.items():
         path = os.path.join(root, rel)
@@ -2505,6 +2619,23 @@ CODE_MUTANTS = [
      '                    comp_defs = sum(1 for g in self.files', 'tree:tree_helper_never_sourced'),
     ('code-r4-taint-reaches-sourcers', 'if bad:\n                for x in comp:\n                    self.taint[x] = bad[0]', 'if bad:\n                for x in []:\n                    self.taint[x] = bad[0]',
      'tree:tree_taint_in_sourced_file'),
+    # no reason code can list a dispatch line
+    ('code-f9-dispatch-never-listed', "if o.kind == 'DISPATCH':\n            return 'a dispatch line cannot be listed: nothing says what it runs, whatever the reason'\n        why = self.enclosing(o)", "why = self.enclosing(o)", 'neg_allow_dispatch_reason_D.sh', 'cannot be listed'),
+    # discovery: both script folders must hold scripts, and a failing hook is in the inventory
+    ('code-b5-hooks-class-scanned', "for d in ('bin', 'hooks'):\n        p = os.path.join(root, d)", "for d in ('bin',):\n        p = os.path.join(root, d)", 'tree:tree_hooks_failing_read', 'files=2'),
+    ('code-fix7-missing-class-is-an-error', "if missing:\n            print('read-gate: no scripts found under %s/%s", "if False:\n            print('read-gate: no scripts found under %s/%s", 'tree:tree_missing_hooks_dir'),
+    # an allow entry holds only where its statement sits: not inside a redirected group, not as a pipeline stage, not in the background
+    ('code-b4-entry-bound-to-context', "why = self.enclosing(o)\n        if why:\n            return why", "why = None\n        if why:\n            return why", 'neg_allow_d_in_redirected_group.sh'),
+    ('code-b4-entry-not-a-pipeline-stage', "if p.k == 'pipe' and len(p.cmds) > 1 and not (n.k == 'simple' and n is o.node):", "if False:", 'neg_allow_d_piped_to_file.sh'),
+    # pipefail is proven at the read: nothing between the `set -o pipefail` and the pipeline may switch it off
+    ('code-b3-pipefail-proven-at-read', "eff = self.opt_effect(it)", "eff = {True: 'on', False: 'off', None: None}[self.set_stmt(it)]", 'neg_pipefail_off_in_if.sh'),
+    # the saved status is tested by a condition that is exactly one `[ ]` test
+    ('code-b2-condition-is-one-test', "if len(cond.items) != 1:\n            return None         # the branch runs on the status of the LAST command of the condition\n        a = cond.items[0]\n        if a.k != 'andor' or a.ops:",
+     "if not cond.items:\n            return None\n        a = cond.items[0]\n        if a.k != 'andor' or any(o != '||' for o in a.ops):", 'neg_saved_condition_extra_command.sh'),
+    # a sourced file is the file at the resolved path, never the first file with the same name
+    ('code-b1-source-by-basename', "return path if path in self.files else None", "return next((o for o in sorted(self.files) if posixpath.basename(o) == posixpath.basename(path)), None)",
+     'tree:tree_source_same_name_other_folder'),
+    ('code-b1-unresolved-source-taints', "why = '%s: a sourced file the gate cannot resolve to one of the scanned files' % where", "why = None", 'tree:tree_source_computed_path'),
     # rule 5: the path from the read to the refusal
     ('code-r5-no-background-in-chain', "if getattr(n, 'bg', False):\n                return False", 'if False:\n                return False', 'neg_proc_background_list.sh'),
     ('code-r5-no-pipe-stage-check', "if p.k == 'pipe' and len(p.cmds) > 1:\n                return False", 'if False:\n                return False', 'neg_proc_group_pipe_stage.sh'),
@@ -2708,6 +2839,10 @@ def main(argv):
         files = tree_files(a.root)
         if not files:
             print('read-gate: no scripts found under %s/bin and %s/hooks' % (a.root, a.root))
+            return 2
+        missing = [d for d in ('bin', 'hooks') if not any(f.startswith(d + '/') for f in files)]
+        if missing:
+            print('read-gate: no scripts found under %s/%s: a whole class of scripts would go unread' % (a.root, ' or '.join(missing)))
             return 2
         an = analyze_files(a.root, files)
         if a.propose:
