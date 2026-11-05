@@ -1,5 +1,5 @@
-# an EXIT trap rewrites the exit status: tool error
-# expect: error EXIT trap
+# an EXIT trap rewrites the exit status: the file's refusals stop counting
+# expect: fail hides or redefines
 trap 'exit 0' EXIT
 F=${1:-}
 x=$(cat "$F") || exit 1
