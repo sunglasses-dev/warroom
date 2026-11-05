@@ -36,11 +36,35 @@ Seat names are set in `warroom.env` and default to `BOSS MANAGER W1 W2`; the exa
 |---|---|
 | a watched PR | a finished watch writes `$WARROOM_DIR/receipts/watch_<PR>_<time>_<pid>.md` and posts a stamped board line that starts `WATCH GREEN` or `WATCH FAIL` and ends with the receipt path in parentheses; if the receipt cannot be written or read back, or the board line cannot be posted, the run ends with exit 1 and no green line is posted (when the receipt itself cannot be written, the board line says so instead of giving a path) |
 | a long job | register it with `pids.sh add LABEL PID SEAT` (`add` refuses pid 0 and a process whose start time it cannot read). While any waiter is running, its check notices the process is gone (or that its pid now belongs to a process that started at a different time) and posts a wake line to the owner; a process whose start time cannot be read is left in the ledger and looked at again, never treated as gone. The post comes before the row is removed and is retried if it fails, so a crash between the two can post it twice; if the ledger cannot be written the command exits non-zero and leaves the old ledger, so a job can be missing from it or a wake can repeat. The owner needs a waiter of their own. `pids.sh done` removes the row without a wake |
-| a reopen | one card per seat, saved by you in `$WARROOM_DIR/cards/` (`reopen.sh card SEAT` prints a template, it does not save it); `reopen.sh done` adds a ledger row in `REOPEN_LEDGER.md` listing the seats whose reopened post it finds, and refuses until every seat has posted one after this reopen's own request line (each `arm` gets a unique id, so posts from an earlier reopen do not count; `done --force` closes it and labels the row and the end line INCOMPLETE) |
+| a reopen | one card per seat, saved by you in `$WARROOM_DIR/cards/` (`reopen.sh card SEAT` prints a template, it does not save it); `reopen.sh done` adds a ledger row in `REOPEN_LEDGER.md` listing the seats whose reopened post it finds, and refuses until every seat has posted one after this reopen's own request line (each `arm` writes a request id made of the time in seconds and 16 random bits, and only posts after that request line count, so posts from an earlier reopen do not count; the id is not guaranteed unique; `done --force` closes it and labels the row and the end line INCOMPLETE) |
 
 ## Reopen
 
 (convention) `reopen.sh arm` (posts the request first and writes the marker only when that post worked) → each seat finishes its row, writes and saves its card and posts `banked for reopen` → `reopen.sh build` writes the paste sheet (READY is posted only after the sheet is written; a failed write or post exits 1) → you check the cards, open new sessions and paste one message each → `reopen.sh done`. `build` checks that every seat banked and has a current card; `done` checks that every seat posted `reopened` after the current request line, and exits 1 if the marker cannot be removed. Neither reads what a card says.
+
+## Writer lock
+
+| fact | detail |
+|---|---|
+| what it protects | one writer at a time per protected file: the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard marks. It is advisory: only scripts that use `wr_lock` in `bin/_common.sh` are held back, and an editor or an `echo >>` is not |
+| how it works | `flock(2)` on a sidecar file `FILE.flock`, taken through a short `python3` helper on descriptor 8 or 9. The lock is released when the last copy of that descriptor closes: at unlock, or when the holder exits or is killed. A script started inside a locked section runs with the lock descriptors closed |
+| waiting | a writer waits up to `WARROOM_LOCK_WAIT` seconds (default 10), then gives up with one line on stderr naming the cause. Nothing steals a lock and nothing removes a `.flock` file; never delete one while any participant can run |
+| order | at most two locks per shell, never the same file twice, never from a subshell. The only nestings: job ledger then board, guard mark then board, seat cursor then seat registry |
+| one name per file | a protected file that is a symlink, has more than one hard link, or has a symlinked `.flock` is refused. A symlinked parent folder is fine, because the lock key is the physical folder plus the file name. An absolute `BOARD` gets the same checks |
+| limits | one machine and a local disk (not NFS or SMB). A command stopped inside a locked section, such as a hung disk, keeps the lock until it ends if the holder is killed. Moving the run directory or re-pointing a parent link while writers run is not supported |
+| upgrade from the old lock | the old `FILE.lock` folders and the `FILE.flock` files do not exclude each other: stop every session, waiter and job that uses the run directory before you update |
+
+## Pull-request watcher
+
+| fact | detail |
+|---|---|
+| reads only | `pr-watch.sh` makes one GitHub call, `gh pr view`, once per poll. It does not merge, approve, enqueue or enable auto-merge |
+| one look | each response is one observation, reported as "the returned PR data showed ...". It is not claimed to be one moment on the server |
+| green | `WATCH GREEN` needs one response with the PR open, the head equal to `--head`, at least one check, every check row green and every `--require` name present. A check run is green on SUCCESS, NEUTRAL or SKIPPED; a legacy status context only on SUCCESS. Every row is judged, so two rows with one name are both counted; a row that lacks a field the verdict needs makes that look not green |
+| waits and stops | pending checks, a required name not yet seen and zero checks keep it waiting. It stops with `WATCH FAIL` when the head is not the pinned one, a check is red, the PR is closed or was merged by someone else, or the time runs out |
+| exit codes | 0 green seen, 1 stopped or timed out (also when the receipt or board line cannot be written), 2 usage error |
+| receipt | repo, base branch, state, pinned head, observed head, required names and each check's name, result and workflow as GitHub reported them, from the one response that produced the result, with the time it arrived. Check names are displayed as untrusted text |
+| what it does not do | it does not read branch protection, it freezes nothing (a check can turn red or the head can move after the look), and it does not decide that a merge is safe. Whether a merge can skip the checks is your branch protection's job |
 
 ## Not covered in v0.1
 

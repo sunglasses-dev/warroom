@@ -82,7 +82,7 @@ with the first message from the document; then run the two-session wake check fr
 Leave pr-watch.sh and cpu-sentinel.py alone.
 ```
 
-Nothing in this repo is piped from the internet into a shell. Read `docs/INSTALL.md` and the four hook scripts first; they are short.
+Nothing in this repo is piped from the internet into a shell. Read `docs/INSTALL.md` and the three hook scripts (four hook entries) first; they are short.
 
 ## What a day looks like
 
@@ -137,7 +137,7 @@ Optional helpers beside the board: `pids.sh` notices when a registered job's pro
 | a model caller | no script here calls a model; the only model calls are your own Claude Code sessions |
 | a way to get more from your plan | it avoids spending model turns on repeatedly checking for work; your plan and its limits still apply |
 | a lock for every writer | the board, the seat registry, each seat's cursor and read anchor, the job ledger and the guard's marks are locked against the war room's own scripts, on one machine and a local disk; an editor or an `echo >>` is not locked, and the sentinel's strike file and log are written without that lock; the reopen files (marker, paste sheet, ledger) are written in place, without that lock and not by temp file and rename. Give each protected file one name (no symlinked or hard-linked board) and never unlink a `.flock` file while any participant can run; deleting the stopped, retired run directory removes them too. Upgrading from a version with the old lock: stop every session, waiter and job using this run directory first |
-| a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. The scripts do not check that a seat acted on a line. When a waiter or `board.sh tail` cannot save its position it exits 1 and the same lines come again, so a line can be shown more than once; it is not dropped |
+| a delivery guarantee | a wake is best-effort: it depends on the waiter running and on how Claude Code launched it. The first arm starts at the end of the board and sees only what comes after. Arming after `WARROOM_CURSOR_MAX_AGE` seconds starts at the end of the board, and the lines in between are not shown. The scripts do not check that a seat acted on a line. When a waiter or `board.sh tail` cannot save its position it exits 1 and the same lines come again, so a line can be shown more than once; it is not dropped |
 
 ## FAQ
 

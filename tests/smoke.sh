@@ -125,7 +125,7 @@ n=$(grep -c "job 'keep-job'" "$WARROOM_DIR/board.md")
 [ "$n" = 1 ] && ! grep -q '^keep-job' "$WARROOM_DIR/pids.tsv" && ok "retry wakes once, then drops the row" || bad "retry: $n wake lines"
 export WARROOM_DIR="$T/run"
 
-# 11. the writer lock (docs/design/LOCK_AND_MERGE_GATE.md, Part A acceptance tests): flock on FILE.flock
+# 11. the writer lock: flock on FILE.flock
 LD="$T/lock"; mkdir -p "$LD"; C="$B/_common.sh"
 # TRY FILE: an independent fresh process tries FILE's lock for 1 s and prints 0 (taken) or 1 (held elsewhere)
 printf '%s\n' 'WARROOM_LOCK_WAIT=1; . "$WR_C"; wr_lock "$1" >/dev/null 2>&1; echo $?' > "$LD/try.sh"
