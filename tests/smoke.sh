@@ -368,6 +368,12 @@ stops "same name, SUCCESS then FAILURE" "$(mkr OPEN "$SHA" o/r main run:build:CO
 stops "same name, FAILURE then SUCCESS" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:FAILURE run:build:COMPLETED:SUCCESS)" -- --require build
 stops "same name, SUCCESS then PENDING" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:build:QUEUED:)" -- --require build
 stops "same name, PENDING then SUCCESS" "$(mkr OPEN "$SHA" o/r main run:build:QUEUED: run:build:COMPLETED:SUCCESS)" -- --require build
+# a required name is matched raw: a green check whose name only EQUALS the required one after control characters are blanked
+# for display must not satisfy it (mutation-checked: matching on the display text turns this green)
+CTLN=$(printf 'build\001lint')
+stops "a green check named with a control character does not satisfy the plain required name" "$(mkr OPEN "$SHA" o/r main "run:$CTLN:COMPLETED:SUCCESS")" -- --require "build lint"
+runw "$(mkr OPEN "$SHA" o/r main "run:$CTLN:COMPLETED:SUCCESS")" -- --require "$CTLN"
+[ $rc = 0 ] && echo "$NEW" | grep -q 'WATCH GREEN' && ok "pr-watch: the same raw name, required exactly, is green (control for the name fixture)" || bad "pr-watch exact raw name was not green (rc $rc: $NEW)"
 stops "a legacy status context is FAILURE" "$(mkr OPEN "$SHA" o/r main ctx:ci:FAILURE)" --
 stops "a legacy status context is PENDING" "$(mkr OPEN "$SHA" o/r main ctx:ci:PENDING)" --
 stops "the state is missing" "$(mkr "" "$SHA" o/r main run:build:COMPLETED:SUCCESS)" --
@@ -846,7 +852,9 @@ grep -q '^armed W1' "$T/r40.arm" && ok "identity: a stale seat row whose pid was
 kill $WP 2>/dev/null; wait $WP 2>/dev/null
 printf 'sid-old%sW1%s%s%s%s%s%s\n' "$TB" "$TB" "$SL" "$TB" "$now" "$TB" "$(lst $SL)" > "$RI/seats.tsv"
 WARROOM_DIR="$RI" "$B/waiter.sh" W1 sid-new >/dev/null 2>&1 & WP=$!; wait_exit $WP 5 && { wait $WP; r1=$?; } || { kill $WP; r1=spin; }
-WARROOM_DIR="$RI" PATH="$T/fakebin:$PATH" "$B/waiter.sh" W1 sid-new >/dev/null 2> "$T/r40.unk" & WP=$!; wait_exit $WP 5 && { wait $WP; r2=$?; } || { kill $WP; r2=spin; }
+# ps that fails only for the HOLDER's pid (the arming waiter must still read its own start time)
+mkdir -p "$T/psholder"; REALPS=$(command -v ps); printf '#!/bin/sh\ncase "$*" in *"-p $HOLDER_PID") exit 1 ;; esac\nexec %s "$@"\n' "$REALPS" > "$T/psholder/ps"; chmod +x "$T/psholder/ps"
+HOLDER_PID=$SL WARROOM_DIR="$RI" PATH="$T/psholder:$PATH" "$B/waiter.sh" W1 sid-new >/dev/null 2> "$T/r40.unk" & WP=$!; wait_exit $WP 5 && { wait $WP; r2=$?; } || { kill $WP; r2=spin; }
 [ "$r1" = 1 ] && [ "$r2" = 1 ] && grep -q "cannot be read" "$T/r40.unk" && ok "identity: the seat's own waiter holds it; an unreadable holder is refused, not taken" \
   || bad "identity: holder with matching start rc $r1, unreadable holder rc $r2"
 printf 's-id%sW1%s%s%s%s%sMon Jan  1 00:00:00 2001\n' "$TB" "$TB" "$SL" "$TB" "$now" "$TB" > "$RI/seats.tsv"
@@ -934,20 +942,78 @@ wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
 rm -f "$FAILMV_FILE"; WARROOM_DIR="$R9" "$B/waiter.sh" W1 sid-f5 > "$T/f5.out" 2>/dev/null & WP=$!
 if wait_exit $WP 8 && grep -q "delivery fault line" "$T/f5.out"; then ok "wake: after the fault is gone the same line is delivered again, once"; else bad "wake after a failed save: the line was lost"; fi
 kill $WP 2>/dev/null; wait $WP 2>/dev/null
-# 41d. board.sh tail: when the anchor cannot be saved nothing is printed as read; afterwards the lines come
+# 41d. board.sh tail: when the anchor cannot be saved the lines were printed but are NOT marked as read: exit 1, the anchor is
+#      kept, a message says so, and afterwards the same lines come again (at-least-once, never lost)
 WARROOM_DIR="$R9" "$B/board.sh" tail BOSS >/dev/null; WARROOM_DIR="$R9" "$B/board.sh" post W1 "new for the tail" >/dev/null
 printf '.anchor-BOSS\n' > "$FAILMV_FILE"; a0=$(cksum < "$R9/.anchor-BOSS")
 o=$(WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/board.sh" tail BOSS 2>"$T/tail.err"); r=$?
-[ $r = 1 ] && [ -z "$o" ] && grep -q "could not save the read position" "$T/tail.err" && [ "$(cksum < "$R9/.anchor-BOSS")" = "$a0" ] && [ -z "$(find "$R9" -name '*tmp*' -o -name '*.chunk.*' -o -name '*.snap.*')" ] \
-  && ok "tail: an anchor that cannot be saved prints nothing, exits 1, keeps the anchor" || bad "tail with a failed anchor write: rc $r, out '$o'"
+[ $r = 1 ] && case "$o" in *"new for the tail"*) true ;; *) false ;; esac && grep -q "NOT marked as read" "$T/tail.err" && [ "$(cksum < "$R9/.anchor-BOSS")" = "$a0" ] && [ -z "$(find "$R9" -name '*tmp*' -o -name '*.chunk.*' -o -name '*.snap.*')" ] \
+  && ok "tail: an anchor that cannot be saved prints the lines, says they are not marked as read, exits 1, keeps the anchor" || bad "tail with a failed anchor write: rc $r, out '$o'"
 rm -f "$FAILMV_FILE"; o=$(WARROOM_DIR="$R9" "$B/board.sh" tail BOSS)
-case "$o" in *"new for the tail"*) ok "tail: after the fault the same lines are printed" ;; *) bad "tail after a failed save lost the lines: '$o'" ;; esac
+case "$o" in *"new for the tail"*) ok "tail: after the fault the same lines are printed again" ;; *) bad "tail after a failed save lost the lines: '$o'" ;; esac
 # 41e. board-guard: a mark that cannot be saved means no post (nothing repeats at every prompt); control: it posts once
 RGD="$T/c708c"; mkdir -p "$RGD"; printf '[00:00 · W1] working\n' > "$RGD/board.md"; printf '.guard-W1\n' > "$FAILMV_FILE"; b0=$(cksum < "$RGD/board.md")
 e=$(WARROOM_DIR="$RGD" PATH="$SH41:$PATH" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null 2>&1 >/dev/null); r=$?
 [ $r = 0 ] && [ "$(cksum < "$RGD/board.md")" = "$b0" ] && [ ! -e "$RGD/.guard-W1" ] && case "$e" in *"could not save the mark"*) true ;; *) false ;; esac && ok "guard: a mark that cannot be saved posts nothing, says so, exits 0" || bad "guard with a failed mark write: rc $r, '$e'"
 rm -f "$FAILMV_FILE"; for _ in 1 2; do WARROOM_DIR="$RGD" WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null >/dev/null 2>&1; done
 [ "$(grep -c '@W1 ACTION: no board post' "$RGD/board.md")" = 1 ] && ok "guard control: without the fault it posts once per silence" || bad "guard control: $(grep -c '@W1 ACTION: no board post' "$RGD/board.md") posts"
+
+# 42b. state-write order and arm identity.
+#   (1) the gap marker cannot be written: the wake is not a delivery, the position is untouched, the next arm replays the line
+DA="$T/wfixa"; mkdir -p "$DA"; printf '[00:00 · BOSS] one\n' > "$DA/board.md"
+WARROOM_DIR="$DA" "$B/waiter.sh" W1 sid-t1 > "$T/t1.out" 2> "$T/t1.err" & WP=$!; sleep 2
+c0=$(cksum < "$DA/.cursor-W1"); ln -s "$T/no-such-dir/marker" "$DA/.lastwake-W1"
+WARROOM_DIR="$DA" "$B/board.sh" post BOSS "@W1 ACTION: marker fault line" >/dev/null
+wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
+[ $r = 1 ] && grep -q "marker fault line" "$T/t1.out" && grep -q "NOT marked as delivered" "$T/t1.err" && ! grep -q '^\[WAKE' "$T/t1.out" && [ "$(cksum < "$DA/.cursor-W1")" = "$c0" ] \
+  && ok "wake: a gap marker that cannot be written is not a delivery (exit 1, lines printed, position untouched)" || bad "wake with a failed gap marker: rc $r, out '$(cat "$T/t1.out")', err '$(cat "$T/t1.err")'"
+rm -f "$DA/.lastwake-W1"; WARROOM_DIR="$DA" "$B/waiter.sh" W1 sid-t2 > "$T/t2.out" 2>/dev/null & WP=$!
+if wait_exit $WP 8 && grep -q "marker fault line" "$T/t2.out"; then ok "wake: after the marker fault is gone the same line is delivered again"; else bad "wake after a failed marker write: the line was lost"; fi
+kill $WP 2>/dev/null; wait $WP 2>/dev/null
+#   (2) board.sh tail: the anchor moves only after the lines were written out
+DB="$T/wfixb"; mkdir -p "$DB"; printf '[00:00 · BOSS] one\n' > "$DB/board.md"
+WARROOM_DIR="$DB" "$B/board.sh" tail W1 >/dev/null; WARROOM_DIR="$DB" "$B/board.sh" post BOSS "line after the anchor" >/dev/null
+a0=$(cksum < "$DB/.anchor-W1"); WARROOM_DIR="$DB" "$B/board.sh" tail W1 >&- 2> "$T/cat.err"; r=$?
+[ $r = 1 ] && [ "$(cksum < "$DB/.anchor-W1")" = "$a0" ] && grep -q "could not write the lines" "$T/cat.err" && [ -z "$(find "$DB" -name '*tmp*' -o -name '*.chunk.*' -o -name '*.snap.*')" ] \
+  && ok "tail: output that cannot be written exits 1 and leaves the anchor where it was" || bad "tail with closed output: rc $r, err '$(cat "$T/cat.err")'"
+o=$(WARROOM_DIR="$DB" "$B/board.sh" tail W1); case "$o" in *"line after the anchor"*) ok "tail: the lines whose output failed come again" ;; *) bad "tail lost the lines after a failed output: '$o'" ;; esac
+#   (3) a waiter that cannot read its own start time does not arm and writes no row
+SHPS="$T/shim-ps"; mkdir -p "$SHPS"; printf '#!/bin/sh\nexit 1\n' > "$SHPS/ps"; chmod +x "$SHPS/ps"
+DC="$T/wfixc"; mkdir -p "$DC"; printf '[00:00 · BOSS] one\n' > "$DC/board.md"; printf 'other-sid\tBOSS\t1\t00:00\n' > "$DC/seats.tsv"; s0=$(cksum < "$DC/seats.tsv")
+WARROOM_DIR="$DC" PATH="$SHPS:$PATH" "$B/waiter.sh" W1 sid-p1 > /dev/null 2> "$T/p1.err" & WP=$!; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
+[ $r = 1 ] && grep -q "cannot read the start time of this waiter" "$T/p1.err" && ! grep -q '^armed ' "$T/p1.err" && [ "$(cksum < "$DC/seats.tsv")" = "$s0" ] && [ ! -e "$DC/.cursor-W1" ] \
+  && ok "arm: a start time that cannot be read means no arm, exit 1, no registry row, no position" || bad "arm with an unreadable start time: rc $r, '$(cat "$T/p1.err")'"
+#   (4) a row with an empty start time is "cannot tell", never "alive"; only an old four-column row is judged by its pid
+DD="$T/wfixd"; mkdir -p "$DD"; printf '[00:00 · BOSS] one\n' > "$DD/board.md"; sleep 60 & J=$!; sleep 0 & DEAD=$!; wait $DEAD 2>/dev/null
+printf 'sid-e1\tW1\t%s\t00:00\t\nsid-e2\tBOSS\t%s\t00:00\nsid-e3\tW1\t%s\t00:00\t\n' "$J" "$J" "$DEAD" > "$DD/seats.tsv"; s0=$(cksum < "$DD/seats.tsv")
+h1=$(printf '{"session_id": "sid-e1"}' | WARROOM_DIR="$DD" bash "$ROOT/hooks/waiter-check.sh" 2>&1)
+h2=$(printf '{"session_id": "sid-e2"}' | WARROOM_DIR="$DD" bash "$ROOT/hooks/waiter-check.sh" 2>&1)
+h3=$(printf '{"session_id": "sid-e3"}' | WARROOM_DIR="$DD" bash "$ROOT/hooks/waiter-check.sh" 2>&1)
+case "$h1" in *"[WAITER UNCHECKED]"*) ok "hook: a live pid with an empty start time is reported as unchecked, not silent" ;; *) bad "hook on an empty-start row: '$h1'" ;; esac
+[ -z "$h2" ] && ok "hook: an old four-column row with a live pid stays silent (pid judged alone)" || bad "hook on a four-column row: '$h2'"
+case "$h3" in *"[WAITER ENDED]"*) ok "hook: an empty-start row whose pid is gone is reported as ended" ;; *) bad "hook on a dead empty-start row: '$h3'" ;; esac
+WARROOM_DIR="$DD" "$B/waiter.sh" W1 sid-e4 > /dev/null 2> "$T/e4.err" & WP=$!; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
+[ $r = 1 ] && grep -q "REFUSED" "$T/e4.err" && grep -q "not recorded" "$T/e4.err" && [ "$(cksum < "$DD/seats.tsv")" = "$s0" ] \
+  && ok "arm: a seat held by a live pid with an empty start time is refused as unknown, registry untouched" || bad "arm against an empty-start holder: rc $r, '$(cat "$T/e4.err")'"
+WARROOM_DIR="$DD" "$B/waiter.sh" BOSS sid-e5 > /dev/null 2> "$T/e5.err" & WP=$!; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
+[ $r = 1 ] && grep -q "held by another live session" "$T/e5.err" && ok "arm: an old four-column row with a live pid still holds its seat" || bad "arm against a four-column holder: rc $r, '$(cat "$T/e5.err")'"
+kill $J 2>/dev/null; wait $J 2>/dev/null
+#   (5) pids.sh done and check: a ledger rename that fails keeps the ledger byte for byte and leaves no temp file
+DE="$T/wfixe"; mkdir -p "$DE"; printf '[00:00 · BOSS] one\n' > "$DE/board.md"; sleep 60 & J=$!; sleep 60 & J2=$!
+WARROOM_DIR="$DE" "$B/pids.sh" add keepjob "$J" BOSS >/dev/null; WARROOM_DIR="$DE" "$B/pids.sh" add deadjob "$J2" BOSS >/dev/null; cp "$DE/pids.tsv" "$T/wfixe.orig"
+printf 'pids.tsv\n' > "$FAILMV_FILE"
+WARROOM_DIR="$DE" PATH="$SH41:$PATH" "$B/pids.sh" "done" keepjob > /dev/null 2> "$T/d1.err"; r=$?
+[ $r = 1 ] && grep -q "keepjob NOT removed" "$T/d1.err" && cmp -s "$T/wfixe.orig" "$DE/pids.tsv" && [ -z "$(find "$DE" -name '*tmp*')" ] \
+  && ok "pids done: a failed ledger rename exits 1, says the row was not removed, keeps the ledger, leaves no temp file" || bad "pids done with a failed rename: rc $r, '$(cat "$T/d1.err")'"
+kill $J2 2>/dev/null; wait $J2 2>/dev/null
+WARROOM_DIR="$DE" PATH="$SH41:$PATH" "$B/pids.sh" check > /dev/null 2> "$T/c1.err"; r=$?
+[ $r = 1 ] && grep -q "could not write the ledger" "$T/c1.err" && cmp -s "$T/wfixe.orig" "$DE/pids.tsv" && [ -z "$(find "$DE" -name '*tmp*')" ] \
+  && ok "pids check: a failed ledger rename exits 1, keeps the ledger (a wake may repeat), leaves no temp file" || bad "pids check with a failed rename: rc $r, '$(cat "$T/c1.err")'"
+rm -f "$FAILMV_FILE"
+WARROOM_DIR="$DE" "$B/pids.sh" check > /dev/null 2>&1; r=$?
+[ $r = 0 ] && ! grep -q '^deadjob' "$DE/pids.tsv" && grep -q '^keepjob' "$DE/pids.tsv" && ok "pids check control: without the fault the dead job is dropped and the live one kept" || bad "pids check control: rc $r, ledger '$(cat "$DE/pids.tsv")'"
+WARROOM_DIR="$DE" "$B/pids.sh" "done" keepjob >/dev/null 2>&1; ! grep -q '^keepjob' "$DE/pids.tsv" && ok "pids done control: without the fault the row is removed" || bad "pids done control"
+kill $J 2>/dev/null; wait $J 2>/dev/null
 
 # 43. bootstrap: another writer wins the race between "board missing?" and "create it". Forced by a stub mkdir that plants a
 #     first line at the moment the creating script makes the board's folder. The shipped code keeps that line; the old

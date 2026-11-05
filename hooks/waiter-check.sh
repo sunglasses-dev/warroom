@@ -15,12 +15,13 @@ WAIT=$(printf '%q' "$(cd "$HERE/../bin" && pwd)/waiter.sh")      # printed comma
 REG="$W/seats.tsv"; touch "$REG"
 row=$(awk -F'\t' -v s="$SID" '$1==s' "$REG" | tail -1)
 if [ -n "$row" ]; then
-  seat=$(printf '%s' "$row" | cut -f2); pid=$(printf '%s' "$row" | cut -f3); started=$(printf '%s' "$row" | cut -f5)
+  seat=$(printf '%s' "$row" | cut -f2); pid=$(printf '%s' "$row" | cut -f3); started=$(printf '%s' "$row" | cut -f5); cols=$(printf '%s' "$row" | awk -F'\t' '{print NF}')
   [ "$seat" = NONE ] && exit 0
-  # the waiter itself: same pid and, when the row recorded one, same start time (a reused pid is not this waiter)
-  case "$(wr_proc "$pid" "$started")" in
+  # the waiter itself: same pid and same start time (a reused pid is not this waiter). A row with an empty start time and a
+  # live pid is "cannot tell", never silent; only an old four-column row is judged by the pid alone.
+  case "$(wr_rowproc "$pid" "$started" "$cols")" in
     alive) exit 0 ;;
-    unknown) echo "[WAITER UNCHECKED] the start time of your $seat waiter (pid $pid) cannot be read (ps failed), so this hook cannot tell whether it still runs. If no waiter job is running in this session, re-arm it as a background job: bash $WAIT $seat $(printf '%q' "$SID")"; exit 0 ;;
+    unknown) echo "[WAITER UNCHECKED] the start time of your $seat waiter (pid $pid) is not recorded or cannot be read (ps failed), so this hook cannot tell whether it still runs. If no waiter job is running in this session, re-arm it as a background job: bash $WAIT $seat $(printf '%q' "$SID")"; exit 0 ;;
   esac
   echo "[WAITER ENDED] your $seat waiter (pid $pid) fired or died. Act on any '@$seat ACTION' line on the board, then re-arm it now as a background job: bash $WAIT $seat $(printf '%q' "$SID")"
   exit 0
