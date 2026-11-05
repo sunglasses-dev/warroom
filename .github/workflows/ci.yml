@@ -13,8 +13,9 @@ jobs:
         run: python3 -m py_compile bin/*.py
       - name: smoke test (throwaway board in a temp dir)
         run: bash tests/smoke.sh
-  # macOS runs on every push and every pull request, like the Linux job
+  # macOS runs on pull requests and on main, not on other branch pushes (its minutes bill 10x Linux)
   macos:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
