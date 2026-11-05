@@ -3,7 +3,7 @@
 # It sleeps (no model calls, no tokens) and exits the moment a NEW board post is addressed to the seat. A post wakes a seat
 # only when its FIRST line, right after the "[HH:MM · AUTHOR]" stamp, starts with "@SEAT ACTION:" or "@ALL ACTION:" and
 # the author is not the seat itself. Prose, "ACTIONABLE", a quoted directive and any later line of a post wake nobody.
-# The exit is the wake: the session that started the job is told the job finished and sees the line. Re-arm after every wake.
+# The exit is the wake: the script exits after writing the lines and saving its position; whether and when the session is told is up to the host. Re-arm after every wake.
 # SEAT=NONE opts a session out. One live session per seat: arming a taken seat is refused (exit 1). SESSION_ID is required.
 # "Live" means the registered waiter process itself (pid and start time), so a reused pid never holds a seat.
 # A waiter replaced by a newer arm of the same seat stops with exit 3, so that is never mistaken for a wake (exit 0).
@@ -86,6 +86,7 @@ replaced() { echo "[WAITER REPLACED] a newer waiter holds seat $SEAT; this one s
 # that cannot be removed is reported with its path
 snap_t=""; chunk_t=""; trap 'wr_drop "$chunk_t"; wr_drop "$snap_t"' EXIT
 pend=""
+trap '' PIPE      # a closed reader gives a failed write (checked below), not a silent death by SIGPIPE
 while :; do
   sleep "$POLL"
   mine || replaced
@@ -121,20 +122,25 @@ while :; do
     wr_lock "$CUR" || continue
     if ! mine; then wr_unlock "$CUR"; replaced; fi
     if [ -e "$LAST" ] && [ $(( $(date +%s) - $(wr_mtime "$LAST") )) -lt "$GAP" ]; then wr_unlock "$CUR"; continue; fi
-    # touch, never ": >": LAST only carries a time, and a BOARD configured with the same name must not be emptied (the
-    # cursor lock covers the cursor and LAST together). The gap marker goes FIRST and the position LAST: if either cannot
-    # be saved the wake is NOT reported as delivered (exit 1, the held lines are printed), and the saved position is still
-    # the old one, so the next arm reads the lines again. The other order moved the position and then failed on the marker,
-    # which lost the wake.
-    if ! { wr_stamp "$LAST" && { wr_cursor_put "$CUR" "$gen" "$base" "$lastck" || { rm -f "$LAST"; false; }; }; }; then   # no marker without a saved position
-      wr_unlock "$CUR"
-      echo "[WAITER ERROR] could not save the position of seat $SEAT in $W (full or read-only?). The wake below was NOT marked as delivered; re-arm after fixing it and these lines come again." >&2
-      printf '%s\n' "$pend"
-      exit 1
+    # The wake is printed first and marked after it, each step checked alone: header, lines, gap marker, position. A step that
+    # fails stops here with exit 1 and says which; nothing after it ran. Before the print nothing was saved, so the next arm reads
+    # the lines again (the header and a part of the lines may repeat). After the print the lines were shown but not marked as
+    # delivered, and a fresh gap marker stays: nothing is unlinked to undo a failure. touch, never ": >": LAST only carries a
+    # time, and a BOARD configured with the same name must not be emptied. Exit 0 happens only here: output written AND
+    # checkpoint saved (not host acknowledgement). trap '' PIPE (set before the loop) turns a closed reader into a failed write.
+    if ! echo "[WAKE -> $SEAT] a board line is addressed to you. Act on it, then re-arm: bash $(printf '%q' "$HERE/waiter.sh") $SEAT $SID (as a background job)."; then
+      wr_unlock "$CUR"; echo "[WAITER ERROR] could not write the wake header to the output; nothing was saved. Re-arm and these lines come again." >&2; exit 1
+    fi
+    if ! printf '%s\n' "$pend"; then
+      wr_unlock "$CUR"; echo "[WAITER ERROR] could not write the lines to the output; nothing was saved. Re-arm and these lines come again (the header and a part of the lines may repeat)." >&2; exit 1
+    fi
+    if ! wr_stamp "$LAST"; then
+      wr_unlock "$CUR"; echo "[WAITER ERROR] the lines were printed but not marked: could not update the gap marker in $W (full or read-only?). The position was NOT saved. Re-arm after fixing it and these lines come again." >&2; exit 1
+    fi
+    if ! wr_cursor_put "$CUR" "$gen" "$base" "$lastck"; then
+      wr_unlock "$CUR"; echo "[WAITER ERROR] the lines were printed but not marked: could not save the position of seat $SEAT in $W (full or read-only?). The old position stays and the gap marker stays. Re-arm after fixing it and these lines come again." >&2; exit 1
     fi
     wr_unlock "$CUR"
-    echo "[WAKE -> $SEAT] a board line is addressed to you. Act on it, then re-arm: bash $(printf '%q' "$HERE/waiter.sh") $SEAT $SID (as a background job)."
-    printf '%s\n' "$pend"
     exit 0
   fi
 done
