@@ -4,7 +4,6 @@
 #   2. a second waiter on a seat that is already held is refused
 #   3. a registered job that dies wakes its owner once, and its row is dropped, also when several seats check at once
 #   4. the idle guard names a silent seat once per silence, not once per prompt
-#   6. a reopen request wakes the other seats; reopen.sh status exits 0 while they bank
 #   7. wake grammar: only a first line "@SEAT ACTION:" from another author wakes (not prose, ACTIONABLE, a second line, the seat's own post)
 #   8. a replaced board of the same length is read again from its start; a waiter missing its session id is refused
 #   9. two arms of one seat at the same moment: exactly one wins, every round
@@ -12,25 +11,20 @@
 #  11. the writer lock: one holder per file (also through aliases, which are refused), a crash releases it, wr_run children
 #      hold no copy, subshell use is refused, every failure is visible, a board named like the waiter's marker survives
 #  12. the job ledger: concurrent add of one label gives one row; a reused pid (wrong start time) counts as gone
-#  13. pr-watch (gh stubbed): only `gh pr view` is ever called, a green needs every row green, and the receipt holds the response that produced it
-#  14-16. warroom.env is data: command text refused, the current folder ignored, shell and cpu-sentinel.py agree
+#  14-15. warroom.env is data: command text refused, the current folder ignored
 #  17. docs/INSTALL.md: its hook block is valid JSON with the four entries, the quoted path works with a space in the clone path,
 #      the parse command in the page accepts a good file and refuses a bad one, the page stays short
 #  18-20. (unused numbers: the installer was removed)
 #  21. every hook with a bad warroom.env exits 1 (shown, prompt goes through), never 2 (Claude Code blocks the prompt)
-#  25. a key set twice in warroom.env is refused by the shell scripts and by cpu-sentinel.py alike
-#  27-32. second review (waiter, cursor, guard, reopen): shared opt-out rows, one wake when a waiter is replaced, a board refilled in
-#         place, the guard's job identity and its mark across board generations, reopen READY only with cards, quoted commands
-#         (32c: a unique reopen id per arm and its own request line as the boundary; arm, build, done check every write)
+#  25. a key set twice in warroom.env is refused
+#  27-32. second review (waiter, cursor, guard): shared opt-out rows, one wake when a waiter is replaced, a board refilled in
+#         place, the guard's job identity and its mark across board generations, quoted commands
 #  33. a missing board is created without truncating (parallel first posts all survive); an uncreatable board is an error
 #  34. a ledger write that fails leaves the ledger as it was and exits non-zero
 #  35. pids.sh add refuses pid 0 and a pid whose start time cannot be read
-#  36. cpu-sentinel reads the four-column ledger (job policy, owner alerted once); a row with a reused pid is ignored
-#  37. cpu-sentinel --dry-run changes nothing; a failed alert post is retried until it lands, then not repeated
-#  38. pr-watch: an option without a value exits 2 (no spin)
 #  39. leak-check: a bad denylist pattern or an unreadable file is an error (exit 2), run-state files in the tree are a hit
 #  40. process identity: ps failing is "unknown" (row kept, seat not taken, guard silent, hook says so), never "dead"; a
-#      reused pid holds no seat and inherits no sentinel strikes or opt-out; a failed sentinel sample keeps its state
+#      reused pid holds no seat
 #  41-43. position integrity (a rewrite anywhere in the part already read is noticed), every state write checked (fault
 #         injection with a stub mv), the board bootstrap under a forced race (with a wrong-code control)
 #  44. the sample board, replayed through real waiters, wakes W1, W2 and BOSS by exactly their own handoffs
@@ -71,14 +65,6 @@ n=$(grep -c "job 'smoke-race'" "$("$B/board.sh" path)")
 for _ in 1 2 3; do echo '{}' | WARROOM_IDLE_MIN=30 bash "$ROOT/hooks/board-guard.sh"; sleep 1; done
 n=$(grep -c "GUARD\] @W1 ACTION" "$("$B/board.sh" path)")
 [ "$n" = 1 ] && ok "guard names a silent seat once per silence" || bad "guard posted $n times for one silence"
-
-# 6. a reopen request wakes the other seats, and status exits 0 while seats are still banking
-: > "$("$B/board.sh" path)"; rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/.reopen-requested"
-"$B/waiter.sh" W1 sid-w1r > "$T/w1r.out" 2>/dev/null & WP=$!; sleep 2
-"$B/reopen.sh" arm >/dev/null
-if wait_exit $WP 10 && grep -q "REOPEN REQUESTED" "$T/w1r.out"; then ok "reopen request wakes the other seats"; else bad "reopen request did not wake W1"; fi
-"$B/reopen.sh" status >/dev/null; rc=$?
-[ $rc = 0 ] && ok "reopen status exits 0" || bad "reopen status exited $rc"
 
 # 7. wake grammar: first line of a post, "@SEAT ACTION:" or "@ALL ACTION:", author not the seat
 : > "$("$B/board.sh" path)"
@@ -252,7 +238,7 @@ wait_exit $wp 10; kill $wp 2>/dev/null
 ! grep -nE '(^|[;&|] *): > "\$LAST"' "$B/waiter.sh" >/dev/null && ok "lock: the waiter never truncates its wake timestamp" || bad "lock: waiter.sh still truncates \$LAST"
 
 # lock_order_and_upgrade_boundary (lint only, not evidence of safety)
-code="$B/board.sh $B/pids.sh $B/waiter.sh $B/reopen.sh $ROOT/hooks/board-guard.sh"
+code="$B/board.sh $B/pids.sh $B/waiter.sh $ROOT/hooks/board-guard.sh"
 sub='\$\([^)]*wr_(lock|unlock|run)|(^|[^|])\| *wr_(lock|unlock|run)'
 ! grep -nE "$sub" $code >/dev/null && ok "lock lint: no lock call inside \$( ) or after a pipe" || bad "lock lint: a lock call runs in a subshell: $(grep -nE "$sub" $code | head -2)"
 ! grep -nE '(^|[^0-9&<>])[89]>|>&[89]|<&[89]' $code "$ROOT/tools/"*.sh >/dev/null && ok "lock lint: fds 8 and 9 are used only by _common.sh" || bad "lock lint: another script uses fd 8 or 9"
@@ -279,131 +265,6 @@ awk -F'\t' 'BEGIN{OFS="\t"} {$4="Thu Jan  1 00:00:00 1970"; print}' "$WARROOM_DI
 grep -q "job 'dup-job'" "$("$B/board.sh" path)" && ok "a pid with a different start time counts as gone" || bad "reused pid was treated as the same job"
 kill $J 2>/dev/null; wait $J 2>/dev/null
 
-# 13. pr-watch (gh stubbed, no network): it only reads, reports an observation, and a green needs every row green
-SD="$T/stub"; mkdir -p "$SD"; export GH_STUB_DIR="$SD"; SHA=$(printf 'a%.0s' $(seq 1 40))
-cat > "$SD/gh" <<'STUB'
-#!/usr/bin/env bash
-# logs every call; the Nth `pr view` serves resp.N (the last file repeats); resp.fail.N makes that call fail
-d=$GH_STUB_DIR; echo "$*" >> "$d/calls.log"
-case "$1 $2" in
-  "pr view")
-    n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/count"
-    [ -e "$d/resp.fail.$n" ] && exit 1
-    if [ -e "$d/fault.$n" ]; then for t in "$TMPDIR"/pr-watch.*/; do for f in cur.body prev.body cur.new prev.new; do rm -f "$t$f"; ln -s /nonexistent/pr-watch-fault "$t$f"; done; done; fi
-    f="$d/resp.$n"; [ -e "$f" ] || f=$(ls "$d"/resp.[0-9]* | sort -t. -k2 -n | tail -1)
-    cat "$f" ;;
-  *) exit 0 ;;
-esac
-STUB
-chmod +x "$SD/gh"
-mkr() { # mkr STATE HEAD REPO BASE ROW...   row = run:NAME:STATUS:CONCLUSION[:WORKFLOW] | ctx:NAME:STATE | ROWS=null
-  python3 - "$@" <<'PY'
-import json, sys
-state, head, repo, base = sys.argv[1:5]; rows = []; nullrows = False
-for r in sys.argv[5:]:
-    p = r.split(":")
-    if r == "ROWS=null": nullrows = True
-    elif p[0] == "run":
-        c = {"__typename": "CheckRun", "name": p[1], "status": p[2], "conclusion": p[3] or None}
-        if len(p) > 4: c["workflowName"] = p[4]
-        rows.append(c)
-    else: rows.append({"__typename": "StatusContext", "context": p[1], "state": p[2]})
-d = {"state": state or None, "headRefOid": head, "baseRefName": base, "url": "https://github.com/%s/pull/7" % repo, "statusCheckRollup": None if nullrows else rows}
-print(json.dumps({k: v for k, v in d.items() if v is not None or k == "statusCheckRollup"}))
-PY
-}
-BD="$("$B/board.sh" path)"
-# runw RESP... -- [pr-watch args]: serve the responses in order, run pr-watch, leave the new board lines in $NEW and rc in $rc
-# The wait is RUNW_TIMEOUT whole seconds (default 3). pr-watch.sh sets its deadline from a whole-second clock read, so a
-# timeout of 1 can end the run when the first look merely crosses a second boundary, before the second look is made;
-# cases that need a second look (pending, then something else) therefore keep the default, and stops() sets 1.
-runw() { rm -f "$SD"/resp.* "$SD/count" "$SD/calls.log"; i=1
-  while [ "${1:-}" != "--" ]; do printf '%s\n' "$1" > "$SD/resp.$i"; i=$((i+1)); shift; done; shift
-  n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout "${RUNW_TIMEOUT:-3}" "$@" >/dev/null 2>&1; rc=$?
-  NEW=$(tail -n +$((n0+1)) "$BD"); touch "$SD/calls.log"
-  [ -z "$(grep -v '^pr view ' "$SD/calls.log")" ] || NOMUT=bad; }
-NOMUT=ok
-G=$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS:ci)
-stops() { # stops "name" RESP... -- args: the run must end with exit 1, one WATCH FAIL line and no WATCH GREEN
-  nm=$1; shift; RUNW_TIMEOUT=1 runw "$@"
-  if [ $rc = 1 ] && echo "$NEW" | grep -q 'WATCH FAIL' && ! echo "$NEW" | grep -q 'WATCH GREEN'; then ok "pr-watch stops: $nm"; else bad "pr-watch did not stop: $nm (rc $rc: $NEW)"; fi; }
-# green: exit 0, exactly one WATCH GREEN line, no WATCH FAIL; a check named PASS or guarantee must not trip the wording test
-runw "$(mkr OPEN "$SHA" o/r main run:PASS:COMPLETED:SUCCESS:ci run:guarantee:COMPLETED:NEUTRAL ctx:legacy:SUCCESS)" -- --require PASS
-LINE=$(echo "$NEW" | grep 'WATCH GREEN'); REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
-if [ $rc = 0 ] && [ "$(echo "$NEW" | grep -c 'WATCH GREEN')" = 1 ] && ! echo "$NEW" | grep -q 'WATCH FAIL'; then ok "pr-watch: a green response gives exit 0 and exactly one WATCH GREEN line"; else bad "pr-watch green (rc $rc: $NEW)"; fi
-case "$LINE" in *"observed, not a gate; this tool did not merge or modify the PR"*"$REC)") ok "pr-watch: the green line says observed, not a gate, and ends with the receipt path" ;; *) bad "pr-watch green line: $LINE" ;; esac
-grep -q 'observed, not a gate' "$REC" && grep -q 'This tool did not merge or modify the PR' "$REC" && ok "pr-watch: the receipt says observed, not a gate, and that it did not merge" || bad "pr-watch receipt wording"
-grep -q '  - legacy · SUCCESS · not reported' "$REC" && ok "pr-watch: a check with no workflow is written 'not reported' and is still green" || bad "pr-watch: missing workflow field"
-FIXED=$( { echo "$LINE" | sed 's/(receipt .*//'; grep -v '^  - \|required names' "$REC"; "$B/pr-watch.sh" --help; } | sed 's/not a guarantee//g; s/not a gate//g; s/did not merge//g; s/never merges//g')
-echo "$FIXED" | grep -Eqi 'POSTCONDITION|PASS|safe to merge|guarantee|merge is safe' && bad "pr-watch wording claims a merge or a gate: $(echo "$FIXED" | grep -Ei 'POSTCONDITION|PASS|safe to merge|guarantee|merge is safe' | head -2)" || ok "pr-watch: no template claims a merge, a safe merge or a gate"
-"$B/pr-watch.sh" --help | grep -qi 'private' && bad "pr-watch --help names a private tool" || ok "pr-watch --help says nothing about any private tool"
-# stops: each ends WATCH FAIL with exit 1 and no green line
-stops "head is not the pinned one" "$(mkr OPEN "${SHA%a}b" o/r main run:build:COMPLETED:SUCCESS)" --
-stops "a required check is red" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:FAILURE)" -- --require build
-stops "a required check never appears" "$(mkr OPEN "$SHA" o/r main run:lint:COMPLETED:SUCCESS)" -- --require build
-stops "zero checks" "$(mkr OPEN "$SHA" o/r main)" --
-stops "the PR is closed" "$(mkr CLOSED "$SHA" o/r main run:build:COMPLETED:SUCCESS)" --
-stops "the PR was merged elsewhere" "$(mkr MERGED "$SHA" o/r main run:build:COMPLETED:SUCCESS)" --
-echo "$NEW" | grep -q 'merged outside this tool' && ok "pr-watch: a merge by someone else is reported as such" || bad "pr-watch: merged elsewhere not named: $NEW"
-stops "a non-required check is red" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:extra:COMPLETED:FAILURE)" -- --require build
-stops "a non-required check stays pending" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:extra:IN_PROGRESS:)" -- --require build
-stops "same name, SUCCESS then FAILURE" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:build:COMPLETED:FAILURE)" -- --require build
-stops "same name, FAILURE then SUCCESS" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:FAILURE run:build:COMPLETED:SUCCESS)" -- --require build
-stops "same name, SUCCESS then PENDING" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS run:build:QUEUED:)" -- --require build
-stops "same name, PENDING then SUCCESS" "$(mkr OPEN "$SHA" o/r main run:build:QUEUED: run:build:COMPLETED:SUCCESS)" -- --require build
-# a required name is matched raw: a green check whose name only EQUALS the required one after control characters are blanked
-# for display must not satisfy it (mutation-checked: matching on the display text turns this green)
-CTLN=$(printf 'build\001lint')
-stops "a green check named with a control character does not satisfy the plain required name" "$(mkr OPEN "$SHA" o/r main "run:$CTLN:COMPLETED:SUCCESS")" -- --require "build lint"
-runw "$(mkr OPEN "$SHA" o/r main "run:$CTLN:COMPLETED:SUCCESS")" -- --require "$CTLN"
-[ $rc = 0 ] && echo "$NEW" | grep -q 'WATCH GREEN' && ok "pr-watch: the same raw name, required exactly, is green (control for the name fixture)" || bad "pr-watch exact raw name was not green (rc $rc: $NEW)"
-stops "a legacy status context is FAILURE" "$(mkr OPEN "$SHA" o/r main ctx:ci:FAILURE)" --
-stops "a legacy status context is PENDING" "$(mkr OPEN "$SHA" o/r main ctx:ci:PENDING)" --
-stops "the state is missing" "$(mkr "" "$SHA" o/r main run:build:COMPLETED:SUCCESS)" --
-stops "the checks list is null" "$(mkr OPEN "$SHA" o/r main ROWS=null)" --
-stops "a finished check has no result" "$(mkr OPEN "$SHA" o/r main run:build:COMPLETED:)" --
-stops "a check stays pending until the timeout" "$(mkr OPEN "$SHA" o/r main run:build:IN_PROGRESS:)" --
-# gh failing on the second call after a pending first one: no green, and the receipt marks the current fields unavailable
-# (3 s, not more: the stub repeats the pending response after look 4, so a longer wait could end on a pending look; with 3 the run ends on look 3 or 4, both failed)
-rm -f "$SD"/resp.* "$SD/count"; mkr OPEN "$SHA" o/r main run:early:IN_PROGRESS: > "$SD/resp.1"; : > "$SD/resp.fail.2"; : > "$SD/resp.fail.3"; : > "$SD/resp.fail.4"
-n0=$(wc -l < "$BD" | tr -d ' '); PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 3 >/dev/null 2>&1; rc=$?
-NEW=$(tail -n +$((n0+1)) "$BD"); REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
-[ $rc = 1 ] && ! echo "$NEW" | grep -q 'WATCH GREEN' && grep -q 'current fields: unavailable' "$REC" && grep -q 'earlier evidence, observed at .*, not current' "$REC" \
-  && ok "pr-watch: after a gh failure the receipt marks current fields unavailable and dates the earlier evidence" || bad "pr-watch gh-failure receipt (rc $rc)"
-# receipt: exactly the response that produced the result, never an earlier or mixed one; pending -> green with the head fixed
-runw "$(mkr OPEN "$SHA" first/repo develop run:alpha:IN_PROGRESS::ci)" "$(mkr OPEN "$SHA" second/repo release run:beta:COMPLETED:SUCCESS ctx:gamma:SUCCESS)" -- ; REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
-if [ $rc = 0 ] && grep -q 'second/repo' "$REC" && grep -q 'base branch (as GitHub reported it): release' "$REC" && grep -q '  - beta · SUCCESS · not reported' "$REC" \
-   && ! grep -q 'first/repo\|develop\|alpha' "$REC"; then ok "pr-watch: the receipt holds exactly the response that produced the green"; else bad "pr-watch receipt mixed responses (rc $rc)"; fi
-runw "$(mkr OPEN "$SHA" first/repo develop run:build:IN_PROGRESS:)" "$(mkr OPEN "${SHA%a}c" second/repo release run:build:COMPLETED:SUCCESS)" -- ; REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
-if [ $rc = 1 ] && grep -q "pinned head: $SHA" "$REC" && grep -q "observed head: ${SHA%a}c" "$REC"; then ok "pr-watch: head drift records both the pinned and the observed head"; else bad "pr-watch drift receipt (rc $rc)"; fi
-# the receipt or the board line cannot be written: exit 1, no green line
-chmod 500 "$WARROOM_DIR/receipts"; runw "$G" --; chmod 700 "$WARROOM_DIR/receipts"
-[ $rc = 1 ] && ! echo "$NEW" | grep -q 'WATCH GREEN' && ok "pr-watch: a receipt that cannot be written ends exit 1 with no green line" || bad "pr-watch wrote green without a receipt (rc $rc: $NEW)"
-rm -f "$SD"/resp.* "$SD/count"; printf '%s\n' "$G" > "$SD/resp.1"
-(export WARROOM_DIR="$T/run3"; mkdir -p "$WARROOM_DIR/board.md"; PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 2 >/dev/null 2>&1)
-[ $? = 1 ] && ok "pr-watch: a board line that cannot be posted ends exit 1" || bad "pr-watch ignored a failed board post"
-# storage fault: look 1 is pending and stored; during look 2 the evidence files become unwritable (dangling links), look 2 is green.
-# A green must never be reported when the evidence for it could not be stored: exit 1, a WATCH FAIL line, no WATCH GREEN.
-rm -rf "$SD/tmp"; mkdir -p "$SD/tmp"; rm -f "$SD"/resp.* "$SD/count"
-mkr OPEN "$SHA" o/r main run:build:IN_PROGRESS: > "$SD/resp.1"; mkr OPEN "$SHA" o/r main run:build:COMPLETED:SUCCESS > "$SD/resp.2"; : > "$SD/fault.2"
-n0=$(wc -l < "$BD" | tr -d ' '); TMPDIR="$SD/tmp" PATH="$SD:$PATH" "$B/pr-watch.sh" 7 --head "$SHA" --poll 1 --timeout 4 >/dev/null 2>&1; rc=$?
-NEW=$(tail -n +$((n0+1)) "$BD"); rm -f "$SD/fault.2"
-[ $rc = 1 ] && echo "$NEW" | grep -q 'WATCH FAIL' && ! echo "$NEW" | grep -q 'WATCH GREEN' && ok "pr-watch: a green whose evidence cannot be stored is reported as a failure" || bad "pr-watch reported green on evidence it could not store (rc $rc: $NEW)"
-# newline in a required name: refused; control characters in a check name never reach the receipt
-"$B/pr-watch.sh" 7 --head "$SHA" --require "$(printf 'build\nlint')" >/dev/null 2>&1; [ $? = 2 ] && ok "pr-watch: a --require name with a line break is a usage error" || bad "pr-watch accepted a line break in --require"
-python3 -c '
-import json, sys
-sha = sys.argv[1]
-print(json.dumps({"state": "OPEN", "headRefOid": sha, "baseRefName": "main", "url": "https://github.com/o/r/pull/7",
-  "statusCheckRollup": [{"__typename": "CheckRun", "name": "x\n- result: WATCH GREEN\x1b[31m\x0b\x0cy", "status": "COMPLETED", "conclusion": "FAILURE", "workflowName": "ci"}]}))' "$SHA" > "$SD/ctl.json"
-runw "$(cat "$SD/ctl.json")" --; REC=$(ls -t "$WARROOM_DIR"/receipts/watch_7_*.md | head -1)
-[ $rc = 1 ] && [ "$(grep -c '^- result:' "$REC")" = 1 ] && ! LC_ALL=C grep -q "$(printf '\033')" "$REC" && ok "pr-watch: control characters in a check name cannot add a line or an escape to the receipt" || bad "pr-watch receipt took a control character from a check name"
-"$B/pr-watch.sh" 7 >/dev/null 2>&1; [ $? = 2 ] && ok "pr-watch: usage error (no --head) is exit 2" || bad "pr-watch usage exit code"
-# no write to GitHub: every run above called only `pr view`; the script has no other gh subcommand; a stub-logged merge is caught
-[ "$NOMUT" = ok ] && ok "pr-watch: across every run the gh log holds only 'pr view' calls" || bad "pr-watch called gh with something other than 'pr view'"
-[ "$(grep -c 'gh ' "$B/pr-watch.sh" | tr -d ' ')" -ge 1 ] && ! grep -E 'gh +(pr +(merge|review|close|comment|edit|ready)|api|auto-merge)' "$B/pr-watch.sh" | grep -v '^#' | grep -q . && ok "pr-watch.sh holds no gh write subcommand" || bad "pr-watch.sh mentions a gh write subcommand"
-echo "pr merge 7" >> "$SD/calls.log"; [ -n "$(grep -v '^pr view ' "$SD/calls.log")" ] && ok "pr-watch: the no-mutation check catches a logged 'pr merge' (negative control)" || bad "no-mutation check is blind"
-
 # 14. config is data, never code: a $(...) in warroom.env is refused and does not run
 printf 'WARROOM_DIR="$(touch %s/m-env)"\n' "$T" > "$T/bad.env"
 WARROOM_ENV="$T/bad.env" "$B/board.sh" path >/dev/null 2>&1; rc=$?
@@ -413,15 +274,6 @@ WARROOM_ENV="$T/bad.env" "$B/board.sh" path >/dev/null 2>&1; rc=$?
 mkdir -p "$T/cwd" "$T/h8"; printf 'SEATS="EVIL"\nWARROOM_DIR="%s/cwd-run"\n' "$T" > "$T/cwd/warroom.env"
 got=$(cd "$T/cwd" && env -u SEATS -u WARROOM_DIR -u WARROOM_ENV HOME="$T/h8" bash "$B/board.sh" path 2>&1)
 [ "$got" = "$T/h8/warroom-run/board.md" ] && ok "warroom.env in the current folder is ignored" || bad "cwd config was read: $got"
-
-# 16. the shell scripts and cpu-sentinel.py resolve the same config
-printf 'SEATS="A1 B2"\nWARROOM_DIR="$HOME/run9"\nBOARD="b9.md"\n' > "$T/s9.env"
-sh_cfg=$(env -u SEATS -u WARROOM_DIR HOME="$T/h8" WARROOM_ENV="$T/s9.env" bash -c '. "$1/_common.sh"; printf "SEATS=%s\nWARROOM_DIR=%s\nBOARD_FILE=%s\n" "$SEATS" "$WARROOM_DIR" "$BOARD_FILE"' _ "$B")
-py_cfg=$(env -u SEATS -u WARROOM_DIR HOME="$T/h8" WARROOM_ENV="$T/s9.env" python3 "$B/cpu-sentinel.py" --config)
-[ "$sh_cfg" = "$py_cfg" ] && ok "shell and cpu-sentinel.py read the same config" || bad "config differs: [$sh_cfg] vs [$py_cfg]"
-mkdir -p "$T/p9"; cp "$T/s9.env" "$T/p9/\$(touch m-py)"
-(cd "$T/p9" && WARROOM_ENV="$T/p9/\$(touch m-py)" python3 "$B/cpu-sentinel.py" --config >/dev/null 2>&1)
-[ ! -e "$T/p9/m-py" ] && ok "cpu-sentinel.py never hands the config path to a shell" || bad "cpu-sentinel.py ran text from the config path"
 
 # 17. docs/INSTALL.md is the install: its hook block parses, holds the four entries, and its quoted path works when the clone path has a space
 D="$ROOT/docs/INSTALL.md"; CLX="$T/sp ace/wr"; mkdir -p "$CLX" "$T/i17"; cp -R "$ROOT/bin" "$ROOT/hooks" "$CLX/"
@@ -453,11 +305,10 @@ hr=""; for h in board-guard board-tail waiter-check; do
 done
 [ "$hr" = " board-guard=1 board-tail=1 waiter-check=1" ] && [ ! -e "$T/m-env" ] && ok "hooks exit 1, not 2, on a bad warroom.env" || bad "hook exit codes on a bad config:$hr"
 
-# 25. a key set twice in warroom.env is refused by the shell scripts and by cpu-sentinel.py alike
+# 25. a key set twice in warroom.env is refused
 printf 'WARROOM_DIR="%s"\nWARROOM_DIR="%s"\n' "$T/dup-first" "$T/dup-last" > "$T/dup.env"
 env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" bash -c '. "$1/bin/_common.sh"' _ "$ROOT" >/dev/null 2>&1; r1=$?
-env -u SEATS -u WARROOM_DIR WARROOM_ENV="$T/dup.env" python3 "$B/cpu-sentinel.py" --config >/dev/null 2>&1; r2=$?
-[ $r1 != 0 ] && [ $r2 != 0 ] && [ ! -e "$T/dup-first" ] && [ ! -e "$T/dup-last" ] && ok "a key set twice is refused by both readers" || bad "duplicate key: shell rc $r1, sentinel rc $r2"
+[ $r1 != 0 ] && [ ! -e "$T/dup-first" ] && [ ! -e "$T/dup-last" ] && ok "a key set twice is refused" || bad "duplicate key: shell rc $r1"
 
 # 27. two sessions opting out (NONE) keep both rows; a seat's own arm still replaces only that seat's row
 rm -f "$WARROOM_DIR/seats.tsv"
@@ -505,94 +356,16 @@ echo '{}' | WARROOM_IDLE_MIN=30 bash "$ROOT/hooks/board-guard.sh"
 n=$(grep -c "GUARD\] @W1 ACTION" "$BF")
 [ "$n" = 1 ] && ok "guard names a silence again after the board was replaced (same line number)" || bad "guard after a replaced board: $n lines in the new board"
 
-# 31. reopen build is READY only with banked seats and current cards; otherwise it refuses, or writes a marked draft
-: > "$BF"; rm -rf "$WARROOM_DIR/.reopen-requested" "$WARROOM_DIR/cards" "$WARROOM_DIR"/REOPEN_MESSAGES_*
-"$B/reopen.sh" arm >/dev/null
-"$B/reopen.sh" build >/dev/null 2>&1; rc=$?
-[ $rc != 0 ] && ! ls "$WARROOM_DIR"/REOPEN_MESSAGES_* >/dev/null 2>&1 && ! grep -q "REOPEN READY" "$BF" && ok "reopen build refuses when no seat has a card or has banked" || bad "reopen build without cards: rc $rc"
-"$B/reopen.sh" build --force >/dev/null 2>&1
-S=$(ls "$WARROOM_DIR"/REOPEN_MESSAGES_*.md 2>/dev/null | head -1)
-[ -n "$S" ] && grep -q "INCOMPLETE DRAFT" "$S" && ! grep -q "Close every window" "$S" && grep -q "REOPEN DRAFT" "$BF" && ! grep -q "REOPEN READY" "$BF" \
-  && ok "reopen build --force writes a draft that says not to close windows" || bad "reopen build --force sheet/board lines wrong"
-sleep 1; mkdir -p "$WARROOM_DIR/cards"
-for t in BOSS W1; do echo "card of $t" > "$WARROOM_DIR/cards/${t}_REOPEN_smoke.md"; "$B/board.sh" post "$t" "banked for reopen" >/dev/null; done
-"$B/reopen.sh" build >/dev/null 2>&1; rc=$?
-S=$(ls "$WARROOM_DIR"/REOPEN_MESSAGES_*.md 2>/dev/null | head -1)
-[ $rc = 0 ] && grep -q "Close every window" "$S" && ! grep -q "INCOMPLETE" "$S" && grep -q "REOPEN READY" "$BF" \
-  && ok "reopen build is READY once every seat has banked and has a current card" || bad "reopen build with cards and banks: rc $rc"
-rm -f "$WARROOM_DIR/.reopen-requested"
-
 # 32. no error text on the first arm; printed commands are shell-quoted when the install path has a space
 rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR/seats.tsv"
 "$B/waiter.sh" W1 sid-q1 >/dev/null 2> "$T/q1.err" & WP=$!; sleep 2; kill $WP 2>/dev/null; wait $WP 2>/dev/null
 [ "$(wc -l < "$T/q1.err" | tr -d ' ')" = 1 ] && grep -q '^armed W1' "$T/q1.err" && ok "first arm prints only the armed line on stderr" || bad "first arm stderr: $(head -c 200 "$T/q1.err")"
 mkdir -p "$T/sp dir" && cp -R "$ROOT/bin" "$ROOT/hooks" "$T/sp dir/"
 bn=$(printf '{"session_id": "s-q2"}' | bash "$T/sp dir/hooks/waiter-check.sh" 2>&1)
-cd_=$(bash "$T/sp dir/bin/reopen.sh" card W1 2>/dev/null)
 case "$bn" in *'sp\ dir/bin/waiter.sh'*) q1=1 ;; *) q1=0 ;; esac
-case "$cd_" in *'sp\ dir/bin/waiter.sh'*) q2=1 ;; *) q2=0 ;; esac
-[ "$q1$q2" = 11 ] && ok "banner and reopen card print a quoted waiter command for a path with a space" || bad "quoting: banner $q1, card $q2"
+[ "$q1" = 1 ] && ok "the banner prints a quoted waiter command for a path with a space" || bad "quoting: banner $q1"
 
-# 32b. reopen done needs every seat back, or is labeled forced and incomplete; a ledger or board line that cannot be written keeps the reopen open
-LG="$WARROOM_DIR/REOPEN_LEDGER.md"; : > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested" "$LG"
-"$B/reopen.sh" arm >/dev/null
-"$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
-[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && [ ! -e "$LG" ] && ! grep -q 'REOPEN DONE' "$BF" && ok "reopen done refuses while no seat has posted reopened" || bad "reopen done with nobody back: rc $rc"
-"$B/board.sh" post BOSS "reopened" >/dev/null; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
-[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && ! grep -q 'REOPEN DONE' "$BF" && ok "reopen done refuses while one seat is still missing" || bad "reopen done with W1 missing: rc $rc"
-"$B/reopen.sh" "done" --force >/dev/null 2>&1; rc=$?
-[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && grep -q 'INCOMPLETE (forced), not back: W1' "$LG" && grep -q 'REOPEN DONE .* INCOMPLETE (forced; not back: W1)' "$BF" && ok "reopen done --force closes it, labeled INCOMPLETE with the missing seat" || bad "reopen done --force: rc $rc"
-"$B/reopen.sh" arm >/dev/null; sleep 1; for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
-"$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
-[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -c 'INCOMPLETE' "$LG")" = 1 ] && tail -1 "$BF" | grep -q 'REOPEN DONE R-[0-9a-f-]*: ledger' && ok "reopen done with every seat back writes a plain ledger row and end line" || bad "reopen done with all back: rc $rc"
-"$B/reopen.sh" arm >/dev/null; sleep 1; for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
-printf '# Reopen ledger\n| when | id | seats back |\n|---|---|---|\n' > "$LG"   # a fresh ledger: ids repeat within one minute, a row with this id would mean "already recorded"
-chmod 444 "$LG"; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?; chmod 644 "$LG"
-[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && ! tail -1 "$BF" | grep -q 'REOPEN DONE' && ok "reopen done: a ledger that cannot be written exits 1, keeps the marker, posts no end line" || bad "reopen done with a read-only ledger: rc $rc"
-chmod 444 "$BF"; "$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?; chmod 644 "$BF"
-[ $rc = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && ok "reopen done: an end line that cannot be posted exits 1 and keeps the marker" || bad "reopen done with a read-only board: rc $rc"
-"$B/reopen.sh" "done" >/dev/null 2>&1; rc=$?
-[ $rc = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -c '^| 20' "$LG")" = 1 ] && ok "reopen done: running it again after the fault closes it" || bad "reopen done rerun: rc $rc"
-# 32c. the reopen boundary: each arm gets a unique id and counts only posts after its own request line, so a second
-#      reopen inside the same minute cannot close on the first one's returns; arm writes no marker when the request
-#      cannot be posted, and reposts a request that never reached the board; build posts no READY when the sheet
-#      cannot be written; done exits 1 when the marker cannot be removed
-: > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested" "$LG"; rm -rf "$WARROOM_DIR/cards" "$WARROOM_DIR"/REOPEN_MESSAGES_*
-"$B/reopen.sh" arm >/dev/null; id1=$(head -1 "$WARROOM_DIR/.reopen-requested")
-for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done; "$B/reopen.sh" "done" >/dev/null 2>&1; r1=$?
-"$B/reopen.sh" arm >/dev/null; id2=$(head -1 "$WARROOM_DIR/.reopen-requested")
-"$B/reopen.sh" "done" >/dev/null 2>&1; r2=$?; rows=$(grep -c '^| 20' "$LG")
-[ $r1 = 0 ] && [ $r2 = 1 ] && [ "$rows" = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && [ "$id1" != "$id2" ] \
-  && printf '%s\n%s\n' "$id1" "$id2" | grep -cE '^R-[0-9]{10}-[0-9a-f]{4}$' | grep -qx 2 \
-  && ok "a second reopen right after the first does not close on the first one's returns (unique ids)" || bad "same-minute reopen: done rc $r1/$r2, ledger rows $rows, ids $id1 $id2"
-"$B/reopen.sh" status | grep -q 'banked 0/' && ok "reopen status counts only posts after the current request" || bad "status after a second arm: $("$B/reopen.sh" status | head -1)"
-for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done; "$B/reopen.sh" "done" >/dev/null 2>&1; r3=$?
-[ $r3 = 0 ] && [ "$(grep -c '^| 20' "$LG")" = 2 ] && grep -qF "| $id2 | " "$LG" && ok "the second reopen closes on its own returns and adds its own ledger row" || bad "second done: rc $r3, rows $(grep -c '^| 20' "$LG")"
-: > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested"; chmod 444 "$BF"
-"$B/reopen.sh" arm >/dev/null 2>&1; r4=$?; chmod 644 "$BF"
-[ $r4 = 1 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ ! -s "$BF" ] && ok "arm with a read-only board exits 1 and writes no marker" || bad "read-only arm: rc $r4, marker $([ -e "$WARROOM_DIR/.reopen-requested" ] && echo yes || echo no)"
-printf 'R-1000000000-abcd\n2001-09-09 01:46\n' > "$WARROOM_DIR/.reopen-requested"
-o1=$("$B/reopen.sh" arm 2>&1); o2=$("$B/reopen.sh" arm 2>&1)
-[ "$(grep -c 'REOPEN REQUESTED R-1000000000-abcd\. ' "$BF")" = 1 ] && case "$o1" in *"posted again"*) true ;; *) false ;; esac && [ "$o2" = "already armed: R-1000000000-abcd" ] \
-  && ok "arm reposts a request that is not on the board, then says already armed" || bad "arm repair: '$o1' / '$o2'"
-: > "$BF"; rm -f "$WARROOM_DIR/.reopen-requested"; "$B/reopen.sh" arm >/dev/null; mkdir -p "$WARROOM_DIR/cards"; sleep 1   # cards must be newer than the marker
-for t in BOSS W1; do echo "card of $t" > "$WARROOM_DIR/cards/${t}_REOPEN_smoke32c.md"; "$B/board.sh" post "$t" "banked for reopen" >/dev/null; done
-sheet="$WARROOM_DIR/REOPEN_MESSAGES_$(date +%Y-%m-%d).md"; mkdir -p "$sheet"
-e5=$("$B/reopen.sh" build 2>&1 >/dev/null); r5=$?; rmdir "$sheet"
-"$B/reopen.sh" build >/dev/null 2>&1; r6=$?
-[ $r5 = 1 ] && case "$e5" in *"is a directory"*) true ;; *) false ;; esac && [ "$(grep -c 'REOPEN READY' "$BF")" = 1 ] && [ $r6 = 0 ] && [ -f "$sheet" ] && tail -1 "$BF" | grep -q 'REOPEN READY' \
-  && ok "build posts no READY when the sheet path is a directory, and READY once it can write it" || bad "sheet fault: rc $r5/$r6, READY lines $(grep -c 'REOPEN READY' "$BF")"
-for t in BOSS W1; do "$B/board.sh" post "$t" "reopened" >/dev/null; done
-chmod 555 "$WARROOM_DIR"; "$B/reopen.sh" "done" >/dev/null 2>&1; r7=$?; chmod 755 "$WARROOM_DIR"
-[ $r7 = 1 ] && [ -f "$WARROOM_DIR/.reopen-requested" ] && tail -1 "$BF" | grep -q "REOPEN DONE" && ok "done exits 1 when the marker cannot be removed" || bad "marker removal fault: rc $r7"
-"$B/reopen.sh" "done" >/dev/null 2>&1; r8=$?
-[ $r8 = 0 ] && [ ! -e "$WARROOM_DIR/.reopen-requested" ] && [ "$(grep -cF "| $(grep -o 'REOPEN DONE R-[0-9a-f-]*' "$BF" | tail -1 | cut -d' ' -f3) | " "$LG")" = 1 ] \
-  && ok "done after the marker fault closes it with one ledger row" || bad "done after the marker fault: rc $r8"
-rm -f "$WARROOM_DIR/.reopen-requested"
-# generated commands are quoted for a path with a space: the reopen request line and the board-tail hook
-rm -f "$WARROOM_DIR/.reopen-requested"; : > "$BF"; bash "$T/sp dir/bin/reopen.sh" arm >/dev/null 2>&1
-grep -q 'bash [^ ]*sp\\ dir/bin/reopen.sh card SEAT' "$BF" && ok "the reopen request prints a quoted reopen.sh command for a path with a space" || bad "reopen arm command not quoted: $(head -c 300 "$BF")"
-rm -f "$WARROOM_DIR/.reopen-requested"; printf 'sid-tail\tW1\n' > "$WARROOM_DIR/seats.tsv"; rm -f "$WARROOM_DIR"/.anchor-*; printf '[00:00 · BOSS] @W1 ACTION: x\n' > "$BF"
+printf 'sid-tail\tW1\n' > "$WARROOM_DIR/seats.tsv"; rm -f "$WARROOM_DIR"/.anchor-*; printf '[00:00 · BOSS] @W1 ACTION: x\n' > "$BF"
 bt=$(printf '{"session_id": "sid-tail"}' | bash "$T/sp dir/hooks/board-tail.sh" 2>&1)
 case "$bt" in *'sp\ dir/bin/board.sh tail W1'*) ok "the board-tail hook prints a quoted board.sh command for a path with a space" ;; *) bad "board-tail command not quoted: $bt" ;; esac
 
@@ -630,43 +403,6 @@ PATH="$T/fakebin:$PATH" "$B/pids.sh" add nops $J BOSS >/dev/null 2>&1; r1=$?
 [ $r0 != 0 ] && [ $r00 != 0 ] && [ $r1 != 0 ] && ! grep -qE '^(z0|z00|nops)	' "$WARROOM_DIR/pids.tsv" && ok "pid 0 and an unreadable start time are refused, no row written" \
   || bad "pids add: pid0 rc $r0/$r00, no-ps rc $r1, rows $(grep -cE '^(z0|z00|nops)	' "$WARROOM_DIR/pids.tsv")"
 kill $J 2>/dev/null; wait $J 2>/dev/null
-
-# 36. the sentinel reads the four-column ledger: a registered hot process gets the job policy, its owner is alerted once
-RUN_SENT="$T/r25"; mkdir -p "$RUN_SENT"; : > "$RUN_SENT/board.md"
-bash -c 'while :; do :; done' & BL=$!; sleep 2
-WARROOM_DIR="$RUN_SENT" "$B/pids.sh" add busy25 $BL W1 >/dev/null
-for _ in 1 2 3 4 5 6 7; do WARROOM_DIR="$RUN_SENT" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; done
-n=$(grep -c "@W1 ACTION: process $BL .*(job)" "$RUN_SENT/board.md")
-[ "$n" = 1 ] && ok "sentinel: registered hot process is a job, its owner is alerted exactly once" || bad "sentinel job alert: $n lines for the owner"
-# the same row with a start time that is not this process's: the row is ignored (no owner, no job alert)
-awk -F'\t' 'BEGIN{OFS="\t"} {$4="Thu Jan  1 00:00:00 1970"; print}' "$RUN_SENT/pids.tsv" > "$T/r25.mod" && cp "$T/r25.mod" "$RUN_SENT/pids.tsv"
-rm -rf "$RUN_SENT/sentinel"; : > "$RUN_SENT/board.md"
-for _ in 1 2 3 4 5 6; do WARROOM_DIR="$RUN_SENT" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; done
-n=$(grep -c "@W1 ACTION: process $BL " "$RUN_SENT/board.md")
-[ "$n" = 0 ] && ok "sentinel: a ledger row whose pid started at another time is ignored" || bad "sentinel trusted a reused pid ($n alerts to the row's owner)"
-kill $BL 2>/dev/null; wait $BL 2>/dev/null
-
-# 37. --dry-run changes nothing; a failed post is retried, a delivered one is not repeated
-RUN_DRY="$T/r26"; mkdir -p "$RUN_DRY/sentinel"; : > "$RUN_DRY/board.md"
-bash -c 'while :; do :; done' & BL=$!; sleep 2
-KEY="$BL:$(ps -o lstart= -p $BL | tr -s ' ' | sed 's/^ //;s/ $//'):$(ps -o comm= -p $BL | sed 's/^ *//;s/ *$//')"   # pid:start:command
-printf '{"strikes": {"%s": 2}, "alerted": []}\n' "$KEY" > "$RUN_DRY/sentinel/strikes.json"; cp "$RUN_DRY/sentinel/strikes.json" "$T/r26.strikes"
-out=$(WARROOM_DIR="$RUN_DRY" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1)
-if printf '%s' "$out" | grep -q "would post to BOSS" && ! grep -q ACTION "$RUN_DRY/board.md" && cmp -s "$T/r26.strikes" "$RUN_DRY/sentinel/strikes.json" && [ ! -e "$RUN_DRY/sentinel/sentinel.log" ]; then
-  ok "sentinel --dry-run: says what it would post, writes no board line, strike file or log"
-else bad "sentinel --dry-run had effects or printed nothing: $(printf '%s' "$out" | head -c 160)"; fi
-mkdir "$RUN_DRY/bd"                                    # a board that is a directory: the alert post fails
-BOARD="$RUN_DRY/bd" WARROOM_DIR="$RUN_DRY" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1
-rmdir "$RUN_DRY/bd"; : > "$RUN_DRY/bd"                     # now the board can be written
-for _ in 1 2; do BOARD="$RUN_DRY/bd" WARROOM_DIR="$RUN_DRY" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; done
-n=$(grep -c "@BOSS ACTION: process $BL " "$RUN_DRY/bd")
-[ "$n" = 1 ] && ok "sentinel: a failed alert post is retried on the next run, then not repeated" || bad "sentinel alert retry: $n lines"
-kill $BL 2>/dev/null; wait $BL 2>/dev/null
-
-# 38. pr-watch: an option without a value exits 2 instead of spinning
-"$B/pr-watch.sh" 7 --head >/dev/null 2>&1 & MP=$!
-if wait_exit $MP 5; then wait $MP; rc=$?; else kill $MP 2>/dev/null; wait $MP 2>/dev/null; rc=spin; fi
-[ "$rc" = 2 ] && ok "pr-watch: an option with no value exits 2" || bad "pr-watch with a missing option value: $rc"
 
 # 39. leak-check: scan errors are errors, run-state files in the tree are hits
 LK="$T/lk"; mkdir -p "$LK/tree"; printf 'nothing here\n' > "$LK/tree/a.txt"; printf '(unbalanced\n' > "$LK/bad.deny"
@@ -722,24 +458,6 @@ case "$bn1" in "[WAITER ENDED]"*) a=1 ;; *) a=0 ;; esac; case "$bn3" in "[WAITER
 [ "$a" = 1 ] && [ -z "$bn2" ] && [ "$c" = 1 ] && ok "identity: the hook warns on a reused waiter pid, is silent for the live one, says when it cannot tell" \
   || bad "identity: hook banners: reused '$(printf '%s' "$bn1" | head -c 40)' live '$(printf '%s' "$bn2" | head -c 40)' unknown '$(printf '%s' "$bn3" | head -c 40)'"
 kill $SL 2>/dev/null; wait $SL 2>/dev/null
-# sentinel: saved strikes of an earlier process with the same pid and command do not carry over; a failed ps keeps the file
-RS="$T/r40s"; mkdir -p "$RS/sentinel"; : > "$RS/board.md"
-bash -c 'while :; do :; done' & BL=$!; sleep 2
-CM=$(ps -o comm= -p $BL | sed 's/^ *//;s/ *$//'); ST=$(lst $BL)
-printf '{"strikes": {"%s": 14, "%s": 14}, "alerted": []}\n' "$BL:$CM" "$BL:Thu Jan 1 00:00:00 1970:$CM" > "$RS/sentinel/strikes.json"
-WARROOM_DIR="$RS" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1
-[ "$(grep -c "process $BL " "$RS/board.md")" = 0 ] && grep -qE "pid $BL .*strike 1( |$)" "$RS/sentinel/sentinel.log" \
-  && ok "sentinel: a new process with a reused pid starts at strike 1, inherits no alert" || bad "sentinel: reused pid inherited strikes: $(tail -1 "$RS/sentinel/sentinel.log" | head -c 160)"
-cp "$RS/sentinel/strikes.json" "$T/r40s.strikes"
-WARROOM_DIR="$RS" PATH="$T/fakebin:$PATH" python3 -I "$B/cpu-sentinel.py" --hot 5 >/dev/null 2>&1; rc=$?
-[ $rc = 1 ] && cmp -s "$T/r40s.strikes" "$RS/sentinel/strikes.json" && ok "sentinel: a failed ps keeps the strike file as it was (exit 1)" || bad "sentinel with ps failing: rc $rc, strike file $(cmp -s "$T/r40s.strikes" "$RS/sentinel/strikes.json" && echo kept || echo CHANGED)"
-# an ok-<pid> file made before this process started is an earlier process's opt-out: the kill is still due
-printf '{"strikes": {"%s": 2}, "alerted": []}\n' "$BL:$ST:$CM" > "$RS/sentinel/strikes.json"; touch -t 0101010000 "$RS/sentinel/ok-$BL"
-o1=$(WARROOM_DIR="$RS" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1); touch "$RS/sentinel/ok-$BL"
-o2=$(WARROOM_DIR="$RS" python3 -I "$B/cpu-sentinel.py" --dry-run --hot 5 2>&1)
-case "$o1" in *"would kill tree $BL"*) a=1 ;; *) a=0 ;; esac; case "$o2" in *"would kill tree $BL"*) b=1 ;; *) b=0 ;; esac
-[ "$a$b" = 10 ] && ok "sentinel: an opt-out older than the process is ignored, a current one stops the kill" || bad "sentinel opt-out by identity: old $a current $b (want 1 0)"
-kill $BL 2>/dev/null; wait $BL 2>/dev/null
 # 41. position integrity: a rewrite anywhere in the part already read is noticed (same file, same first line, same line at
 #     the reader's position, a new line in the middle); the waiter, board.sh tail and the board-tail hook all see it
 R8="$T/pos-rewrite"; mkdir -p "$R8"; BF8="$R8/board.md"

@@ -7,7 +7,7 @@
 # (# comments and blank lines ignored). Keep that file OUT of this repository: it holds the names you are protecting.
 # In CI, store its contents as a repository secret and write it to a file before this step.
 # It also fails when the tree holds a file or folder named like the run directory's state (board.md, pids.tsv, cards/,
-# receipts/, sentinel/, .cursor-* ...): keep WARROOM_DIR outside the clone, because .gitignore only knows the default names.
+# receipts/, .cursor-* ...): keep WARROOM_DIR outside the clone, because .gitignore only knows the default names.
 # Coverage is bounded: text files only (grep -I), a short fixed list of shapes plus your private patterns, no git history.
 # A clean run means those patterns were not found in those files, not that the tree is safe to publish.
 # Output names the file, line and pattern number only, never the matching text.
@@ -47,8 +47,8 @@ EOO
 done < "$PATS"
 # state files of a run directory that ended up inside the tree
 state=$(find "$ROOT" -path "$ROOT/.git" -prune -o \( -name board.md -o -name pids.tsv -o -name seats.tsv -o -name warroom.env \
-  -o -name 'REOPEN_LEDGER.md' -o -name 'REOPEN_MESSAGES_*' -o -name '.cursor-*' -o -name '.lastwake-*' -o -name '.anchor-*' \
-  -o -name '.guard-*' -o -name '.reopen-requested' -o -name sentinel -o -name receipts -o -name cards -o -name '*.lock' -o -name '*.flock' \) -print 2>"$ERR"); rc=$?
+  -o -name '.cursor-*' -o -name '.lastwake-*' -o -name '.anchor-*' \
+  -o -name '.guard-*' -o -name receipts -o -name cards -o -name '*.lock' -o -name '*.flock' \) -print 2>"$ERR"); rc=$?
 if [ "$rc" -ne 0 ]; then echo "ERROR state-file scan did not complete"; errs=$((errs+1)); fi
 if [ -n "$state" ]; then
   while IFS= read -r l; do echo "HIT run-state file  ${l#$ROOT/}"; hits=$((hits+1)); done <<EOO

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # bin/_config.sh — reads warroom.env as DATA. The file is never sourced or run, so nothing written in it can execute.
-# Sourced by bin/_common.sh; bin/cpu-sentinel.py implements the same rules in Python.
+# Sourced by bin/_common.sh.
 # Where: $WARROOM_ENV when it is set, otherwise ~/.warroom/warroom.env. No other place is read (not the current folder).
 # Grammar, one setting per line; blank lines and lines starting with # are skipped:
 #   KEY=VALUE    KEY: SEATS WARROOM_DIR BOARD WARROOM_POLL WARROOM_MIN_GAP WARROOM_IDLE_MIN WARROOM_LONG
@@ -8,7 +8,7 @@
 #   and may start with ~/ or $HOME/ (the only expansion). Any other character ($ ` ; | & < > quotes...) is refused.
 #   WARROOM_POLL WARROOM_MIN_GAP WARROOM_IDLE_MIN WARROOM_LONG take digits only.
 # Precedence: a variable already set in the environment, then the file, then the built-in default.
-# A KEY may appear once: a second line with the same KEY is refused (the Python reader in cpu-sentinel.py does the same).
+# A KEY may appear once: a second line with the same KEY is refused.
 # Seat names: [A-Z][A-Z0-9_]{0,15}, no repeats; ALL, NONE and GUARD are reserved.
 WR_KEYS="SEATS WARROOM_DIR BOARD WARROOM_POLL WARROOM_MIN_GAP WARROOM_IDLE_MIN WARROOM_LONG"
 WR_SEAT_RE='^[A-Z][A-Z0-9_]{0,15}$'
