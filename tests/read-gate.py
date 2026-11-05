@@ -884,6 +884,11 @@ class Analyzer:
         self.taint = {}         # file -> why it hides a refusal word (every file of a source component)
         self.helpers = {}       # file -> {prelude helper name}
         self.edges = {}
+        self._loose = None
+        self.envelope_on = False    # the file envelope is checked for a whole tree (fixtures opt in with a header)
+        self.env = []               # (file, line, rule, why)
+        self.env_files = set()
+        self.out_files = []         # (path, why): files under bin/ or hooks/ that the gate does not read
 
     # --- loading ---
     def add(self, name, src):
@@ -960,6 +965,125 @@ class Analyzer:
         self.edges = edges
 
     # the only spellings of "the folder this script lives in" the gate resolves; the value is how many folders up the result is
+    # ---- the file envelope (closed allowlist at file level) ----
+    # Before any statement is judged, every file must be written in the forms the tree uses today. A file outside the envelope
+    # has no statement that is ever accepted or listed. The forms are matched literally on purpose: a rule per construct would
+    # be a recognizer, and a recognizer can be out-thought; a list of what the files do can only be too short, which fails.
+    CANON_HERE = '"$(cd "$(dirname "$0")" && pwd)"'
+    CANON_WR_ROOT = '"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"'
+    ENV_RUNNERS = {('bin/_common.sh', 'wr_run')}        # file + function that may run a computed command word, as exactly "$@"
+    RE_SRC_ENTRY_BIN = re.compile(r'^"\$HERE/(_[A-Za-z0-9_]+)\.sh"$')
+    RE_SRC_ENTRY_HOOK = re.compile(r'^"\$HERE/\.\./bin/(_[A-Za-z0-9_]+)\.sh"$')
+    RE_RUN_SIBLING = re.compile(r'^"\$HERE/([A-Za-z0-9_-]+\.sh)"$')
+    RE_SRC_LIB = re.compile(r'^"\$WR_ROOT/bin/(_[A-Za-z0-9_]+)\.sh"$')
+
+    def self_refs(self, f):
+        """Words of file f that name the file itself ($0, ${0..}, BASH_SOURCE), apart from words that are only single-quoted text."""
+        src, _, root = self.files[f]
+        out = []
+        for nd in walk(root):
+            if nd.k == 'word' and nd.parts and not all(isinstance(q, tuple) and q[0] == 'sq' for q in nd.parts):
+                if re.search(r'\$0\b|\$\{0|BASH_SOURCE', src[nd.start:nd.end]):
+                    out.append(nd)
+        return out
+
+    def envelope(self):
+        self.env = []
+        wr_root_total = sum(self.writes_var(root, 'WR_ROOT') for (_, _, root) in self.files.values())
+
+        def bad(f, nd, rule, why):
+            line = self.files[f][1].line(nd.start) if nd is not None else 0
+            self.env.append((f, line, rule, why))
+        for f in sorted(self.files):
+            src, parser, root = self.files[f]
+            folder, base = posixpath.dirname(f), posixpath.basename(f)
+            lib = base.startswith('_')
+            if lib and folder != 'bin':
+                bad(f, None, 'E1', 'a library (_*.sh) lives in bin/ only')
+            # E2 sourcing and the folder variables
+            here_hits = [a for d in walk(root) if d.k == 'simple' for a in d.assigns if a.name == 'HERE']
+            if lib:
+                if self.writes_var(root, 'HERE'):
+                    bad(f, None, 'E2', 'a sourced file never sets HERE')
+                canon = [a for d in walk(root) if d.k == 'simple' for a in d.assigns if a.name == 'WR_ROOT']
+                for w in self.self_refs(f):
+                    inside = any(a.value.start <= w.start and w.end <= a.value.end and src[a.value.start:a.value.end].strip() == self.CANON_WR_ROOT
+                                 for a in canon)
+                    if not inside:
+                        bad(f, w, 'E2', 'a sourced file never names itself ($0, BASH_SOURCE) except in the one canonical WR_ROOT line')
+            else:
+                if self.writes_var(root, 'WR_ROOT'):
+                    bad(f, None, 'E2', 'only the library sets WR_ROOT')
+                here_nodes = [d for d in walk(root) if d.k == 'simple' and any(a.name == 'HERE' for a in d.assigns)]
+
+                def bare(it):
+                    while True:
+                        if it.k == 'andor' and len(it.parts) == 1:
+                            it = it.parts[0]
+                        elif it.k == 'pipe' and len(it.cmds) == 1 and not it.neg:
+                            it = it.cmds[0]
+                        else:
+                            return it
+                top = [it for it in root.body.items if any(bare(it) is d for d in here_nodes)]    # the statement itself, not a group around it
+                ok_here = (len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1 and len(top) == 1
+                           and src[here_hits[0].value.start:here_hits[0].value.end].strip() == self.CANON_HERE)
+                if not ok_here:
+                    bad(f, None, 'E2', 'an entry script sets HERE exactly once, at top level, by the canonical line')
+            if lib and f == 'bin/_common.sh' or (lib and wr_root_total):
+                pass
+            for nd in walk(root):
+                if nd.k != 'simple' or not nd.words:
+                    continue
+                name, args = unwrapped(nd)
+                text0 = src[nd.words[1].start:nd.words[1].end] if len(nd.words) > 1 else ''
+                if name == 'source':
+                    bad(f, nd, 'E2', 'only the dot form sources a file')
+                elif name == '.':
+                    m = None
+                    if len(nd.words) == 2:
+                        if lib:
+                            m = self.RE_SRC_LIB.match(text0)
+                        elif folder == 'hooks':
+                            m = self.RE_SRC_ENTRY_HOOK.match(text0)
+                        else:
+                            m = self.RE_SRC_ENTRY_BIN.match(text0)
+                    if m is None:
+                        bad(f, nd, 'E2', 'a sourced path has one of three exact forms ($HERE/_x.sh, $HERE/../bin/_x.sh, $WR_ROOT/bin/_x.sh)')
+                    elif 'bin/%s.sh' % m.group(1) not in self.files:
+                        bad(f, nd, 'E2', 'a sourced library is not one of the scanned files')
+                # E3 exec
+                elif name == 'exec':
+                    if len(nd.words) != 1:
+                        bad(f, nd, 'E3', 'exec only changes descriptors; it never runs a command')
+                    for r in nd.redirs:
+                        t = word_lit(r.target) if r.target is not None else None
+                        fd_ok = r.fd.isdigit() and int(r.fd) >= 3
+                        dup_ok = r.op not in ('>&', '<&') or (t == '-' or (t is not None and t.isdigit() and int(t) >= 3))
+                        if not (fd_ok and dup_ok):
+                            bad(f, nd, 'E3', 'exec redirects only descriptors 3 and up, and never duplicates onto 1 or 2')
+                # E4 words that can run anything
+                elif name == 'eval':
+                    bad(f, nd, 'E4', 'eval is outside the envelope')
+                elif name in ('command', 'builtin') or cmd_name(nd) in ('command', 'builtin'):
+                    if not (cmd_name(nd) == 'command' and [word_lit(w) for w in nd.words[1:2]] == ['-v']):
+                        bad(f, nd, 'E4', 'command and builtin wrappers are outside the envelope (command -v is the one lookup form)')
+                elif name == 'trap':
+                    if not args or any(a is None for a in args):
+                        bad(f, nd, 'E4', 'a trap has a literal action and literal signal names')
+                elif cmd_name(nd) == '$':
+                    fn = nd
+                    while fn is not None and fn.k != 'func':
+                        fn = fn.parent
+                    w0 = src[nd.words[0].start:nd.words[0].end]
+                    sib = self.RE_RUN_SIBLING.match(w0)
+                    if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:
+                        continue        # an entry script runs a named sibling: "$HERE/x.sh" (HERE is the canonical line, checked above)
+                    if not (w0 == '"$@"' and fn is not None and (f, fn.name) in self.ENV_RUNNERS):
+                        bad(f, nd, 'E4', 'a computed command word is outside the envelope (one "$@" runner is listed by file and function)')
+        for path, why in self.out_files:
+            self.env.append((path, 0, 'E1', why))
+        self.env_files = set(f for f, _, _, _ in self.env)
+
     DIR_FORMS = {
         '$(dirname "$0")': 0,
         '"$(dirname "$0")"': 0,
@@ -968,6 +1092,73 @@ class Analyzer:
         '"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"': 1,
         '"$(cd "$(dirname "$0")/.." && pwd)"': 1,
     }
+
+    @staticmethod
+    def src_tail(nd):
+        """The last path component a `.` names, or None when the word does not end in a literal file name."""
+        if len(nd.words) < 2:
+            return None
+        parts = nd.words[1].parts
+        if len(parts) == 1 and isinstance(parts[0], Node) and parts[0].k == 'dq':
+            parts = parts[0].parts
+        if not parts or not (isinstance(parts[-1], tuple) and parts[-1][0] == 'lit'):
+            return None
+        t = parts[-1][1].rsplit('/', 1)[-1]
+        return t or None
+
+    def loose_edges(self):
+        """Who may source whom, over-estimated by file NAME only (a `.` whose target cannot be told may source anything). It is used
+        to refuse, never to credit: the true edges need the very resolution this feeds."""
+        if self._loose is None:
+            names = {}
+            for f in self.files:
+                names.setdefault(posixpath.basename(f), set()).add(f)
+            down = {f: set() for f in self.files}
+            tails, unknown = {}, False
+            for f, (_, _, root) in self.files.items():
+                for nd in walk(root):
+                    if nd.k == 'simple' and nd.words and unwrapped(nd)[0] in ('.', 'source'):
+                        t = self.src_tail(nd)
+                        if t is None:
+                            unknown = True
+                            down[f] |= set(self.files)
+                        else:
+                            tails.setdefault(t, set()).add(f)
+                            down[f] |= names.get(t, set())
+            up = {}
+            for a, bs in down.items():
+                for b in bs:
+                    up.setdefault(b, set()).add(a)
+            self._loose = (down, up, tails, unknown)
+        return self._loose
+
+    def same_shell(self, f):
+        """Every file whose code can run in the same shell as f's: what f sources, what sources f, and what those source."""
+        down, up, _, _ = self.loose_edges()
+
+        def closure(starts, g):
+            out, todo = set(), list(starts)
+            while todo:
+                x = todo.pop()
+                if x not in out:
+                    out.add(x)
+                    todo.extend(g.get(x, ()))
+            return out
+        anc = closure([f], up)
+        return closure([f], down) | anc | closure(anc, down)
+
+    def writes_var(self, root, var):
+        """How many places in this tree write the variable (assignment, `read VAR`, `export VAR=..`, a `for` variable...)."""
+        n = 0
+        for d in walk(root):
+            if d.k == 'simple':
+                n += sum(1 for a in d.assigns if a.name == var)
+                if d.words and any(w_ is not None and (w_ == var or w_.startswith(var + '=') or w_.endswith(' ' + var))
+                                   for w_ in (word_lit(w) for w in d.words[1:])):
+                    n += 1
+            if d.k == 'for' and getattr(d, 'var', None) == var:
+                n += 1
+        return n
 
     def resolve_source(self, fname, nd):
         """The scanned file that a `. "$VAR/rel/path"` brings in, or None. VAR must be assigned exactly once in this file, by a
@@ -990,9 +1181,13 @@ class Analyzer:
         hits = [a for d in walk(root) if d.k == 'simple' for a in d.assigns if a.name == var]
         if len(hits) != 1 or hits[0].parent is None or hits[0].parent.k != 'simple' or hits[0].parent.words:
             return None
-        up = self.DIR_FORMS.get(src[hits[0].value.start:hits[0].value.end].strip())
+        key = src[hits[0].value.start:hits[0].value.end].strip()
+        up = self.DIR_FORMS.get(key)
         if up is None:
             return None
+        _, _, tails, unknown = self.loose_edges()
+        if '"$0"' in key and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):
+            return None         # $0 is the file that was run: when this file is sourced it names the sourcer, not this file
         # a top-level statement, before the `.` and not inside anything
         top = None
         for n, it in enumerate(root.body.items):
@@ -1005,12 +1200,9 @@ class Analyzer:
             return None
         if not (root.body.items[top].k == 'andor' and len(root.body.items[top].parts) <= 2):
             return None
-        # nothing else may write the variable
-        for d in walk(root):
-            if d.k == 'simple' and d.words and any(w_ is not None and (w_ == var or w_.startswith(var + '=') or w_.endswith(' ' + var))
-                                                  for w_ in (word_lit(w) for w in d.words[1:])):
-                return None
-            if d.k == 'for' and getattr(d, 'var', None) == var:
+        # nothing else may write the variable, in this file or in any file that runs in the same shell
+        for g in self.same_shell(fname) | {fname}:
+            if self.writes_var(self.files[g][2], var) != (1 if g == fname else 0):
                 return None
         here = posixpath.dirname(fname)
         for _ in range(up):
@@ -1939,6 +2131,8 @@ class Analyzer:
 
     def run(self):
         self.validate()
+        if self.envelope_on:
+            self.envelope()
         self.compute_helpers()
         self.propagating = set()
         for _ in range(12):
@@ -1953,6 +2147,19 @@ class Analyzer:
         for o in self.occs:
             if o.status == 'OK' and o.label == 'PROP':
                 o.label = 'PROP'
+        if self.envelope_on:
+            for o in self.occs:
+                o.envelope = o.file in self.env_files
+                if o.envelope and o.status != 'BAD':
+                    o.status, o.label = 'BAD', ''
+                    o.why = 'the file is outside the envelope (%s)' % next(w for f, _, _, w in self.env if f == o.file)
+            seq = {}
+            for f, line, rule, why in self.env:
+                seq[f] = seq.get(f, 0) + 1
+                eo = Occ(f, 'ENVELOPE', None, why)
+                eo.status, eo.why, eo.line, eo.envelope = 'BAD', 'ENVELOPE %s: %s' % (rule, why), line, True
+                eo.key = (f, 'envelope-%s' % rule, seq[f])
+                self.occs.append(eo)
         return self.occs
 
 
@@ -1989,6 +2196,8 @@ class Contracts:
     OUT_OPS = ('>', '>>', '>|', '&>', '&>>', '<>')
 
     def check(self, o, e):
+        if o.kind == 'ENVELOPE' or getattr(o, 'envelope', False):
+            return 'the file is outside the envelope: nothing in it can be listed'
         if o.kind == 'DISPATCH':
             return 'a dispatch line cannot be listed: nothing says what it runs, whatever the reason'
         why = self.enclosing(o)
@@ -1997,23 +2206,60 @@ class Contracts:
         fn = getattr(self, 'c_' + e.reason)
         return fn(o, e)
 
+    @staticmethod
+    def file_out(r):
+        """True when the redirection can send output to a file: any output operator but /dev/null, and a duplication onto a
+        descriptor other than 1, 2 or a close (descriptor 3 may be a file, and a computed target is unknown)."""
+        t = word_lit(r.target) if r.target is not None else None
+        if r.op in Contracts.OUT_OPS:
+            return t != '/dev/null'
+        if r.op == '>&':
+            return t not in ('1', '2', '-')
+        return False
+
     def enclosing(self, o):
         """Every reason holds only for the statement as written in its place: nothing around it may send its output to a file,
         make it a stage of a pipeline, or run it in the background. (The entry is bound to the statement's text; this binds it
-        to where the statement sits, so moving it into a redirected group or a pipe voids the entry.)"""
-        n = o.node
+        to where the statement sits, so moving it into a redirected group or a pipe voids the entry.) A statement in a function
+        is where each call of that function puts it; a display reason also needs the shell's own descriptors untouched."""
+        return self.climb(o.node, o.node, 0, False)
+
+    def climb(self, start, self_node, depth, capture):
+        n = start
         while n is not None and n.k not in ('func', 'script'):
             p = n.parent
             if p is None:
                 break
-            if p.k == 'pipe' and len(p.cmds) > 1 and not (n.k == 'simple' and n is o.node):
+            if p.k == 'pipe' and len(p.cmds) > 1 and not (n.k == 'simple' and n is self_node):
                 return 'the statement is a stage of a pipeline: its output may go anywhere'
-            if getattr(n, 'bg', False) and n is not o.node:
+            if getattr(n, 'bg', False) and n is not self_node:
                 return 'the statement runs in the background'
+            if capture and p.k in ('cs', 'ps', 'bt'):
+                return 'the output of this statement is captured by a substitution, not shown'
             for r in getattr(p, 'redirs', None) or ():
-                if r.op in self.OUT_OPS and (r.target is None or word_lit(r.target) != '/dev/null'):
+                if self.file_out(r):
                     return 'an enclosing %s sends its output to a file (%s)' % (p.k, r.op)
             n = p
+        if n is not None and n.k == 'func':
+            return self.call_sites(n, depth, capture)
+        return None
+
+    def call_sites(self, fn, depth, capture):
+        """A function's statements run where it is called: every call must be a plain place (no own redirection, no pipe)."""
+        if depth > 6:
+            return 'functions call each other too deeply to follow'
+        fname = self.an.fname_of(fn)
+        calls = []
+        for g in sorted(self.an.component(fname) | {fname}):
+            for d in walk(self.an.files[g][2]):
+                if d.k == 'simple' and d.words and unwrapped(d)[0] == fn.name and not any(a is fn for a in self.an.ancestors(d)):
+                    calls.append(d)
+        for c in calls:
+            if any(self.file_out(r) for r in c.redirs):
+                return 'a call of %s sends its output to a file' % fn.name
+            why = self.climb(c, None, depth + 1, capture)
+            if why:
+                return why
         return None
 
     def stmt_text(self, o):
@@ -2065,19 +2311,32 @@ class Contracts:
             return 'M cat must send its output to /dev/null'
         return None
 
+    def nearest_cs(self, n):
+        p = n.parent
+        while p is not None and p.k not in ('cs', 'func', 'script'):
+            p = p.parent
+        return p if p is not None and p.k == 'cs' else None
+
     def display_stmt(self, o):
+        """The value is printed by an echo/printf (climbing out of nested substitutions that are arguments). That printing
+        statement must itself sit in a plain place: not captured by a substitution, no redirection to a file, no pipe. The one
+        capture accepted is the stored hint `NAME=$(printf ...)`, a printf that is the whole body of the substitution."""
         sm = self.outer_simple(o)
-        # climb out of nested substitutions to the command that prints them
         while sm is not None:
-            if sm.words and cmd_name(sm) in ('echo', 'printf') and not any(
-                    r.op in ('>', '>>', '>|', '&>', '<', '<>') and word_lit(r.target) != '/dev/null' for r in sm.redirs):
-                return True
-            p = sm.parent
-            while p is not None and p.k != 'cs':
-                p = p.parent
-            if p is None:
+            if sm.words and cmd_name(sm) in ('echo', 'printf') and not any(self.file_out(r) or r.op == '<' for r in sm.redirs):
+                cs = self.nearest_cs(sm)
+                if cs is None:
+                    return self.climb(sm, None, 0, True) is None
+                owner = self.outer_simple_of(cs)
+                if (cmd_name(sm) == 'printf' and len(cs.body.items) == 1 and self.an.single_simple(cs.body.items[0]) is sm
+                        and owner is not None and not owner.words and len(owner.assigns) == 1 and not owner.redirs):
+                    return self.climb(owner, None, 0, False) is None
+                sm = owner
+                continue
+            cs = self.nearest_cs(sm)
+            if cs is None:
                 break
-            sm = self.outer_simple_of(p)
+            sm = self.outer_simple_of(cs)
         return False
 
     def outer_simple_of(self, n):
@@ -2347,18 +2606,47 @@ def duplicate_statements(an):
 
 
 def tree_files(root):
+    """The gate's universe: bin/*.sh and hooks/*.sh. Anything else under bin/ or hooks/ is reported by tree_out, never skipped."""
     out = []
     for d in ('bin', 'hooks'):
         p = os.path.join(root, d)
         if os.path.isdir(p):
             for f in sorted(os.listdir(p)):
-                if f.endswith('.sh'):
+                fp = os.path.join(p, f)
+                if f.endswith('.sh') and os.path.isfile(fp) and not os.path.islink(fp):
                     out.append(os.path.join(d, f))
     return out
 
 
-def analyze_files(root, files):
+def tree_out(root):
+    """Every path under bin/ and hooks/ that is not a plain *.sh file at the top of the folder (subfolder files, extensionless
+    scripts, *.bash, symlinks, anything else): the repo must not grow a script the gate does not see."""
+    out = []
+    for d in ('bin', 'hooks'):
+        p = os.path.join(root, d)
+        if not os.path.isdir(p):
+            continue
+        for dirpath, dirs, names in os.walk(p, followlinks=False):
+            dirs.sort()
+            rel = os.path.relpath(dirpath, root)
+            for n in sorted(names + [x for x in dirs if os.path.islink(os.path.join(dirpath, x))]):
+                fp = os.path.join(dirpath, n)
+                path = os.path.join(rel, n)
+                if os.path.islink(fp):
+                    out.append((path, 'a symlink: the gate reads plain files only'))
+                elif not os.path.isfile(fp):
+                    out.append((path, 'not a plain file'))
+                elif rel != d:
+                    out.append((path, 'a file in a subfolder of %s/ is never read by the gate' % d))
+                elif not n.endswith('.sh'):
+                    out.append((path, 'a file in %s/ that is not *.sh is never read by the gate' % d))
+    return out
+
+
+def analyze_files(root, files, envelope=True):
     an = Analyzer()
+    an.envelope_on = envelope
+    an.out_files = tree_out(root) if envelope else []
     for f in files:
         with open(os.path.join(root, f), encoding='utf-8') as fh:
             an.add(f, fh.read())
@@ -2383,8 +2671,9 @@ def report(an, entries, dead, invalid, ambiguous, verbose=False, tsv=None, out=s
     kinds = {}
     for o in occs:
         kinds[o.kind] = kinds.get(o.kind, 0) + 1
-    out.write('read-gate (report mode): files=%d occurrences=%d classes=%d unlisted=%d listed=%d ok=%d dead=%d invalid=%d ambiguous=%d\n'
-              % (len(an.files), len(occs), len(kinds), len(unlisted), len(listed), len(ok), len(dead), len(invalid), len(ambiguous)))
+    out.write('read-gate (report mode): files=%d occurrences=%d classes=%d unlisted=%d listed=%d ok=%d dead=%d invalid=%d ambiguous=%d%s\n'
+              % (len(an.files), len(occs), len(kinds), len(unlisted), len(listed), len(ok), len(dead), len(invalid), len(ambiguous),
+                 '' if an.envelope_on else ' envelope=off'))
     out.write('  classes: %s\n' % ', '.join('%s=%d' % (k, kinds[k]) for k in sorted(kinds)))
     st = {}
     for o in occs:
@@ -2433,9 +2722,17 @@ def parse_header(text):
     return exp, allows, minocc
 
 
+def fixture_identity(name, text):
+    """A fixture with a `# envelope: bin/x.sh` header is analyzed as that path, with the file envelope on."""
+    m = re.search(r'^#\s*envelope:\s*(\S+)', text, re.M)
+    return (m.group(1), True) if m else (name, False)
+
+
 def bind_entries(name, text, allows):
     """Build allow entries from a fixture's header against its own text (line numbers are the fixture's)."""
+    name, env = fixture_identity(name, text)
     an = Analyzer()
+    an.envelope_on = env
     an.add(name, text)
     an.run()
     out = []
@@ -2451,7 +2748,9 @@ def bind_entries(name, text, allows):
 
 def run_text(name, text, entries=None):
     """Analyze one script text; returns (an, dead, invalid, ambiguous, unlisted)."""
+    name, env = fixture_identity(name, text)
     an = Analyzer()
+    an.envelope_on = env
     an.add(name, text)
     an.run()
     dead, invalid, ambiguous = apply_allow(an, entries or [])
@@ -2565,9 +2864,67 @@ TREE_CASES = {
     'tree_hooks_failing_read': ({'bin/a.sh': ':\n', 'hooks/h.sh': 'x=$(cat "$1")\necho "$x" > out\n'}, 1, 'files=2 occurrences=1'),
     'tree_missing_hooks_dir': ({'bin/a.sh': ':\n'}, 2, 'a whole class'),
     'tree_missing_bin_dir': ({'hooks/h.sh': ':\n'}, 2, 'a whole class'),
+    # a sourced file has no $0 of its own: $0 there names whoever sourced it (here a hook, so the folder is hooks/ and not bin/)
+    'tree_source_dollar0_in_sourced_file': ({'bin/die.sh': LIB, 'hooks/die.sh': ':\n',
+                                             'bin/lib.sh': 'H2=$(dirname "$0") || exit 1\n. "$H2/die.sh" || exit 1\n',
+                                             'hooks/h.sh': 'HERE=$(dirname "$0") || exit 1\n. "$HERE/../bin/lib.sh" || exit 1\n'
+                                             'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}, 1, 'cannot resolve'),
+    # a sourced file shares the sourcer's variables: lib.sh moves HERE before the second `.`
+    'tree_source_sourced_file_reassigns_here': ({'bin/die.sh': LIB, 'hooks/die.sh': ':\n', 'bin/lib.sh': 'HERE=$HERE/../hooks\n',
+                                                 'bin/b.sh': 'HERE=$(dirname "$0") || exit 1\n. "$HERE/lib.sh" || exit 1\n. "$HERE/die.sh" || exit 1\n'
+                                                 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}, 1, 'cannot resolve'),
     'tree_crossfile_unsourced_helper': ({'bin/a.sh': LIB + 'echo lib\n', 'bin/b.sh': '#!/usr/bin/env bash\nF=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n',
                                          'hooks/h.sh': '#!/usr/bin/env bash\necho hi\n'}, 1, 'falls back'),
 }
+
+
+# The file envelope (envelope on): a tree that is written in the forms the tree uses today shows no ENVELOPE row; each case below
+# changes one thing. A diagnostic that starts with "!" must be ABSENT from the output (the controls).
+CH = 'HERE="$(cd "$(dirname "$0")" && pwd)"\n'
+ENV_COMMON = '#!/usr/bin/env bash\nWR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\ndie() { echo "$1" >&2; exit 1; }\n'
+ENV_ENTRY = '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n'
+ENV_HOOK = '#!/usr/bin/env bash\n' + CH + '. "$HERE/../bin/_common.sh" || exit 1\n'
+ENV_BASE = {'bin/_common.sh': ENV_COMMON, 'bin/a.sh': ENV_ENTRY, 'hooks/h.sh': ENV_HOOK}
+
+
+def env_tree(**changes):
+    files = dict(ENV_BASE)
+    files.update(changes)
+    return files
+
+
+TREE_CASES.update({
+    'env_control_canonical_forms': (env_tree(), 1, '!ENVELOPE'),
+    'env_out_extensionless_bin': (env_tree(**{'bin/warroom': ':\n'}), 1, 'not *.sh is never read'),
+    'env_out_subfolder_bin': (env_tree(**{'bin/lib/x.sh': ':\n'}), 1, 'subfolder of bin/'),
+    'env_out_bash_extension_hooks': (env_tree(**{'hooks/h2.bash': ':\n'}), 1, 'not *.sh is never read'),
+    'env_out_symlink_in_bin': (env_tree(**{'bin/ln.sh': ('link', 'a.sh')}), 1, 'a symlink'),
+    'env_out_dangling_symlink': (env_tree(**{'bin/ln.sh': ('link', 'nowhere.sh')}), 1, 'a symlink'),
+    'env_out_library_in_hooks': (env_tree(**{'hooks/_x.sh': ':\n'}), 1, 'lives in bin/ only'),
+    'env_entry_without_here': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n:\n'}), 1, 'sets HERE exactly once'),
+    'env_entry_here_twice': (env_tree(**{'bin/a.sh': ENV_ENTRY + 'HERE=/x\n'}), 1, 'sets HERE exactly once'),
+    'env_entry_here_other_form': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\nHERE=$(dirname "$0")\n. "$HERE/_common.sh" || exit 1\n'}),
+                                  1, 'sets HERE exactly once'),
+    'env_entry_here_not_top_level': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\nf() {\n' + CH + '}\nf\n. "$HERE/_common.sh" || exit 1\n'}),
+                                     1, 'sets HERE exactly once'),
+    'env_library_sets_here': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'HERE=/x\n'}), 1, 'never sets HERE'),
+    'env_library_names_itself': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'x=$(dirname "$0")\n'}), 1, 'never names itself'),
+    'env_library_names_itself_bash_source': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'x=${BASH_SOURCE[0]}\n'}), 1, 'never names itself'),
+    'env_entry_sets_wr_root': (env_tree(**{'bin/a.sh': ENV_ENTRY + 'WR_ROOT=/x\n'}), 1, 'only the library sets WR_ROOT'),
+    'env_source_keyword': (env_tree(**{'bin/a.sh': ENV_ENTRY + 'source "$HERE/_common.sh" || exit 1\n'}), 1, 'only the dot form'),
+    'env_source_hook_form_in_bin': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/../bin/_common.sh" || exit 1\n'}),
+                                    1, 'one of three exact forms'),
+    'env_source_not_a_library': (env_tree(**{'bin/b.sh': ':\n', 'bin/a.sh': ENV_ENTRY + '. "$HERE/b.sh" || exit 1\n'}), 1, 'one of three exact forms'),
+    'env_source_missing_library': (env_tree(**{'bin/a.sh': ENV_ENTRY + '. "$HERE/_nope.sh" || exit 1\n'}), 1, 'not one of the scanned files'),
+    'env_control_command_v_and_literal_trap': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'command -v python3 >/dev/null || exit 1\n'
+                                                           "trap 'rm -f x' EXIT\n"}), 1, '!ENVELOPE E4'),
+    'env_control_runner_and_sibling': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                                   'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/a.sh" check\n'}), 1, '!ENVELOPE E4'),
+    'env_control_high_descriptors': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 9>>"$WR_ROOT/x.lock"\nexec 8>&-\nexec 9>&-\n'}), 1, '!ENVELOPE E3'),
+    'env_runner_in_another_function': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'other() { "$@"; }\n'}), 1, 'computed command word'),
+    'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
+    'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
+})
 
 
 def run_tree(me, tmpd, name):
@@ -2583,10 +2940,18 @@ def run_tree(me, tmpd, name):
     for rel, text in files.items():
         path = os.path.join(root, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        if isinstance(text, tuple):         # ('link', target): a symlink, possibly dangling
+            os.symlink(text[1], path)
+            continue
         with open(path, 'w', encoding='utf-8') as fh:
             fh.write(text)
-    return subprocess.run([sys.executable, '-I', me, '--enforce', '--root', root, '--allow', os.path.join(root, 'none')],
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    cmd = [sys.executable, '-I', me, '--enforce', '--root', root, '--allow', os.path.join(root, 'none')]
+    env = dict(os.environ)
+    if not name.startswith('env_'):
+        # the statement-level trees test the judgments themselves; the env_ trees test the file envelope in front of them
+        cmd.append('--no-envelope')
+        env['READ_GATE_SELF_TEST'] = '1'
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, env=env)
 
 
 # Mutants of this file: take a check out, and the fixture that pins it must stop failing. (name, old text, new text, fixture)
@@ -2622,11 +2987,11 @@ CODE_MUTANTS = [
     # no reason code can list a dispatch line
     ('code-f9-dispatch-never-listed', "if o.kind == 'DISPATCH':\n            return 'a dispatch line cannot be listed: nothing says what it runs, whatever the reason'\n        why = self.enclosing(o)", "why = self.enclosing(o)", 'neg_allow_dispatch_reason_D.sh', 'cannot be listed'),
     # discovery: both script folders must hold scripts, and a failing hook is in the inventory
-    ('code-b5-hooks-class-scanned', "for d in ('bin', 'hooks'):\n        p = os.path.join(root, d)", "for d in ('bin',):\n        p = os.path.join(root, d)", 'tree:tree_hooks_failing_read', 'files=2'),
+    ('code-b5-hooks-class-scanned', "is reported by tree_out, never skipped.\"\"\"\n    out = []\n    for d in ('bin', 'hooks'):", "is reported by tree_out, never skipped.\"\"\"\n    out = []\n    for d in ('bin',):", 'tree:tree_hooks_failing_read', 'files=2'),
     ('code-fix7-missing-class-is-an-error', "if missing:\n            print('read-gate: no scripts found under %s/%s", "if False:\n            print('read-gate: no scripts found under %s/%s", 'tree:tree_missing_hooks_dir'),
     # an allow entry holds only where its statement sits: not inside a redirected group, not as a pipeline stage, not in the background
-    ('code-b4-entry-bound-to-context', "why = self.enclosing(o)\n        if why:\n            return why", "why = None\n        if why:\n            return why", 'neg_allow_d_in_redirected_group.sh'),
-    ('code-b4-entry-not-a-pipeline-stage', "if p.k == 'pipe' and len(p.cmds) > 1 and not (n.k == 'simple' and n is o.node):", "if False:", 'neg_allow_d_piped_to_file.sh'),
+    ('code-b4-entry-bound-to-context', "why = self.enclosing(o)\n        if why:\n            return why", "why = None\n        if why:\n            return why", 'neg_allow_k_in_redirected_group.sh'),
+    ('code-b4-entry-not-a-pipeline-stage', "if p.k == 'pipe' and len(p.cmds) > 1 and not (n.k == 'simple' and n is self_node):", "if False:", 'neg_allow_k_piped.sh', 'is a stage of a pipeline: its output'),
     # pipefail is proven at the read: nothing between the `set -o pipefail` and the pipeline may switch it off
     ('code-b3-pipefail-proven-at-read', "eff = self.opt_effect(it)", "eff = {True: 'on', False: 'off', None: None}[self.set_stmt(it)]", 'neg_pipefail_off_in_if.sh'),
     # the saved status is tested by a condition that is exactly one `[ ]` test
@@ -2666,6 +3031,51 @@ CODE_MUTANTS = [
     ('code-no-background-call-check', "if getattr(n, 'bg', False):\n                return 'bg'", "if False:\n                return 'bg'", 'neg_func_called_in_background.sh'),
     ('code-no-pipe-stage-call-check', "if kind == 'pipe' and name not in self.propagating:", 'if False:', 'neg_func_pipe_stage_unchecked.sh'),
     ('code-return-refusal-propagates', "return self.ok('REFUSE', func=self.returned_from(rhs))", "return self.ok('REFUSE')", 'neg_allow_return_in_function_called_unchecked.sh'),
+    # the file envelope (E1 discovery, E2 sourcing and folder variables, E3 exec, E4 words that run anything)
+    ('code-e1-subfolder', "elif rel != d:\n                    out.append", "elif False:\n                    out.append", 'tree:env_out_subfolder_bin', 'subfolder of bin/'),
+    ('code-e1-not-sh', "elif not n.endswith('.sh'):\n                    out.append", "elif False:\n                    out.append", 'tree:env_out_extensionless_bin', 'not *.sh is never read'),
+    ('code-e1-symlink', "if os.path.islink(fp):\n                    out.append", "if False:\n                    out.append", 'tree:env_out_symlink_in_bin', 'a symlink'),
+    ('code-e1-library-folder', "if lib and folder != 'bin':", "if False:", 'tree:env_out_library_in_hooks', 'lives in bin/ only'),
+    ('code-e2-library-sets-here', "if self.writes_var(root, 'HERE'):\n                    bad(f, None, 'E2', 'a sourced file never sets HERE')",
+     "if False:\n                    bad(f, None, 'E2', 'a sourced file never sets HERE')", 'tree:env_library_sets_here', 'never sets HERE'),
+    ('code-e2-library-names-itself', "if not inside:", "if False:", 'tree:env_library_names_itself', 'never names itself'),
+    ('code-e2-entry-sets-wr-root', "if self.writes_var(root, 'WR_ROOT'):\n                    bad(f, None, 'E2', 'only the library sets WR_ROOT')",
+     "if False:\n                    bad(f, None, 'E2', 'only the library sets WR_ROOT')", 'tree:env_entry_sets_wr_root', 'only the library sets WR_ROOT'),
+    ('code-e2-entry-here-once', "if not ok_here:", "if False:", 'tree:env_entry_without_here', 'sets HERE exactly once'),
+    ('code-e2-entry-here-count', "len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1 and len(top) == 1", "len(top) >= 1",
+     'tree:env_entry_here_twice', 'sets HERE exactly once'),
+    ('code-e2-entry-here-canonical', "== self.CANON_HERE)", "!= '')", 'tree:env_entry_here_other_form', 'sets HERE exactly once'),
+    ('code-e2-entry-here-top-level', "and len(top) == 1\n", "\n", 'tree:env_entry_here_not_top_level', 'sets HERE exactly once'),
+    ('code-e2-source-keyword', "if name == 'source':\n                    bad(", "if False:\n                    bad(", 'tree:env_source_keyword', 'only the dot form'),
+    ('code-e2-source-entry-bin-form', "m = self.RE_SRC_ENTRY_BIN.match(text0)", "m = self.RE_SRC_ENTRY_BIN.match(text0) or self.RE_SRC_ENTRY_HOOK.match(text0)",
+     'tree:env_source_hook_form_in_bin', 'one of three exact forms'),
+    ('code-e2-source-entry-names-a-library', r"""RE_SRC_ENTRY_BIN = re.compile(r'^"\$HERE/(_[A-Za-z0-9_]+)\.sh"$')""",
+     r"""RE_SRC_ENTRY_BIN = re.compile(r'^"\$HERE/([A-Za-z0-9_]+)\.sh"$')""", 'tree:env_source_not_a_library', 'one of three exact forms'),
+    ('code-e2-source-library-form', r"""RE_SRC_LIB = re.compile(r'^"\$WR_ROOT/bin/(_[A-Za-z0-9_]+)\.sh"$')""",
+     r"""RE_SRC_LIB = re.compile(r'^".*/(_[A-Za-z0-9_]+)\.sh"$')""", 'tree:env_source_computed_in_library', 'one of three exact forms'),
+    ('code-e2-source-must-be-scanned', "elif 'bin/%s.sh' % m.group(1) not in self.files:", "elif False:", 'tree:env_source_missing_library', 'not one of the scanned files'),
+    ('code-e3-exec-runs-command', "if len(nd.words) != 1:\n                        bad(f, nd, 'E3'", "if False:\n                        bad(f, nd, 'E3'",
+     'neg_envelope_exec_runs_command.sh', 'never runs a command'),
+    ('code-e3-exec-low-descriptors', "fd_ok = r.fd.isdigit() and int(r.fd) >= 3", "fd_ok = True", 'neg_envelope_exec_stdout.sh', 'never duplicates onto 1 or 2'),
+    ('code-e3-exec-dup-onto-low', "dup_ok = r.op not in ('>&', '<&') or (", "dup_ok = True or (", 'neg_envelope_exec_dup_stderr.sh', 'never duplicates onto 1 or 2'),
+    ('code-e4-eval', "elif name == 'eval':\n                    bad(", "elif False:\n                    bad(", 'neg_envelope_eval.sh', 'ENVELOPE E4: eval'),
+    ('code-e4-command-builtin', "elif name in ('command', 'builtin') or cmd_name(nd) in ('command', 'builtin'):", "elif False:",
+     'neg_envelope_command_wrapper.sh', 'command and builtin wrappers'),
+    ('code-e4-trap-computed', "if not args or any(a is None for a in args):", "if False:", 'neg_envelope_trap_computed.sh', 'literal action'),
+    ('code-e4-computed-word', """if not (w0 == '"$@"' and fn is not None and (f, fn.name) in self.ENV_RUNNERS):""", "if False:",
+     'neg_envelope_computed_word.sh', 'computed command word'),
+    ('code-e4-runner-listed', "and (f, fn.name) in self.ENV_RUNNERS):", "):", 'tree:env_runner_in_another_function', 'computed command word'),
+    ('code-e4-sibling-scanned', "if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:", "if sib:", 'tree:env_sibling_not_scanned', 'computed command word'),
+    # source identity and call-site context
+    ('code-src-dollar0-names-the-sourcer', """if '"$0"' in key and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):""",
+     "if False:", 'tree:tree_source_dollar0_in_sourced_file'),
+    ('code-src-sourced-file-writes-the-variable', "if self.writes_var(self.files[g][2], var) != (1 if g == fname else 0):", "if False:",
+     'tree:tree_source_sourced_file_reassigns_here'),
+    ('code-ctx-call-with-redirect', "if any(self.file_out(r) for r in c.redirs):\n                return 'a call of %s sends its output to a file' % fn.name",
+     "if False:\n                return 'a call of %s sends its output to a file' % fn.name", 'neg_allow_d_function_called_with_redirect.sh'),
+    ('code-ctx-group-to-descriptor', "return t not in ('1', '2', '-')", "return False", 'neg_allow_d_group_to_file_descriptor.sh'),
+    ('code-ctx-captured-value', "if capture and p.k in ('cs', 'ps', 'bt'):", "if False:", 'neg_allow_d_function_captured.sh', 'must be printed by echo or printf'),
+    ('code-env-voids-entries', "if o.kind == 'ENVELOPE' or getattr(o, 'envelope', False):", "if False:", 'neg_allow_d_after_exec_redirect.sh', 'outside the envelope'),
 ]
 
 
@@ -2761,7 +3171,10 @@ def self_test(here):
         for tname, (_, want_rc, want_diag) in sorted(TREE_CASES.items()):
             pr = run_tree(me, tdir, tname)
             check(tname, pr.returncode == want_rc, 'expected exit %d, got %d: %s' % (want_rc, pr.returncode, pr.stdout.strip()[:200]))
-            if want_diag:
+            if want_diag.startswith('!'):
+                check(tname + ' (no %r in the output)' % want_diag[1:], want_diag[1:] not in pr.stdout,
+                      'unexpected: %s' % pr.stdout.strip()[:300])
+            elif want_diag:
                 check(tname + ' (diagnostic %r)' % want_diag, want_diag in pr.stdout.lower() or want_diag in pr.stdout,
                       'diagnostic missing from: %s' % pr.stdout.strip()[:300])
     finally:
@@ -2822,8 +3235,12 @@ def main(argv):
     ap.add_argument('--tsv', help='write every occurrence to this file')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--propose', action='store_true', help='print allow-file lines that a reason contract accepts')
+    ap.add_argument('--no-envelope', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--fixture', help='analyze one fixture file; its "# allow:" header lines name the entries')
     a = ap.parse_args(argv)
+    if a.no_envelope and os.environ.get('READ_GATE_SELF_TEST') != '1':
+        print('read-gate: --no-envelope exists for the self-test only; the file envelope is part of the gate')
+        return 2
     try:
         if a.self_test:
             return self_test(here)
@@ -2844,7 +3261,7 @@ def main(argv):
         if missing:
             print('read-gate: no scripts found under %s/%s: a whole class of scripts would go unread' % (a.root, ' or '.join(missing)))
             return 2
-        an = analyze_files(a.root, files)
+        an = analyze_files(a.root, files, envelope=not a.no_envelope)
         if a.propose:
             for ln in propose(an):
                 print(ln)
