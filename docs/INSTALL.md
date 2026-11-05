@@ -1,5 +1,5 @@
 # Install by hand
-
+You need git, bash, python3 and Claude Code, signed in. `gh` is needed only for `pr-watch.sh`, which you can leave for later.
 Five steps, run from the clone. There is no settings installer; add the hook entries by hand after saving a copy, and keep the run directory and board away from your settings files.
 1. **Config.** Copy the example and edit the seats, run directory and board name. It is read as data, never run. An existing `~/.warroom/warroom.env` is kept as it is: edit it instead.
 ```
