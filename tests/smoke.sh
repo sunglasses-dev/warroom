@@ -1583,7 +1583,9 @@ rg_stage() {    # $1 gate script, $2 tree root; prints one "ok" or "FAIL" line p
   else
     bad "read gate self-test (rc $rc, no summary line?): $(printf '%s\n' "$out" | head -8)"
   fi
-  want=$(ls "$root"/bin/*.sh "$root"/hooks/*.sh 2>/dev/null | wc -l | tr -d ' ')
+  # every file under bin/ and hooks/, found without the gate's own glob: a script the gate does not read (no .sh, a subfolder, a link)
+  # makes the counts differ, and the inventory stage fails
+  want=$(find "$root/bin" "$root/hooks" \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')
   out=$(python3 -I "$gate" --root "$root" 2>&1); rc=$?
   if [ "$rc" = 0 ] && [ "$want" != 0 ] && printf '%s\n' "$out" | head -1 | grep -Eq "^read-gate \(report mode\): files=$want occurrences=[1-9][0-9]* "; then
     ok "read gate inventory (report only): $(printf '%s\n' "$out" | head -1)"
