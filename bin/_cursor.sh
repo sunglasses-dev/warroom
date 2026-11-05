@@ -35,7 +35,17 @@ wr_prefixsum() {
 # the status is 1 when the read or the checksum fails
 wr_linesum() {
   case "$2" in ''|*[!0-9]*) echo 0; return 0 ;; esac
-  if [ "$2" -gt 0 ]; then ( set -o pipefail; sed -n "${2}p;${2}q" "$1" 2>/dev/null | wr_sum ); else echo 0; fi
+  [ "$2" -gt 0 ] || { echo 0; return 0; }
+  _ls=$( set -o pipefail; sed -n "${2}p;${2}q" "$1" 2>/dev/null | wr_sum ) || return 1
+  [ -n "$_ls" ] || return 1
+  echo "$_ls"
+}
+# wr_lines FILE — the number of lines in FILE; nothing is printed and the status is 1 when the count fails or is not a number
+# (a failed count is "cannot read", never "the board is empty" or "the board changed")
+wr_lines() {
+  _wl=$( set -o pipefail; wc -l < "$1" 2>/dev/null | tr -d ' ' ) || return 1
+  case "$_wl" in ''|*[!0-9]*) return 1 ;; esac
+  echo "$_wl"
 }
 # wr_cursor_get CURSOR_FILE BOARD MAX_AGE_SECONDS
 #   prints the line to resume from; 0 when the board was replaced, shrank or changed in the part already read (all of it
@@ -50,7 +60,7 @@ wr_cursor_get() {
   [ $(( $(date +%s) - _t )) -le "${3:-86400}" ] || { echo none; return; }
   _cg=$(wr_generation "$2") || return 1
   if [ "$_g" = "$_cg" ]; then
-    _n=$(wc -l < "$2" | tr -d ' ')
+    _n=$(wr_lines "$2") || return 1
     if [ "$_l" -le "$_n" ]; then
       if [ "$_l" -eq 0 ] || [ -z "$_s" ]; then echo "$_l"; return; fi     # nothing read yet, or a cursor without SUM (accepted once)
       case "$_s" in

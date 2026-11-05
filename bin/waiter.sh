@@ -50,7 +50,7 @@ if [ "$SEAT" != NONE ]; then
   done < <(awk -F'\t' -v s="$SID" -v seat="$SEAT" 'BEGIN{OFS="\t"} $2==seat && $1!=s {print $3, ($5==""?"-":$5), NF}' "$REG")
   # the position first: it only repeats what the next arm would compute, so a failed registry write after it changes nothing
   gen=$(wr_generation "$BOARD_FILE") || armfail "could not read the board $BOARD_FILE: not armed"
-  base=$(wc -l < "$BOARD_FILE" | tr -d ' ')
+  base=$(wr_lines "$BOARD_FILE") || armfail "could not count the lines of the board $BOARD_FILE: not armed"
   c=$(wr_cursor_get "$CUR" "$BOARD_FILE" "$AGE") || armfail "could not checksum the board $BOARD_FILE: not armed"
   [ "$c" = none ] || base=$c
   lastck=$(wr_prefixsum "$BOARD_FILE" "$base") || armfail "could not checksum the board $BOARD_FILE: not armed"
@@ -91,7 +91,7 @@ while :; do
   mine || replaced
   "$HERE/pids.sh" check >/dev/null || true      # stdout dropped, stderr kept: a ledger lock failure is shown
   g2=$(wr_generation "$BOARD_FILE") || { echo "[WAITER] could not read the board $BOARD_FILE; nothing consumed, will look again" >&2; continue; }
-  n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
+  n=$(wr_lines "$BOARD_FILE") || { echo "[WAITER] could not count the lines of the board $BOARD_FILE; nothing consumed, will look again" >&2; continue; }
   # board replaced, shorter, or changed anywhere in the part already read: read it from the start. A sum that cannot be
   # computed consumes nothing: the checkpoint stays and the next poll tries again.
   pk=""; if [ "$base" -gt 0 ]; then pk=$(wr_prefixsum "$BOARD_FILE" "$base") || { echo "[WAITER] could not checksum the board in $W; nothing consumed, will look again" >&2; continue; }; fi

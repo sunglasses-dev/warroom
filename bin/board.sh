@@ -14,7 +14,7 @@ case "$cmd" in
     seat=${2:-}; text=${3:-}
     [ -n "$seat" ] && [ -n "$text" ] || { echo "usage: board.sh post SEAT \"text\"" >&2; exit 2; }
     if ! wr_seat_ok "$seat" && [ "$seat" != GUARD ]; then echo "unknown seat '$seat' (seats: $SEATS)" >&2; exit 2; fi
-    n=$(printf '%s\n' "$text" | wc -l | tr -d ' ')
+    n=$(printf '%s\n' "$text" | wr_lines /dev/stdin) || { echo "could not count the lines of the post: nothing posted" >&2; exit 1; }
     if [ "$n" -gt 10 ] && [ "${WARROOM_LONG:-0}" != 1 ]; then echo "post is $n lines; the limit is 10 (WARROOM_LONG=1 to override)" >&2; exit 2; fi
     first=1; out=""
     while IFS= read -r line || [ -n "$line" ]; do
@@ -29,7 +29,7 @@ EOT
     wr_seat_arg "$seat"; a="$W/.anchor-$seat"          # a seat becomes part of a path: it must be in SEATS before any lock or file
     wr_lock "$a" || { echo "could not lock the anchor for $seat" >&2; exit 1; }     # two tails never write an older line over a newer one
     g=$(wr_generation "$BOARD_FILE") || { echo "could not read the board $BOARD_FILE: nothing marked as read" >&2; wr_unlock "$a"; exit 1; }
-    n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
+    n=$(wr_lines "$BOARD_FILE") || { echo "could not count the lines of the board $BOARD_FILE: nothing marked as read" >&2; wr_unlock "$a"; exit 1; }
     last=$(wr_cursor_get "$a" "$BOARD_FILE" 31536000) || { echo "could not checksum the board $BOARD_FILE: nothing marked as read" >&2; wr_unlock "$a"; exit 1; }
     [ "$last" = none ] && last=0
     # print what is new; the anchor remembers where, and a checksum of everything, it read. The two scratch files are temps

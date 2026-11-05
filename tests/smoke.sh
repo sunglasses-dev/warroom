@@ -1351,6 +1351,74 @@ pa_run_fx fx_f9e "F9: a failed checksum of the post line in board-guard posts no
 pa_run_fx fx_f1a "F1: a failed registry rewrite (only that awk call) exits 1 with the registry diagnostic, registry byte-equal, no temp left"
 pa_run_fx fx_f1b "F1: a failed arm-time prefix checksum (no cursor yet) exits 1 with the checksum diagnostic, no cursor saved, registry byte-equal"
 pa_run_fx fx_f1c "F1: a failed generation checksum in board.sh tail exits 1 with the generation diagnostic and saves no anchor"
+pa_wc() { # wc shim: while $PAW/wcfault holds N, the Nth `wc -l` of the run fails ("all": every one) and leaves a line in wcfault.hit
+  mkdir -p "$PAW/shim"; _wcb=$(command -v wc)
+  cat > "$PAW/shim/wc" <<SHIM
+#!/bin/sh
+f="$PAW/wcfault"
+if [ -f "\$f" ] && [ "\$1" = -l ]; then
+  k=\$(cat "\$f"); c=\$(cat "\$f.cnt" 2>/dev/null || echo 0); c=\$((c+1)); echo "\$c" > "\$f.cnt"
+  if [ "\$k" = all ] || [ "\$k" = "\$c" ]; then echo hit >> "\$f.hit"; echo "shim: wc refused" >&2; exit 1; fi
+fi
+exec $_wcb "\$@"
+SHIM
+  chmod +x "$PAW/shim/wc"
+}
+pa_wcset() { rm -f "$PAW/wcfault.cnt" "$PAW/wcfault.hit"; printf '%s\n' "$1" > "$PAW/wcfault"; }
+pa_wcoff() { rm -f "$PAW/wcfault" "$PAW/wcfault.cnt"; }
+pa_wchit() { [ -s "$PAW/wcfault.hit" ]; }
+fx_w1() { # board.sh tail: the line count fails (call 1 board.sh, call 2 the cursor check): exit 1 with that call's diagnostic, nothing printed, anchor byte-equal, the retry shows the line
+  pa_b2; pa_wc; pa_run WARROOM_DIR="$PW" "$PB/board.sh" tail BOSS >/dev/null; printf '[00:00 · W1] fresh w1\n' >> "$PW/board.md"; _a0=$(cksum < "$PW/.anchor-BOSS")
+  for _c in 1 2; do
+    pa_wcset $_c; _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" tail BOSS 2>"$PAW/e"); _r=$?; pa_wcoff
+    if [ $_c = 1 ]; then _want="could not count the lines of the board"; else _want="could not checksum the board"; fi
+    { [ "$_r" = 1 ] && [ -z "$_o" ] && pa_wchit && grep -q "$_want" "$PAW/e" && [ "$(cksum < "$PW/.anchor-BOSS")" = "$_a0" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="W1 (wc call $_c): rc $_r, out '$_o', hit $(pa_wchit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+  done
+  _o=$(pa_run WARROOM_DIR="$PW" "$PB/board.sh" tail BOSS)
+  case "$_o" in *"fresh w1"*) ;; *) PA_WHY="W1: the retry does not show the new line"; return 1 ;; esac
+  case "$_o" in *"three words here"*) PA_WHY="W1: the retry printed the whole board"; return 1 ;; esac
+}
+fx_w2() { # board-tail.sh (the prompt hook): the line count fails (call 1 the hook, call 2 the cursor check): no count shown, the diagnostic of that call
+  pa_b2; pa_wc; pa_run WARROOM_DIR="$PW" "$PB/board.sh" tail BOSS >/dev/null; printf 'sid-w2\tBOSS\t1\t00:00\n' > "$PW/seats.tsv"; printf '[00:00 · W1] @BOSS fresh w2\n' >> "$PW/board.md"
+  for _c in 1 2; do
+    pa_wcset $_c; _o=$(printf '{"session_id":"sid-w2"}' | pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash "$PHK/board-tail.sh" 2>"$PAW/e"); pa_wcoff
+    if [ $_c = 1 ]; then _want="could not count the lines of the board"; else _want="could not checksum the board"; fi
+    { [ -z "$_o" ] && pa_wchit && grep -q "$_want" "$PAW/e"; } || { PA_WHY="W2 (wc call $_c): out '$_o', hit $(pa_wchit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+  done
+}
+fx_w3() { # waiter arm: the line count fails (call 1 the arm, call 2 the cursor check of a saved cursor): exit 1 'not armed', registry and cursor byte-equal
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; pa_wc; rm -f "$PW/seats.tsv"
+  pa_run WARROOM_DIR="$PW" "$PB/waiter.sh" W1 sid-w3a >/dev/null 2>&1 & _wp=$!; sleep 2; kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-w3a" 2>/dev/null; sleep 1
+  [ -s "$PW/.cursor-W1" ] || { PA_WHY="W3: the first arm saved no cursor"; return 1; }
+  _s0=$(cksum < "$PW/seats.tsv"); _c0=$(cksum < "$PW/.cursor-W1")
+  for _c in 1 2; do
+    pa_wcset $_c; pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-w3b$_c >/dev/null 2>"$PAW/e" & _wp=$!
+    wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-w3b$_c" 2>/dev/null; pa_wcoff; PA_WHY="W3 (wc call $_c): the waiter armed although the count failed"; return 1; }; wait $_wp 2>/dev/null; _r=$?; pa_wcoff
+    if [ $_c = 1 ]; then _want="could not count the lines of the board"; else _want="could not checksum the board"; fi
+    { [ "$_r" = 1 ] && pa_wchit && grep -q "$_want" "$PAW/e" && grep -q "not armed" "$PAW/e"; } || { PA_WHY="W3 (wc call $_c): rc $_r, hit $(pa_wchit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+    { [ "$(cksum < "$PW/seats.tsv")" = "$_s0" ] && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ]; } || { PA_WHY="W3 (wc call $_c): the registry or the cursor changed"; return 1; }
+  done
+}
+fx_w4() { # waiter poll: the line count fails on every poll while the fault stands: the waiter stays up, says so, consumes nothing, and delivers the line once the fault is gone
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; pa_wc; rm -f "$PW/seats.tsv"
+  pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-w4 > "$PAW/o" 2>"$PAW/e" & _wp=$!; sleep 2
+  pa_wcset all; pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: w4 line" >/dev/null; sleep 3
+  _alive=0; pkill -0 -f "waiter.sh W1 sid-w4" 2>/dev/null && _alive=1; pa_wcoff
+  wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-w4" 2>/dev/null; PA_WHY="W4: the line was not delivered after the fault ended"; return 1; }; wait $_wp 2>/dev/null
+  { [ $_alive = 1 ] && grep -q "could not count the lines of the board" "$PAW/e" && grep -q "nothing consumed" "$PAW/e" && grep -q "w4 line" "$PAW/o"; } || { PA_WHY="W4: alive $_alive, err '$(cat "$PAW/e")', out '$(cat "$PAW/o")'"; return 1; }
+}
+fx_w5() { # board.sh post: the line count of the text fails: exit 1, nothing posted (the 10-line limit is not skipped)
+  pa_b2; pa_wc; _b0=$(cksum < "$PW/board.md"); pa_wcset all
+  pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" post BOSS "w5 line" >/dev/null 2>"$PAW/e"; _r=$?; pa_wcoff
+  { [ "$_r" = 1 ] && pa_wchit && grep -q "could not count the lines of the post" "$PAW/e" && [ "$(cksum < "$PW/board.md")" = "$_b0" ]; } || { PA_WHY="W5: rc $_r, hit $(pa_wchit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
+}
+pa_run_fx fx_w1 "wc: a failed line count in board.sh tail (its own, or inside the cursor check) prints nothing, exits 1 with that call's diagnostic, keeps the anchor"
+pa_run_fx fx_w2 "wc: a failed line count in the prompt hook (its own, or inside the cursor check) shows no count and says which"
+pa_run_fx fx_w3 "wc: a failed line count while arming (its own, or inside the cursor check) exits 1 'not armed', registry and cursor byte-equal"
+pa_run_fx fx_w4 "wc: a failed line count in the waiter poll consumes nothing (stays up, says so) and the line is delivered when the fault ends"
+pa_run_fx fx_w5 "wc: a failed line count of a post's text exits 1 and posts nothing"
 # --- B mutants ---
 if [ "$PS_OK" = 1 ]; then
 pa_mcopy touchlast; pa_msed touchlast bin/waiter.sh 's|if ! { wr_stamp "\$LAST" \&\& {|if ! { touch "$LAST" \&\& {|'
@@ -1378,7 +1446,7 @@ pa_mcopy f9line; pa_msed f9line bin/_cursor.sh 's/\(_cs=\$(wr_linesum "\$2" "\$_
 [ "$(grep -c '_cs=\$(wr_linesum "\$2" "\$_l") ;;' "$MA/f9line/bin/_cursor.sh")" = 1 ] && pa_mut f9line fx_f9b || bad "mutant f9line: the change was not applied"
 pa_mcopy f9gen; pa_msed f9gen bin/_cursor.sh 's/\(_cg=\$(wr_generation "\$2")\) || return 1/\1/'
 [ "$(grep -c '^  _cg=\$(wr_generation "\$2")$' "$MA/f9gen/bin/_cursor.sh")" = 1 ] && pa_mut f9gen fx_f9c || bad "mutant f9gen: the change was not applied"
-pa_mcopy f9hook; pa_msed f9hook hooks/board-tail.sh 's/^\(n=.*; last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
+pa_mcopy f9hook; pa_msed f9hook hooks/board-tail.sh 's/^\(last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9hook/hooks/board-tail.sh")" = 1 ] && pa_mut f9hook fx_f9c || bad "mutant f9hook: the change was not applied"
 pa_mcopy f9guard; pa_msed f9guard hooks/board-guard.sh 's/^\(  lsum=.*wr_sum)\) || {.*$/\1 || true/'
 [ "$(grep -c '^  lsum=.*wr_sum) || true$' "$MA/f9guard/hooks/board-guard.sh")" = 1 ] && pa_mut f9guard fx_f9e || bad "mutant f9guard: the change was not applied"
@@ -1392,6 +1460,22 @@ pa_mcopy f1reg; pa_msed f1reg bin/waiter.sh 's/ || armfail "could not write the 
 pa_mcopy f1arm; pa_msed f1arm bin/waiter.sh 's/^\(  lastck=.*\) || armfail "could not checksum the board \$BOARD_FILE: not armed"$/\1/'
 [ "$(grep -c '^  lastck=.*armfail' "$MA/f1arm/bin/waiter.sh")" = 0 ] && [ "$(grep -c '^  lastck=' "$MA/f1arm/bin/waiter.sh")" = 1 ] && pa_mut f1arm fx_f1b || bad "mutant f1arm: the change was not applied"
 else echo "skip mutants f9arm, f1reg, f1arm (ps cannot read process start times here, so a waiter cannot arm)"; fi
+
+# --- line-count mutants ---
+pa_mcopy wcursor; pa_msed wcursor bin/_cursor.sh 's/\(_n=\$(wr_lines "\$2")\) || return 1/\1/'
+[ "$(grep -c '^    _n=\$(wr_lines "\$2")$' "$MA/wcursor/bin/_cursor.sh")" = 1 ] && pa_mut wcursor fx_w1 || bad "mutant wcursor: the change was not applied"
+pa_mcopy wtail; pa_msed wtail bin/board.sh 's/^\(    n=\$(wr_lines "\$BOARD_FILE")\) || {.*$/\1 || true/'
+[ "$(grep -c '^    n=\$(wr_lines "\$BOARD_FILE") || true$' "$MA/wtail/bin/board.sh")" = 1 ] && pa_mut wtail fx_w1 || bad "mutant wtail: the change was not applied"
+pa_mcopy whook; pa_msed whook hooks/board-tail.sh 's/^\(n=\$(wr_lines "\$BOARD_FILE")\) || {.*$/\1 || true/'
+[ "$(grep -c '^n=\$(wr_lines "\$BOARD_FILE") || true$' "$MA/whook/hooks/board-tail.sh")" = 1 ] && pa_mut whook fx_w2 || bad "mutant whook: the change was not applied"
+pa_mcopy wpost; pa_msed wpost bin/board.sh 's/^\(    n=\$(printf .%s\\n. "\$text" | wr_lines \/dev\/stdin)\) || {.*$/\1 || true/'
+[ "$(grep -c 'wr_lines /dev/stdin) || true$' "$MA/wpost/bin/board.sh")" = 1 ] && pa_mut wpost fx_w5 || bad "mutant wpost: the change was not applied"
+if [ "$PS_OK" = 1 ]; then
+pa_mcopy warm; pa_msed warm bin/waiter.sh 's/^\(  base=\$(wr_lines "\$BOARD_FILE")\) || armfail .*$/\1/'
+[ "$(grep -c '^  base=\$(wr_lines "\$BOARD_FILE")$' "$MA/warm/bin/waiter.sh")" = 1 ] && pa_mut warm fx_w3 || bad "mutant warm: the change was not applied"
+pa_mcopy wpoll; pa_msed wpoll bin/waiter.sh 's/^\(  n=\$(wr_lines "\$BOARD_FILE")\) || {.*$/\1 || true/'
+[ "$(grep -c '^  n=\$(wr_lines "\$BOARD_FILE") || true$' "$MA/wpoll/bin/waiter.sh")" = 1 ] && pa_mut wpoll fx_w4 || bad "mutant wpoll: the change was not applied"
+else echo "skip mutants warm, wpoll (ps cannot read process start times here, so a waiter cannot arm)"; fi
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
