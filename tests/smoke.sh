@@ -9,7 +9,7 @@
 #   9. two arms of one seat at the same moment: exactly one wins, every round
 #  10. a board that cannot be written makes post fail; a job's row is kept until its wake is on the board
 #  11. the writer lock: one holder per file (also through aliases, which are refused), a crash releases it, wr_run children
-#      hold no copy, subshell use is refused, every failure is visible, a board named like the waiter's marker survives
+#      hold no copy, subshell use is refused, every failure is visible, a board named like the waiter's marker is refused
 #  12. the job ledger: concurrent add of one label gives one row; a reused pid (wrong start time) counts as gone
 #  14-15. warroom.env is data: command text refused, the current folder ignored
 #  17. docs/INSTALL.md: its hook block is valid JSON with the four entries, the quoted path works with a space in the clone path,
@@ -28,6 +28,10 @@
 #  41-43. position integrity (a rewrite anywhere in the part already read is noticed), every state write checked (fault
 #         injection with a stub mv), the board bootstrap under a forced race (with a wrong-code control)
 #  44. the sample board, replayed through real waiters, wakes W1, W2 and BOSS by exactly their own handoffs
+#  45-50. destinations: the run folder, board and config file are resolved from metadata and checked before anything is made
+#         (settings names, the config folder, reserved state names, aliases, absolute paths, readonly values), seat arguments
+#         that become paths, python3 required, hook exit codes
+#  59. (mutants) the checks of 45-50 each fail when their one line is removed
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -100,15 +104,21 @@ done
 [ $race = 0 ] && ok "simultaneous arms of one seat: exactly one wins (5 rounds)" || bad "seat claim race: $race of 5 rounds did not have exactly one live"
 
 # 10. an unwritable board is an error; a job row survives until its wake is on the board
-(export WARROOM_DIR="$T/run2"; mkdir -p "$WARROOM_DIR/board.md"; "$B/board.sh" post BOSS "hello" >/dev/null 2>&1)
-[ $? != 0 ] && ok "post to an unwritable board exits non-zero" || bad "post to an unwritable board reported success"
-export WARROOM_DIR="$T/run2"; sleep 30 & J=$!; "$B/pids.sh" add keep-job $J BOSS >/dev/null; kill $J; wait $J 2>/dev/null
-"$B/pids.sh" check >/dev/null 2>&1
-grep -q '^keep-job' "$WARROOM_DIR/pids.tsv" && ok "job row kept while the wake could not be posted" || bad "job row was dropped without a wake"
-rm -rf "$WARROOM_DIR/board.md"; : > "$WARROOM_DIR/board.md"
-"$B/pids.sh" check >/dev/null 2>&1; "$B/pids.sh" check >/dev/null 2>&1
-n=$(grep -c "job 'keep-job'" "$WARROOM_DIR/board.md")
-[ "$n" = 1 ] && ! grep -q '^keep-job' "$WARROOM_DIR/pids.tsv" && ok "retry wakes once, then drops the row" || bad "retry: $n wake lines"
+# (was: board.md as a directory; a directory board is now refused before the run starts, so the board is a read-only file)
+if [ "$(id -u)" != 0 ]; then
+  mkdir -p "$T/run2"; : > "$T/run2/board.md"; chmod 444 "$T/run2/board.md"
+  (export WARROOM_DIR="$T/run2"; "$B/board.sh" post BOSS "hello" >/dev/null 2>&1)
+  [ $? != 0 ] && ok "post to an unwritable board exits non-zero" || bad "post to an unwritable board reported success"
+  export WARROOM_DIR="$T/run2"; sleep 30 & J=$!; "$B/pids.sh" add keep-job $J BOSS >/dev/null; kill $J; wait $J 2>/dev/null
+  "$B/pids.sh" check >/dev/null 2>&1
+  grep -q '^keep-job' "$WARROOM_DIR/pids.tsv" && ok "job row kept while the wake could not be posted" || bad "job row was dropped without a wake"
+  chmod 644 "$WARROOM_DIR/board.md"
+  "$B/pids.sh" check >/dev/null 2>&1; "$B/pids.sh" check >/dev/null 2>&1
+  n=$(grep -c "job 'keep-job'" "$WARROOM_DIR/board.md")
+  [ "$n" = 1 ] && ! grep -q '^keep-job' "$WARROOM_DIR/pids.tsv" && ok "retry wakes once, then drops the row" || bad "retry: $n wake lines"
+else
+  echo "skip unwritable board, job row kept, retry wakes once (running as root: a read-only file stays writable)"
+fi
 export WARROOM_DIR="$T/run"
 
 # 11. the writer lock: flock on FILE.flock
@@ -229,12 +239,11 @@ printf 'line one\nline two\n' > "$R3/board.md"; b0=$(cksum < "$R3/board.md"); pl
 for k in 1 2 3 4 5 6 7 8; do WARROOM_DIR="$R3" bash -c '. "$1"' _ "$C" >/dev/null 2>&1 & pl="$pl $!"; done; wait $pl 2>/dev/null
 [ "$(cksum < "$R3/board.md")" = "$b0" ] && ok "lock: sourcing _common.sh never changes a board that has content" || bad "lock: bootstrap changed the board"
 
-# a BOARD configured as the waiter's own marker name (.lastwake-W1) is never emptied by a wake
-R4="$LD/run4"; mkdir -p "$R4"; printf '%s\n' "[00:00 · BOSS] forty-four bytes of board here." > "$R4/.lastwake-W1"; h0=$(head -c 44 "$R4/.lastwake-W1" | cksum)
-WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/waiter.sh" W1 sid-l > "$LD/w4.out" 2>&1 & wp=$!; sleep 2
-WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/board.sh" post BOSS "@W1 ACTION: wake on a board named like the marker"
-wait_exit $wp 10; kill $wp 2>/dev/null
-[ "$(head -c 44 "$R4/.lastwake-W1" | cksum)" = "$h0" ] && grep -q "wake on a board named like the marker" "$R4/.lastwake-W1" && grep -q "@W1 ACTION" "$LD/w4.out" && ok "lock: a wake on a board named .lastwake-SEAT leaves the board's bytes intact (touch, not truncate)" || bad "lock: marker-named board: $(wc -c < "$R4/.lastwake-W1") bytes, waiter: $(head -c 120 "$LD/w4.out")"
+# a BOARD configured as the waiter's own marker name (.lastwake-W1) is refused before anything runs (was: the wake left its bytes intact)
+R4="$LD/run4"; mkdir -p "$R4"; printf '%s\n' "[00:00 · BOSS] forty-four bytes of board here." > "$R4/.lastwake-W1"; cp "$R4/.lastwake-W1" "$LD/w4.orig"
+WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/waiter.sh" W1 sid-l > "$LD/w4.out" 2>&1; r1=$?
+WARROOM_DIR="$R4" BOARD=.lastwake-W1 "$B/board.sh" post BOSS "@W1 ACTION: post on a board named like the marker" > "$LD/p4.out" 2>&1; r2=$?
+cmp -s "$R4/.lastwake-W1" "$LD/w4.orig" && [ $r1 = 2 ] && [ $r2 = 2 ] && grep -q "at a name this tool writes" "$LD/w4.out" && grep -q "at a name this tool writes" "$LD/p4.out" && ok "lock: a board named .lastwake-SEAT is refused by the waiter and by post (exit 2), and the whole file is byte-identical" || bad "lock: marker-named board: rc $r1/$r2, $(wc -c < "$R4/.lastwake-W1") bytes, waiter: $(head -c 120 "$LD/w4.out")"
 ! grep -nE '(^|[;&|] *): > "\$LAST"' "$B/waiter.sh" >/dev/null && ok "lock: the waiter never truncates its wake timestamp" || bad "lock: waiter.sh still truncates \$LAST"
 
 # lock_order_and_upgrade_boundary (lint only, not evidence of safety)
@@ -298,6 +307,11 @@ case "$hout" in *"[WAITER NOT ARMED]"*) ok "the printed SessionStart command run
 pc=$(grep '^python3 -c' "$D"); printf '{"a": 1}\n' > "$T/i17/good.json"; printf '{"a": \n' > "$T/i17/broken.json"
 f="$T/i17/good.json" sh -c "$pc" >/dev/null 2>&1; g=$?; f="$T/i17/broken.json" sh -c "$pc" >/dev/null 2>&1; br=$?
 [ -n "$pc" ] && [ $g = 0 ] && [ $br != 0 ] && [ "$(wc -l < "$D" | tr -d ' ')" -le 60 ] && ok "INSTALL.md parse command: accepts a good file, refuses a broken one; the page is at most 60 lines" || bad "INSTALL.md parse command: good rc $g, broken rc $br"
+
+# (17, re-read against the destination checks) line 3 carries the PATH requirement for python3 once, and names the refusals it makes true
+l3=$(sed -n 3p "$D"); np=$(cat "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT"/docs/*.md | grep -c 'python3 must be on the PATH your Claude Code hooks run with')
+want3='Five steps, run from the clone. You need git, bash, python3 and Claude Code, signed in; python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; a run folder that is the config folder itself (compared by its physical path) and a run folder or board named like a settings file are refused, while dedicated subfolders remain allowed.'
+case "$l3" in "$want3") [ "$np" = 1 ] && [ "$(wc -l < "$D" | tr -d ' ')" = 60 ] && ok "INSTALL.md line 3 is exactly the ruled line (python3 PATH said once in the docs) and the page is exactly 60 lines" || bad "python3 PATH sentence appears $np times, or the page is not 60 lines" ;; *) bad "INSTALL.md line 3 is not the ruled line: $l3" ;; esac
 
 # 21. a hook never exits 2 on a bad config: Claude Code would block the prompt, in every session on the machine
 hr=""; for h in board-guard board-tail waiter-check; do
@@ -617,6 +631,305 @@ for s in W1 W2 BOSS; do
 done
 [ "$res" = " W1=1/1 W2=2/2 BOSS=1/1" ] && ok "sample board: W1, W2 and BOSS are woken by exactly their own handoffs" || bad "sample board replay: '$res' (want W1=1/1 W2=2/2 BOSS=1/1)"
 ! grep -qE '^@(W1|W2|BOSS|MANAGER|ALL) ACTION' "$SB" && ok "sample board: no handoff line is an unstamped continuation" || bad "sample board: a handoff line has no stamp"
+
+# 45-50. Where things go (destinations): the run folder W, the board B and the config file C are resolved from metadata
+# before anything is created. Every case is a function of a fixture dir under $T, run against the tree in PB (bin/) and PHK
+# (hooks/); section 59 runs the same functions against mutated copies. HOME and CLAUDE_CONFIG_DIR are fixture folders: no
+# case reads or touches a real settings file.
+PB="$B"; PHK="$ROOT/hooks"; PA_IN='{"session_id": "sid-pa"}'; PA_WHY=""; PA_SKIP=""; PA_NOTE=""
+pa_setup() { PAW=$(cd -P "$(mktemp -d "$T/paw.XXXXXX")" && pwd -P); PAH="$PAW/h"; PAC="$PAW/cfg"; mkdir -p "$PAH" "$PAC" "$PAW/cwd"; }
+pa_snap() { find "$PAW" -print 2>/dev/null | LC_ALL=C sort; }
+pa_mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+pa_run() { ( cd "${PA_CWD:-$PAW/cwd}" && env HOME="$PAH" CLAUDE_CONFIG_DIR="$PAC" WARROOM_ENV="$PAW/none.env" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0 "$@" ); }
+pa_exec() { PA_OUT=$(printf '%s' "$PA_IN" | pa_run "$@" 2>&1); PA_RC=$?; }
+pa_pass() { pa_exec "$@"; [ "$PA_RC" = 0 ] || { PA_WHY="rc $PA_RC (want 0): $* -> $(printf '%s' "$PA_OUT" | head -c 160)"; return 1; }; }
+# pa_want PATTERN RC [ENV=VAL...] CMD [ARGS]: the run ends with RC, says PATTERN, and creates nothing under $PAW
+pa_want() {
+  _pat=$1; _wrc=$2; shift 2
+  pa_snap > "$PAW.b"; pa_exec "$@"; pa_snap > "$PAW.a"
+  [ "$PA_RC" = "$_wrc" ] || { PA_WHY="rc $PA_RC (want $_wrc): $* -> $(printf '%s' "$PA_OUT" | head -c 160)"; return 1; }
+  printf '%s\n' "$PA_OUT" | grep -Eq -- "$_pat" || { PA_WHY="no '$_pat' in: $(printf '%s' "$PA_OUT" | head -c 160) ($*)"; return 1; }
+  cmp -s "$PAW.b" "$PAW.a" || { PA_WHY="created: $(diff "$PAW.b" "$PAW.a" | grep '^[<>]' | head -3 | tr '\n' ' ') ($*)"; return 1; }
+  return 0
+}
+pa_cfgbytes() { printf 'SEATS=BOSS W1\n' > "$1"; }
+
+# 45. resolver: lexical gate, nearest existing ancestor, physical identity (R1-R5)
+fx_r1() { # the config folder, spelled four lexical ways and through a symlink, is refused
+  pa_setup; ln -s "$PAC" "$PAW/lnk-cfg"
+  for w in "$PAC" "$PAC/" "$PAC/x/.." "$PAC/." "$PAW/lnk-cfg" "$PAW/lnk-cfg/"; do
+    pa_want 'config folder|component' 2 WARROOM_DIR="$w" "$PB/board.sh" path || return 1
+  done
+}
+fx_r2() { # an absent nested run folder is made only after the checks; the board is exactly under it (physical spelling)
+  pa_setup
+  pa_pass WARROOM_DIR="$PAW/fresh/a/b" "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAW/fresh/a/b/board.md" ] && [ -f "$PAW/fresh/a/b/board.md" ] || { PA_WHY="board path '$PA_OUT'"; return 1; }
+  mkdir "$PAW/real"; ln -s "$PAW/real" "$PAW/lnk"
+  pa_pass WARROOM_DIR="$PAW/lnk/f2/g" "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAW/lnk/f2/g/board.md" ] && [ -f "$PAW/real/f2/g/board.md" ] || { PA_WHY="symlinked spelling: '$PA_OUT'"; return 1; }
+}
+fx_r3() { # a refused board leaves a fresh run folder AND the board's parents uncreated (checks come before the bootstrap)
+  pa_setup
+  pa_want 'settings file' 2 WARROOM_DIR="$PAW/w3" BOARD="$PAW/fresh2/x/settings.json" "$PB/board.sh" path || return 1
+  [ ! -e "$PAW/w3" ] && [ ! -e "$PAW/fresh2" ] || { PA_WHY="w3 or fresh2 was created"; return 1; }
+}
+fx_r4() { # a parent that cannot be searched is refused, nothing created (skipped as root)
+  if [ "$(id -u)" = 0 ]; then PA_SKIP="running as root: mode 000 does not block root"; return 0; fi
+  pa_setup; mkdir "$PAW/r4"; chmod 000 "$PAW/r4"
+  if ( cd "$PAW/r4" ) 2>/dev/null; then chmod 755 "$PAW/r4"; PA_SKIP="the folder stayed accessible (an ACL or a privileged user)"; return 0; fi
+  pa_want 'cannot be resolved' 2 WARROOM_DIR="$PAW/r4/w" "$PB/board.sh" path; _r=$?; chmod 755 "$PAW/r4"; return $_r
+}
+fx_r5() { # a board with a trailing /, an existing folder, a folder symlink, or a folder above the run folder
+  pa_setup; mkdir -p "$PAW/r5/d" "$PAW/r5/t"; ln -s "$PAW/r5/d" "$PAW/r5/dl"
+  pa_want 'board|BOARD' 2 WARROOM_DIR="$PAW/r5" BOARD="$PAW/r5/b/" "$PB/board.sh" path || return 1
+  pa_want 'board|BOARD' 2 WARROOM_DIR="$PAW/r5" BOARD=d "$PB/board.sh" path || return 1
+  pa_want 'board|BOARD' 2 WARROOM_DIR="$PAW/r5" BOARD=dl "$PB/board.sh" path || return 1
+  pa_want 'above the run folder' 2 WARROOM_DIR="$PAW/a/w" BOARD="$PAW/a" "$PB/board.sh" path || return 1
+  [ ! -e "$PAW/a" ] || { PA_WHY="$PAW/a was created"; return 1; }
+}
+
+# 46. an absolute run folder; the board goes under it; the validated values cannot be reassigned (R6, R7)
+fx_r6() {
+  pa_setup; mkdir -p "$PAW/p1" "$PAW/p2"
+  pa_want 'WARROOM_DIR must be an absolute path' 2 WARROOM_DIR=run "$PB/board.sh" path || return 1
+  pa_want 'WARROOM_ENV must be an absolute path' 2 WARROOM_ENV=rel.env WARROOM_DIR="$PAW/r6" "$PB/board.sh" path || return 1
+  for b in ./board.md ../x a/./b; do
+    pa_want 'BOARD must not contain \. or \.\. components; write board\.md' 2 WARROOM_DIR="$PAW/r6" BOARD="$b" "$PB/board.sh" path || return 1
+  done
+  PA_CWD="$PAW/p1" pa_pass WARROOM_DIR="$PAW/r6" BOARD=board.md "$PB/board.sh" path || return 1; _a=$PA_OUT
+  PA_CWD="$PAW/p2" pa_pass WARROOM_DIR="$PAW/r6" BOARD=board.md "$PB/board.sh" path || return 1
+  [ "$_a" = "$PA_OUT" ] && [ "$_a" = "$PAW/r6/board.md" ] && [ ! -e "$PAW/p1/board.md" ] && [ ! -e "$PAW/p2/board.md" ] || { PA_WHY="board path from p1 '$_a', p2 '$PA_OUT'"; return 1; }
+}
+fx_r7a() { # W cannot be reassigned by a script that sourced _common.sh
+  pa_setup; pa_exec WARROOM_DIR="$PAW/r7" bash -c '. "$1"; W=/elsewhere; echo "w=$W"' _ "$PB/_common.sh"
+  case "$PA_OUT" in *"W: readonly variable"*) case "$PA_OUT" in *elsewhere*) ;; *) return 0 ;; esac ;; esac; PA_WHY="W was assignable: $PA_OUT"; return 1
+}
+fx_r7b() { # BOARD_FILE cannot be reassigned either
+  pa_setup; pa_exec WARROOM_DIR="$PAW/r7" bash -c '. "$1"; BOARD_FILE=/elsewhere; echo "b=$BOARD_FILE"' _ "$PB/_common.sh"
+  case "$PA_OUT" in *"BOARD_FILE: readonly variable"*) case "$PA_OUT" in *elsewhere*) ;; *) return 0 ;; esac ;; esac; PA_WHY="BOARD_FILE was assignable: $PA_OUT"; return 1
+}
+fx_r7c() { # a child started with BOARD=settings.json re-validates and is refused
+  pa_setup; pa_pass WARROOM_DIR="$PAW/r7" "$PB/board.sh" path || return 1
+  pa_want 'settings file' 2 WARROOM_DIR="$PAW/r7" bash -c 'BOARD=settings.json "$1" path' _ "$PB/board.sh"
+}
+
+fx_r8() { # a HOME with a trailing / (or HOME=/) is the same HOME: the default config path and ~/ values add no second /
+  pa_setup
+  pa_pass HOME="$PAH/" WARROOM_DIR="$PAW/r8a" bash -c 'unset WARROOM_ENV; exec "$@"' _ "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAW/r8a/board.md" ] || { PA_WHY="HOME with a trailing /: board '$PA_OUT'"; return 1; }
+  pa_pass HOME=/ WARROOM_DIR="$PAW/r8b" bash -c 'unset WARROOM_ENV; exec "$@"' _ "$PB/board.sh" path || return 1
+  printf 'WARROOM_DIR=~/sub\n' > "$PAW/r8.env"
+  pa_pass HOME="$PAH/" WARROOM_ENV="$PAW/r8.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAH/sub/board.md" ] || { PA_WHY="a home-relative value under HOME with a trailing /: board '$PA_OUT'"; return 1; }
+  # a bare ~ stays HOME as written (line 23 of _config.sh): HOME with a trailing / still gives HOME/board.md, HOME=/ is refused
+  printf 'WARROOM_DIR=~\n' > "$PAW/r8c.env"
+  pa_pass HOME="$PAH/" WARROOM_ENV="$PAW/r8c.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
+  [ "$PA_OUT" = "$PAH/board.md" ] || { PA_WHY="a bare ~ with HOME ending in /: board '$PA_OUT'"; return 1; }
+  pa_want 'names no folder or file' 2 HOME=/ WARROOM_ENV="$PAW/r8c.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
+}
+
+# 47. settings names, reserved state names, the board's own aliases (N1-N5)
+fx_n1() {
+  pa_setup; mkdir -p "$PAW/n1b"; printf 'keep' > "$PAW/n1b/settings.json"; _k=$(cksum < "$PAW/n1b/settings.json")
+  _sl=settings.l; _sl="${_sl}ocal.json"
+  for n in settings.json Settings.JSON "$_sl" MANAGED-settings.json .Claude.json; do
+    pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1a" BOARD="$n" "$PB/board.sh" post BOSS hello || return 1
+  done
+  pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1b" BOARD=settings.json "$PB/board.sh" post BOSS hello || return 1
+  [ "$(cksum < "$PAW/n1b/settings.json")" = "$_k" ] || { PA_WHY="an existing settings.json changed"; return 1; }
+  pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1c/SETTINGS.json" "$PB/board.sh" path || return 1
+  pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1a" BOARD=Settings.JSON "$PB/waiter.sh" W1 sid-n1 || return 1
+  for h in waiter-check board-tail board-guard; do
+    pa_want 'settings file' 1 WARROOM_DIR="$PAW/n1a" BOARD=settings.json "$PHK/$h.sh" || return 1
+  done
+  pa_want 'cannot locate the Claude Code config folder' 2 CLAUDE_CONFIG_DIR=cfg WARROOM_DIR="$PAW/n1d" "$PB/board.sh" path || return 1
+  pa_want 'cannot locate' 2 WARROOM_DIR="$PAW/n1d" bash -c 'unset HOME CLAUDE_CONFIG_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
+  pa_want 'cannot locate' 2 WARROOM_DIR="$PAW/n1d" bash -c 'unset CLAUDE_CONFIG_DIR; exec env HOME=rel "$@"' _ "$PB/board.sh" path || return 1
+  pa_want 'cannot locate' 2 WARROOM_DIR="$PAW/n1d" HOME= bash -c 'unset CLAUDE_CONFIG_DIR; exec "$@"' _ "$PB/board.sh" path
+}
+fx_n2() {
+  pa_setup; W="$PAW/n2/w"
+  for n in seats.tsv pids.tsv .cursor-W1 .lastwake-W1 .anchor-W1 .guard-W1 .poll-W1.123 .snap-W1.123 .wrtmp.abcd1234 x.flock b.tmp.123 b.chunk.123 .LASTWAKE-W1 SEATS.TSV \
+           seats.tsv/board.md sub/.anchor-W1/b.md .wrtmp.q/b.md "$W/.cursor-W1/b.md"; do
+    pa_want 'name this tool writes|ends in \.flock' 2 WARROOM_DIR="$W" BOARD="$n" "$PB/board.sh" path || return 1
+  done
+  mkdir -p "$PAW/n2e"; printf 'x' > "$PAW/n2e/seats.tsv"; _k=$(cksum < "$PAW/n2e/seats.tsv")
+  pa_want 'name this tool writes' 2 WARROOM_DIR="$PAW/n2e" BOARD=seats.tsv "$PB/board.sh" path || return 1
+  [ "$(cksum < "$PAW/n2e/seats.tsv")" = "$_k" ] || { PA_WHY="an existing seats.tsv changed"; return 1; }
+  for n in board.tmp.md x.tmp.d/b.md sub/board.md; do   # not reserved: board.tmp.md, a folder named x.tmp.d, a plain subfolder
+    pa_pass WARROOM_DIR="$PAW/n2c" BOARD="$n" "$PB/board.sh" path || return 1; rm -rf "${PAW:?}/n2c"
+  done
+}
+fx_n3() {
+  pa_setup; W="$PAW/n3/w"; mkdir -p "$W"; pa_cfgbytes "$PAW/n3/c.env"; _k=$(cksum < "$PAW/n3/c.env")
+  pa_want 'config file' 2 WARROOM_ENV="$PAW/n3/c.env" WARROOM_DIR="$W" BOARD="$PAW/n3/c.env" "$PB/board.sh" path || return 1
+  [ "$(cksum < "$PAW/n3/c.env")" = "$_k" ] || { PA_WHY="the config file changed"; return 1; }
+  printf 'row\n' > "$W/pids.tsv"; ln "$W/pids.tsv" "$W/b.md"
+  pa_want 'same file as a state entry' 2 WARROOM_DIR="$W" BOARD=b.md "$PB/board.sh" path || return 1
+  ln -s "$W" "$PAW/link-to-W"
+  pa_want 'name this tool writes' 2 WARROOM_DIR="$W" BOARD="$PAW/link-to-W/seats.tsv" "$PB/board.sh" path
+}
+fx_n4() { # controls: a plain subfolder board; an external board (its lock file appears beside it, as documented)
+  pa_setup
+  pa_pass WARROOM_DIR="$PAW/n4" BOARD=sub/board.md "$PB/board.sh" path || return 1
+  pa_pass WARROOM_DIR="$PAW/n4" BOARD="$PAW/ext/board.md" "$PB/board.sh" post BOSS hi || return 1
+  [ -f "$PAW/ext/board.md.flock" ] && grep -q hi "$PAW/ext/board.md" || { PA_WHY="no ext/board.md.flock after the post"; return 1; }
+}
+fx_n5() { # a fullwidth lookalike of settings.json is not folded: accepted (a stated limit); the filesystem's own answer is recorded
+  pa_setup; mkdir -p "$PAW/n5"; : > "$PAW/n5/settings.json"; _fw=$(printf '\357\275\223ettings.json')
+  pa_pass WARROOM_DIR="$PAW/n5" BOARD="$_fw" "$PB/board.sh" path || return 1
+  [ -f "$PAW/n5/$_fw" ] || { PA_WHY="lookalike board not created"; return 1; }
+  if [ "$PAW/n5/$_fw" -ef "$PAW/n5/settings.json" ]; then PA_NOTE="observed: the filesystem treats the lookalike as the same file"; else PA_NOTE="observed: the filesystem makes a distinct entry for the lookalike"; fi
+}
+
+# 48. the config file at a name this tool writes (N6)
+fx_n6a() { # absent and existing, at each derived slot of the run folder
+  pa_setup; W="$PAW/n6"
+  for slot in .anchor-W1 seats.tsv pids.tsv .guard-W1 .lastwake-W1 .cursor-W1 .anchor-W9 board.md.flock .wrtmp.q1; do
+    pa_want 'name this tool writes|lock file|ends in \.flock' 2 WARROOM_ENV="$W/$slot" WARROOM_DIR="$W" "$PB/board.sh" path || return 1   # absent
+    mkdir -p "$W"; pa_cfgbytes "$W/$slot"; _k=$(cksum < "$W/$slot"); _m=$(pa_mt "$W/$slot")
+    pa_want 'name this tool writes|lock file|ends in \.flock' 2 WARROOM_ENV="$W/$slot" WARROOM_DIR="$W" "$PB/board.sh" path || return 1   # existing
+    [ "$(cksum < "$W/$slot")" = "$_k" ] && [ "$(pa_mt "$W/$slot")" = "$_m" ] || { PA_WHY="config at $slot changed"; return 1; }
+    rm -rf "${W:?}"
+  done
+}
+fx_n6b() { # under a nested reserved component, and the control at a plain name
+  pa_setup; W="$PAW/n6"
+  pa_want 'name this tool writes' 2 WARROOM_ENV="$W/.cursor-W1/sub/warroom.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
+  mkdir -p "$W/.cursor-W1/sub"; pa_cfgbytes "$W/.cursor-W1/sub/warroom.env"
+  pa_want 'name this tool writes' 2 WARROOM_ENV="$W/.cursor-W1/sub/warroom.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
+  rm -rf "${W:?}"; mkdir -p "$W"; pa_cfgbytes "$W/warroom.env"
+  pa_pass WARROOM_ENV="$W/warroom.env" WARROOM_DIR="$W" "$PB/board.sh" path
+}
+fx_n6c() { # the same file under another name: a hard link to a state entry or to the board's lock file; a dangling link to a slot
+  pa_setup; W="$PAW/n6"; mkdir -p "$W"
+  pa_cfgbytes "$W/.anchor-W1"; ln "$W/.anchor-W1" "$PAW/hl-anchor.env"
+  pa_want 'same file as a state entry|name this tool writes' 2 WARROOM_ENV="$PAW/hl-anchor.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
+  pa_cfgbytes "$W/board.md.flock"; ln "$W/board.md.flock" "$PAW/hl-flock.env"
+  pa_want 'lock file' 2 WARROOM_ENV="$PAW/hl-flock.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
+  rm -f "${W:?}/.anchor-W1"; ln -s "$W/.anchor-W1" "$PAW/dangling.env"
+  pa_want 'name this tool writes' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$W" "$PB/board.sh" path
+}
+fx_n6d() { # a config path whose links loop is refused; a dangling link elsewhere stays allowed
+  pa_setup; ln -s "$PAW/loop2" "$PAW/loop1"; ln -s "$PAW/loop1" "$PAW/loop2"
+  pa_want 'config path loops' 2 WARROOM_ENV="$PAW/loop1" WARROOM_DIR="$PAW/n6d" "$PB/board.sh" path || return 1
+  ln -s "$PAW/nowhere.env" "$PAW/dangling-ok.env"
+  pa_pass WARROOM_ENV="$PAW/dangling-ok.env" WARROOM_DIR="$PAW/n6d" "$PB/board.sh" path
+}
+
+# 49. seat arguments that become paths (S1, S2)
+fx_s1() {
+  pa_setup; W="$PAW/s1"
+  pa_exec WARROOM_DIR="$W" "$PB/board.sh" tail ../x
+  [ "$PA_RC" = 2 ] && [ "$(find "$W" -print | LC_ALL=C sort | tr '\n' ' ')" = "$W $W/board.md " ] || { PA_WHY="fresh run: rc $PA_RC, new entries: $(find "$W" -print | LC_ALL=C sort | tr '\n' ' ')"; return 1; }
+  for a in ../x W1/x "" w1 ZZ NONE; do
+    pa_want 'unknown seat|usage' 2 WARROOM_DIR="$W" "$PB/board.sh" tail "$a" || return 1
+  done
+  pa_want 'usage' 2 WARROOM_DIR="$W" "$PB/board.sh" tail || return 1
+  pa_want 'unknown seat' 2 WARROOM_DIR="$W" "$PB/waiter.sh" ../x sid-s1 || return 1
+}
+fx_s2() { # a registry row is data: a seat outside SEATS is not trusted by the read hooks
+  pa_setup; W="$PAW/s2"; pa_pass WARROOM_DIR="$W" "$PB/board.sh" path || return 1
+  printf '[00:00 · BOSS] hello\n' >> "$W/board.md"; printf 'sid-pa\t../x\t99999\tx\tstart\n' > "$W/seats.tsv"
+  pa_want 'unknown seat in registry' 0 WARROOM_DIR="$W" "$PHK/waiter-check.sh" || return 1
+  pa_want '^$' 0 WARROOM_DIR="$W" "$PHK/board-tail.sh" || return 1
+  printf 'sid-pa\tW1\t99999\tx\tstart\n' > "$W/seats.tsv"
+  pa_pass WARROOM_DIR="$W" "$PHK/board-tail.sh" || return 1
+  case "$PA_OUT" in *"[BOARD]"*) return 0 ;; esac; PA_WHY="control (registry seat W1) printed '$PA_OUT'"; return 1
+}
+
+# 50. python3 is required; hook exits (P1, P2, H1)
+fx_p1() {
+  pa_setup; mkdir -p "$PAW/nopy" "$PAW/brokenpy"
+  for t in dirname bash; do ln -s "$(command -v $t)" "$PAW/nopy/$t"; done
+  for t in dirname bash; do ln -s "$(command -v $t)" "$PAW/brokenpy/$t"; done
+  printf '#!/bin/sh\nexit 1\n' > "$PAW/brokenpy/python3"; chmod +x "$PAW/brokenpy/python3"
+  for d in nopy brokenpy; do
+    pa_want 'python3 is required' 2 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PB/board.sh" path || return 1
+    pa_want 'python3 is required' 2 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PB/waiter.sh" W1 sid-p1 || return 1
+    pa_want 'python3 is required' 2 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PB/pids.sh" check || return 1
+    for h in waiter-check board-tail board-guard; do
+      pa_want 'python3 is required' 1 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PHK/$h.sh" || return 1
+    done
+  done
+}
+fx_p2() { # python3 passes the startup check and fails only the hook's JSON parse: exit 1 with a message, never a silent 0
+  pa_setup; mkdir -p "$PAW/shim"; _py=$(command -v python3); pa_pass WARROOM_DIR="$PAW/p2" "$PB/board.sh" path || return 1
+  printf '#!/bin/sh\ncase "$*" in *json*) echo "shim: json failed" >&2; exit 1 ;; esac\nexec %s "$@"\n' "$_py" > "$PAW/shim/python3"; chmod +x "$PAW/shim/python3"
+  for h in waiter-check board-tail; do
+    pa_want 'could not read the hook input' 1 PATH="$PAW/shim:$PATH" WARROOM_DIR="$PAW/p2" "$PHK/$h.sh" || return 1
+  done
+  PA_IN='not json'; for h in waiter-check board-tail; do pa_want 'could not read the hook input' 1 WARROOM_DIR="$PAW/p2" "$PHK/$h.sh" || { PA_IN='{"session_id": "sid-pa"}'; return 1; }; done
+  PA_IN='{"session_id": "sid-pa"}'
+}
+fx_h1() { # a bad warroom.env: every hook exits 1, never 2, and the message names the line
+  pa_setup; printf 'SEATS=$(touch x)\n' > "$PAW/bad.env"
+  for h in waiter-check board-tail board-guard; do
+    pa_want 'warroom\.env line 1' 1 WARROOM_ENV="$PAW/bad.env" WARROOM_DIR="$PAW/h1" "$PHK/$h.sh" || return 1
+  done
+}
+pa_run_fx() { # pa_run_fx FIXTURE "what it shows": ok, a printed skip, or FAIL with the assert that fired
+  PA_WHY=""; PA_SKIP=""; PA_NOTE=""
+  if "$1"; then if [ -n "$PA_SKIP" ]; then echo "skip $2 ($PA_SKIP)"; else ok "$2${PA_NOTE:+ [$PA_NOTE]}"; fi; else bad "$2: $PA_WHY"; fi
+}
+_TP=$(cd -P "$T" && pwd -P); pa_setup; case "$PAH$PAC" in "$_TP"/*"$_TP"/*) ok "destinations: the fixture HOME and CLAUDE_CONFIG_DIR are under the temp dir" ;; *) bad "destinations: fixture HOME/CLAUDE_CONFIG_DIR are not under $T" ;; esac
+pa_run_fx fx_r1 "resolver: the config folder is refused however it is spelled (trailing /, /./, /x/.., a symlink to it)"
+pa_run_fx fx_r2 "resolver: an absent nested run folder is made after the checks, and the board is exactly under it (also through a symlink spelling)"
+pa_run_fx fx_r3 "resolver: a refused board leaves a fresh run folder and the board's parents uncreated"
+pa_run_fx fx_r4 "resolver: a parent that cannot be searched is refused and nothing is created"
+pa_run_fx fx_r5 "resolver: a board with a trailing /, an existing folder, a folder symlink, or a folder above the run folder is refused"
+pa_run_fx fx_r6 "absolute paths: a relative WARROOM_DIR or WARROOM_ENV, and BOARD with ./ ../ or /./, are refused; a relative BOARD gives one path from any cwd"
+pa_run_fx fx_r7a "readonly: a script that sourced _common.sh cannot reassign W"
+pa_run_fx fx_r7b "readonly: a script that sourced _common.sh cannot reassign BOARD_FILE"
+pa_run_fx fx_r7c "readonly: a child started with BOARD=settings.json re-validates and is refused"
+pa_run_fx fx_r8 "HOME: a trailing / (or HOME=/) is accepted; the default config path and a ~/ value in warroom.env add no second /"
+pa_run_fx fx_n1 "settings names: the four Claude Code settings file names (any case) are refused for W and B by post, waiter and the hooks; an unlocatable config folder is refused"
+pa_run_fx fx_n2 "reserved names: all 12 families, nested and mixed case, are refused for the board; board.tmp.md, x.tmp.d/ and a plain subfolder are not"
+pa_run_fx fx_n3 "aliases: the board as the config file, as a hard link of a state entry, or reached through a symlinked run folder, is refused"
+pa_run_fx fx_n4 "controls: a subfolder board and an external board work (the external board's lock file appears beside it)"
+pa_run_fx fx_n5 "limit: a fullwidth lookalike of settings.json is not folded (accepted, as the docs state)"
+pa_run_fx fx_n6a "config at a state slot: absent or existing at each slot of the run folder is refused before bootstrap, bytes and mtime unchanged"
+pa_run_fx fx_n6b "config at a state slot: under a nested reserved component is refused; warroom.env at a plain name works"
+pa_run_fx fx_n6c "config at a state slot: a hard link to a state entry or the board's lock file, or a dangling link to a slot, is refused"
+pa_run_fx fx_n6d "config at a state slot: a looping config link is refused; a dangling link elsewhere is allowed"
+pa_run_fx fx_s1 "seat arguments: board.sh tail with ../x, W1/x, empty, omitted, w1, ZZ and NONE exits 2 and creates no per-seat file; so does waiter.sh ../x"
+pa_run_fx fx_s2 "seat arguments: a registry row with a seat outside SEATS is not trusted by waiter-check (says so, exit 0) or board-tail (silent, exit 0)"
+pa_run_fx fx_p1 "python3: missing or broken, every bin/ script exits 2 and every hook exits 1 with 'python3 is required' before anything is created"
+pa_run_fx fx_p2 "python3: a failing JSON parse makes both read hooks exit 1 with a message, never a silent 0"
+pa_run_fx fx_h1 "hooks: a bad warroom.env exits 1 (never 2) and names the line"
+
+# 59. mutants of the checks above: each is a copy of bin/ and hooks/ in $T with ONE change (asserted by grep -c); the copy
+# without the change passes the fixture, the copy with it fails the fixture at the printed assert.
+MA="$T/mutA"; mkdir -p "$MA"
+pa_mcopy() { rm -rf "${MA:?}/${1:?}"; mkdir -p "$MA/$1"; cp -R "$B" "$MA/$1/bin"; cp -R "$ROOT/hooks" "$MA/$1/hooks"; }
+pa_msed() { _mt=$(sed "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }   # rewritten in place: the exec bit stays
+pa_mawk() { _mt=$(awk "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }
+pa_mut() { # pa_mut NAME FIXTURE: the pristine copy passes FIXTURE, the mutated copy fails it
+  _n=$1; _fx=$2; PA_WHY=""
+  PB="$MA/pristine/bin"; PHK="$MA/pristine/hooks"
+  if ! "$_fx"; then bad "mutant $_n: the unmutated copy fails $_fx: $PA_WHY"; PB="$B"; PHK="$ROOT/hooks"; return; fi
+  PB="$MA/$_n/bin"; PHK="$MA/$_n/hooks"; PA_WHY=""
+  if "$_fx"; then bad "mutant $_n survived: $_fx passed"; else ok "mutant $_n: $_fx fails at: $(printf '%s' "$PA_WHY" | head -c 150)"; fi
+  PB="$B"; PHK="$ROOT/hooks"
+}
+pa_mcopy pristine
+pa_mcopy nofold; pa_msed nofold bin/_common.sh "s/^wr_fold() { printf '%s' \"\$1\" | tr 'A-Z' 'a-z'; }/wr_fold() { printf '%s' \"\$1\"; }/"
+[ "$(grep -c "^wr_fold() { printf '%s' \"\$1\"; }" "$MA/nofold/bin/_common.sh")" = 1 ] && [ "$(grep -c "tr 'A-Z' 'a-z'" "$MA/nofold/bin/_common.sh")" = 0 ] && pa_mut nofold fx_n1 || bad "mutant nofold: the change was not applied"
+pa_mcopy late; pa_mawk late bin/_common.sh '/^wr_validate_paths$/ {next} {print} /^readonly W BOARD_FILE/ {print "mkdir -p \"$W\" 2>/dev/null; wr_validate_paths"}'
+[ "$(grep -c 'wr_validate_paths$' "$MA/late/bin/_common.sh")" = 1 ] && [ "$(grep -n '; wr_validate_paths$' "$MA/late/bin/_common.sh" | cut -d: -f1)" -lt "$(grep -n '^mkdir -p "\$W" 2>/dev/null$' "$MA/late/bin/_common.sh" | cut -d: -f1)" ] && pa_mut late fx_r3 || bad "mutant late: the change was not applied"
+pa_mcopy lexical; pa_msed lexical bin/_common.sh 's|^  _ra=$(cd -P -- "$_rs" 2>/dev/null \&\& pwd -P) \|\| {|  _ra=$_rs \|\| {|'
+[ "$(grep -c '^  _ra=\$_rs || {' "$MA/lexical/bin/_common.sh")" = 1 ] && [ "$(grep -c 'cd -P -- "\$_rs"' "$MA/lexical/bin/_common.sh")" = 0 ] && pa_mut lexical fx_n3 || bad "mutant lexical: the change was not applied"
+pa_mcopy nod6; pa_mawk nod6 bin/_common.sh '/^  # D6 /{skip=1} /^  return 0$/{skip=0} !skip{print}'
+[ "$(grep -c '# D6 ' "$MA/nod6/bin/_common.sh")" = 0 ] && [ "$(grep -c 'wr_ef_reserved "\$WR_C_SEL"' "$MA/nod6/bin/_common.sh")" = 0 ] && pa_mut nod6 fx_n6a || bad "mutant nod6: the change was not applied"
+pa_mcopy tailseat; pa_msed tailseat bin/board.sh 's|^    wr_seat_arg "\$seat"; a=|    a=|'
+[ "$(grep -c 'wr_seat_arg' "$MA/tailseat/bin/board.sh")" = 0 ] && [ "$(grep -c '^    a="\$W/.anchor-\$seat"' "$MA/tailseat/bin/board.sh")" = 1 ] && pa_mut tailseat fx_s1 || bad "mutant tailseat: the change was not applied"
+pa_mcopy nopython; pa_msed nopython bin/_common.sh 's|^wr_need_python$|:|'
+[ "$(grep -c '^wr_need_python$' "$MA/nopython/bin/_common.sh")" = 0 ] && [ "$(grep -c '^:$' "$MA/nopython/bin/_common.sh")" = 1 ] && pa_mut nopython fx_p1 || bad "mutant nopython: the change was not applied"
+pa_mcopy relw; pa_msed relw bin/_common.sh '/^case "\$WARROOM_DIR" in \/\*) ;; \*) wr_refuse/d;/^  case "\$_rp" in \/\*) ;; \*) _WR_WHY="is not an absolute path"/d'
+[ "$(grep -c 'WARROOM_DIR must be an absolute path' "$MA/relw/bin/_common.sh")" = 0 ] && [ "$(grep -c '_WR_WHY="is not an absolute path"' "$MA/relw/bin/_common.sh")" = 0 ] && pa_mut relw fx_r6 || bad "mutant relw: the change was not applied"
+pa_mcopy noancestor; pa_msed noancestor bin/_common.sh '/^  case "\$_fw\/" in "\$_fb"\/\*) wr_refuse/d'
+[ "$(grep -c 'is a folder above the run folder' "$MA/noancestor/bin/_common.sh")" = 0 ] && pa_mut noancestor fx_r5 || bad "mutant noancestor: the change was not applied"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail

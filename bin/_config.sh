@@ -13,16 +13,17 @@
 WR_KEYS="SEATS WARROOM_DIR BOARD WARROOM_POLL WARROOM_MIN_GAP WARROOM_IDLE_MIN WARROOM_LONG"
 WR_SEAT_RE='^[A-Z][A-Z0-9_]{0,15}$'
 
-wr_config_path() { if [ -n "${WARROOM_ENV:-}" ]; then printf '%s\n' "$WARROOM_ENV"; else printf '%s\n' "$HOME/.warroom/warroom.env"; fi; }
+wr_config_path() { if [ -n "${WARROOM_ENV:-}" ]; then printf '%s\n' "$WARROOM_ENV"; else printf '%s\n' "${HOME%/}/.warroom/warroom.env"; fi; }
 
 # wr_check_value VALUE: prints VALUE with a leading ~/ or $HOME/ expanded; returns 1 when VALUE breaks the grammar
 # shellcheck disable=SC2088  # the quoted ~ is on purpose: it matches a literal ~ written in the file
 wr_check_value() {
   _cv_p=""; _cv_r=$1
+  # a bare ~ or $HOME stays $HOME as written: stripping its trailing / would turn HOME=/ into an empty prefix
   case "$1" in
     "~"|'$HOME') _cv_p=$HOME; _cv_r="" ;;
-    "~/"*)       _cv_p="$HOME/"; _cv_r=${1#"~/"} ;;
-    '$HOME/'*)   _cv_p="$HOME/"; _cv_r=${1#'$HOME/'} ;;
+    "~/"*)       _cv_p="${HOME%/}/"; _cv_r=${1#"~/"} ;;
+    '$HOME/'*)   _cv_p="${HOME%/}/"; _cv_r=${1#'$HOME/'} ;;
   esac
   case "$_cv_r" in *[!A-Za-z0-9\ _./~-]*) return 1 ;; esac
   printf '%s' "$_cv_p$_cv_r"

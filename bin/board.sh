@@ -25,7 +25,8 @@ $text
 EOT
     wr_append "$out" ;;
   tail)
-    seat=${2:?usage: board.sh tail SEAT}; a="$W/.anchor-$seat"
+    seat=${2:-}; [ -n "$seat" ] || { echo "usage: board.sh tail SEAT" >&2; exit 2; }
+    wr_seat_arg "$seat"; a="$W/.anchor-$seat"          # a seat becomes part of a path: it must be in SEATS before any lock or file
     wr_lock "$a" || { echo "could not lock the anchor for $seat" >&2; exit 1; }     # two tails never write an older line over a newer one
     g=$(wr_generation "$BOARD_FILE"); n=$(wc -l < "$BOARD_FILE" | tr -d ' ')
     last=$(wr_cursor_get "$a" "$BOARD_FILE" 31536000); [ "$last" = none ] && last=0
