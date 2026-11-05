@@ -29,8 +29,10 @@ import argparse
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Parser: a closed subset of Bash. Anything outside it raises ParseError, which is a tool error, never a pass.
@@ -189,6 +191,7 @@ class Parser:
                 if c == ';' and not self.s.startswith(';;', self.i) and not self.s.startswith(';&', self.i):
                     self.i += 1
                 elif c == '&' and not self.s.startswith('&&', self.i):
+                    items[-1].bg = True     # runs in the background: its status and its exit never reach this shell
                     self.i += 1
         return Node('list', start, self.i, items=items)
 
@@ -737,6 +740,10 @@ DECLS = set('local export readonly declare typeset'.split())
 FILE_TEST_OPS = set('-e -f -d -L -h -r -w -x -s -S -p -b -c -O -G -k -u -g -nt -ot -ef'.split())
 SAFE_CLEANUP = set('echo printf wr_drop wr_unlock rm : true exec'.split())
 REFUSE_VARS = set(['WR_CONFIG_EXIT'])
+# words a refusal relies on: a script that redefines, removes, disables or aliases one of them is a tool error
+REFUSAL_WORDS = set('exit return break continue exec trap set shopt unset command builtin eval source . : true false'.split())
+SHADOW_CMDS = set('alias unalias enable'.split())
+TRAP_SAFE = set('wr_drop wr_unlock rm echo printf : true'.split())
 REASONS = {
     'D': 'display-only value (a time or a quoted path in a message)',
     'K': 'the literal tab',
@@ -851,6 +858,82 @@ class Analyzer:
             if root is node:
                 return name
 
+    # --- words a refusal depends on must mean what they say ---
+    def validate(self):
+        for fname, (src, parser, root) in self.files.items():
+            for nd in walk(root):
+                if nd.k == 'func' and nd.name in REFUSAL_WORDS:
+                    raise ParseError('%s line %d: a function named %s shadows the shell word a refusal relies on' % (
+                        fname, parser.line(nd.start), nd.name))
+                if nd.k != 'simple' or not nd.words:
+                    continue
+                name = cmd_name(nd)
+                args = [word_lit(w) for w in nd.words[1:]]
+                where = '%s line %d' % (fname, parser.line(nd.start))
+                if name in SHADOW_CMDS:
+                    raise ParseError('%s: %s can change what exit, return or a helper means' % (where, name))
+                if name == 'unset':
+                    if '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):
+                        raise ParseError('%s: unset names a function or a refusal word' % where)
+                if name == 'trap':
+                    self.check_trap(where, args)
+
+    def check_trap(self, where, args):
+        if any(a is None for a in args):
+            raise ParseError('%s: trap with a computed argument' % where)
+        if not args or args[0] in ('-p', '-l'):
+            return
+        action, sigs = args[0], args[1:]
+        if not sigs or action == '' or not any(x in ('EXIT', '0', 'ERR', 'DEBUG', 'RETURN') for x in sigs):
+            return
+        try:
+            tree = Parser(action).parse_script()
+        except ParseError as e:
+            raise ParseError('%s: trap action does not parse (%s)' % (where, e))
+        link(tree)
+        for c in walk(tree):
+            if c.k in ('cs', 'ps', 'bt', 'func'):
+                raise ParseError('%s: trap action holds a substitution or a function' % where)
+            if c.k == 'simple' and c.words:
+                nm = cmd_name(c)
+                if nm not in TRAP_SAFE:
+                    raise ParseError('%s: an EXIT trap may rewrite the exit status; only %s are allowed in its action, not %s' % (
+                        where, ' '.join(sorted(TRAP_SAFE)), nm))
+                if self.can_exit(nm, set()):
+                    raise ParseError('%s: trap helper %s can end the shell' % (where, nm))
+
+    def can_exit(self, name, seen):
+        """True when function `name`, or a function it calls, runs `exit` (a return only leaves the function)."""
+        if name in seen:
+            return False
+        seen.add(name)
+        for _, fn in self.funcs.get(name, []):
+            for d in walk(fn):
+                if d.k == 'simple' and d.words:
+                    nm = cmd_name(d)
+                    if nm in ('exit', 'kill') or (nm in self.funcs and self.can_exit(nm, seen)):
+                        return True
+        return False
+
+    def proc_ok(self, node):
+        """True when the refusal at `node` runs in the shell that did the read: not in the background, not a pipeline stage,
+        not a subshell, not inside a substitution."""
+        n = node
+        while n is not None:
+            if getattr(n, 'bg', False):
+                return False
+            p = n.parent
+            if p is None:
+                return True
+            if p.k == 'pipe' and len(p.cmds) > 1:
+                return False
+            if p.k in ('subshell', 'cs', 'ps', 'bt'):
+                return False
+            if p.k in ('func', 'script'):
+                return True
+            n = p
+        return True
+
     # --- refusal ---
     def compute_refusing(self):
         self.refusing = set()
@@ -874,7 +957,7 @@ class Analyzer:
     def refusal_stmt(self, item, bare_ok=False):
         """item: an andor. True when running it always ends the function or script with a nonzero status."""
         if item.k == 'andor':
-            if len(item.parts) != 1:
+            if len(item.parts) != 1 or getattr(item, 'bg', False):
                 return False
             return self.refusal_stmt(item.parts[0], bare_ok)
         if item.k == 'pipe':
@@ -889,6 +972,12 @@ class Analyzer:
             name = cmd_name(item)
             args = [word_lit(w) for w in item.words[1:]]
             if name in ('exit', 'return'):
+                if name == 'return':
+                    a_ = item.parent
+                    while a_ is not None and a_.k != 'func':
+                        a_ = a_.parent
+                    if a_ is None:
+                        return False        # outside a function (or a sourced file) return fails and the script goes on
                 if not args:
                     return bare_ok
                 a = args[0]
@@ -971,6 +1060,8 @@ class Analyzer:
                     if st == 'F':
                         rhs = p.parts[i + 1]
                         if self.refusal_stmt(rhs, bare_ok=True):
+                            if not self.proc_ok(p):
+                                return self.bad('the refusal runs in another process (background job, pipeline stage, subshell)')
                             return self.ok('REFUSE')
                         if self.is_continue(rhs):
                             return self.bad('the failure only continues the loop', needs=('C',))
@@ -1004,10 +1095,16 @@ class Analyzer:
                     for j, (cond, body) in enumerate(o.clauses):
                         if p is cond:
                             if st == 'T':
-                                return self.ok('REFUSE') if self.refusal_list(body) else self.bad('the then branch does not refuse')
+                                if not self.refusal_list(body):
+                                    return self.bad('the then branch does not refuse')
+                                if not self.proc_ok(p):
+                                    return self.bad('the refusal runs in another process (background job, pipeline stage, subshell)')
+                                return self.ok('REFUSE')
                             if j < len(o.clauses) - 1:
                                 return self.bad('an elif chain: the failure goes to the next condition')
                             if o.els is not None and self.refusal_list(o.els):
+                                if not self.proc_ok(p):
+                                    return self.bad('the refusal runs in another process (background job, pipeline stage, subshell)')
                                 return self.ok('REFUSE')
                             return self.bad('the failure falls through the if (no else that refuses)')
                     n = o
@@ -1459,6 +1556,7 @@ class Analyzer:
         return self.bad('no checked capture of the variable before the loop')
 
     def run(self):
+        self.validate()
         self.compute_refusing()
         self.propagating = set()
         for _ in range(12):
@@ -1976,6 +2074,15 @@ MUTANTS = [
     ('i1-bare-exit-group-control', 'pos_i1_exit.sh', '|| exit 1', '|| { exit; }', 'ok'),
     ('i1-conditional-terminal', 'pos_i1_exit.sh', '|| exit 1', '|| { [ -n "$F" ] && exit 1; }', 'falls back'),
     ('i1-unreachable-terminal', 'pos_i1_exit.sh', '|| exit 1', '|| { exit 1; echo x; }', 'falls back'),
+    ('i1-background-refusal', 'pos_i1_exit.sh', '|| exit 1', '|| exit 1 &', 'another process'),
+    ('i1-group-pipe-stage', 'pos_i1_exit.sh', 'x=$(cat "$F") || exit 1', '{ x=$(cat "$F") || exit 1; } | cat', 'another process'),
+    ('i1-refusal-in-subshell', 'pos_i1_exit.sh', 'x=$(cat "$F") || exit 1', '( x=$(cat "$F") || exit 1 )', 'another process'),
+    ('i1-toplevel-return', 'pos_i1_exit.sh', '|| exit 1', '|| return 1', 'falls back'),
+    ('i1-exit-trap-rewrites', 'pos_i1_exit.sh', 'F=${1:-}', "trap 'exit 0' EXIT; F=${1:-}", 'unparsed'),
+    ('i1-exit-trap-cleanup-control', 'pos_i1_exit.sh', 'F=${1:-}', "trap 'rm -f x' EXIT; F=${1:-}", 'ok'),
+    ('i1-exit-function-shadow', 'pos_i1_exit.sh', 'F=${1:-}', 'exit() { echo nope; }; F=${1:-}', 'unparsed'),
+    ('i1-unset-function', 'pos_i1_exit.sh', 'F=${1:-}', 'unset -f die; F=${1:-}', 'unparsed'),
+    ('i1-alias', 'pos_i1_exit.sh', 'F=${1:-}', 'alias exit=true; F=${1:-}', 'unparsed'),
     ('i1-masked-sequence', 'pos_i1_exit.sh', 'x=$(cat "$F")', 'x=$(cat "$F"; echo done)', 'statement after it'),
     ('i1-or-in-body', 'pos_i1_exit.sh', 'x=$(cat "$F")', 'x=$(cat "$F" || echo none)', 'falls back'),
     ('i1-declaration', 'pos_i1_exit.sh', 'x=$(cat "$F") || exit 1', 'local x=$(cat "$F") || exit 1', 'declaration builtin'),
@@ -2028,6 +2135,20 @@ MUTANTS = [
     ('c-count', 'pos_c_continue.sh', '|| continue', '|| continue 2', 'falls back'),
     ('o-not-isolated', 'pos_o_opaque.sh', 'python3 -I -c', 'python3 -c', '@isolated'),
     ('o-text-changed', 'pos_o_opaque.sh', "print(1)", "print(2)", 'matches no occurrence'),
+]
+
+
+# Mutants of this file: take a check out, and the fixture that pins it must stop failing. (name, old text, new text, fixture)
+CODE_MUTANTS = [
+    ('code-no-background-in-branch', "len(item.parts) != 1 or getattr(item, 'bg', False)", 'len(item.parts) != 1', 'neg_proc_background_exit.sh'),
+    ('code-no-background-in-chain', "if getattr(n, 'bg', False):", 'if False:', 'neg_proc_background_list.sh'),
+    ('code-no-pipe-stage-check', "if p.k == 'pipe' and len(p.cmds) > 1:\n                return False", 'if False:\n                return False', 'neg_proc_group_pipe_stage.sh'),
+    ('code-return-anywhere', 'return False        # outside a function', 'pass        # outside a function', 'neg_proc_toplevel_return.sh'),
+    ('code-no-exit-trap-check', "if name == 'trap':", 'if False:', 'neg_proc_exit_trap_rewrites.sh'),
+    ('code-no-function-shadow-check', "if nd.k == 'func' and nd.name in REFUSAL_WORDS:", 'if False:', 'neg_shadow_exit_function.sh'),
+    ('code-no-return-shadow-check', "if nd.k == 'func' and nd.name in REFUSAL_WORDS:", 'if False:', 'neg_shadow_return_function.sh'),
+    ('code-no-unset-check', "if '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):", 'if False:', 'neg_shadow_unset_function.sh'),
+    ('code-redefined-helper', 'name in self.refusing or len(defs) != 1', 'name in self.refusing or len(defs) < 1', 'neg_shadow_helper_redefined.sh'),
 ]
 
 
@@ -2117,6 +2238,31 @@ def self_test(here):
             continue
         check('mutant %s (fails)' % mid, bool(diag), 'the mutant was accepted')
         check('mutant %s (diagnostic %r)' % (mid, want), any(want.lower() in x.lower() for x in diag), 'got: %s' % diag[:3])
+    # code mutants: the gate with one check removed must accept the fixture that pins that check
+    with open(me, encoding='utf-8') as fh:
+        src = fh.read()
+    i0 = src.index('CODE_MUTANTS = [')
+    src = src[:i0] + src[src.index('\n]\n', i0) + 3:]       # the table names the texts it changes: look past it
+    tmpd = tempfile.mkdtemp(prefix='read-gate-mut-')
+    try:
+        for mid, old, new, fx in CODE_MUTANTS:
+            if fx not in texts:
+                fails.append('code mutant %s: fixture %s is missing' % (mid, fx))
+                continue
+            if src.count(old) != 1:
+                fails.append('code mutant %s: the change was not applied (%d matches)' % (mid, src.count(old)))
+                continue
+            want_rc = 2 if parse_header(texts[fx])[0][0] == 'error' else 1
+            mpath = os.path.join(tmpd, 'mutant.py')
+            with open(mpath, 'w', encoding='utf-8') as fh:
+                fh.write(src.replace(old, new))
+            pr = subprocess.run([sys.executable, '-I', mpath, '--enforce', '--fixture', os.path.join(fx_dir, fx)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            check('code mutant %s (the fixture %s is accepted)' % (mid, fx), pr.returncode == 0,
+                  'exit %d (a fixture that still fails means the check is not pinned): %s' % (pr.returncode, pr.stdout.strip()[:160]))
+            _ = want_rc
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
     # a gate that is broken must not look like a pass: parse failure and a missing file are tool errors (exit 2)
     pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--fixture', os.path.join(fx_dir, 'does-not-exist.sh')],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
@@ -2124,7 +2270,7 @@ def self_test(here):
     pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--root', os.path.join(fx_dir, 'no-such-root')],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
     check('empty discovery is a tool error', pr.returncode == 2, 'exit %d' % pr.returncode)
-    print('read-gate self-test: %d checks passed, %d failed (%d fixtures, %d mutants)' % (passes, len(fails), len(names), len(MUTANTS)))
+    print('read-gate self-test: %d checks passed, %d failed (%d fixtures, %d mutants, %d code mutants)' % (passes, len(fails), len(names), len(MUTANTS), len(CODE_MUTANTS)))
     for f in fails:
         print('  FAIL: %s' % f)
     return 1 if fails else 0
