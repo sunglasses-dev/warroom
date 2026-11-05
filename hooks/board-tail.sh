@@ -7,10 +7,11 @@ WR_CONFIG_EXIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"; . "$HERE/../bin/_cursor.sh"
 case "${1:-}" in -h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat 2>/dev/null)
-SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)
+SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "board-tail: python3 could not read the hook input as JSON" >&2; exit 1; }
 [ -n "$SID" ] || exit 0
 seat=$(awk -F'\t' -v s="$SID" '$1==s {print $2}' "$W/seats.tsv" 2>/dev/null | tail -1)
 [ -n "$seat" ] && [ "$seat" != NONE ] || exit 0
+wr_seat_ok "$seat" || exit 0          # a registry row is data: a seat outside SEATS never becomes the name of an anchor file
 n=$(wc -l < "$BOARD_FILE" | tr -d ' '); last=$(wr_cursor_get "$W/.anchor-$seat" "$BOARD_FILE" 31536000); [ "$last" = none ] && last=0
 new=$((n-last)); [ "$new" -gt 0 ] || exit 0
 echo "[BOARD] $new new line(s) since your last read. Read them with: bash $(printf '%q' "$(cd "$HERE/../bin" && pwd)/board.sh") tail $seat"

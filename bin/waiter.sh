@@ -16,10 +16,11 @@
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"; . "$HERE/_cursor.sh"
 case "${1:-}" in -h|--help|help|"") sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 SEAT=$1; SID=${2:-}; POLL=${WARROOM_POLL:-5}; GAP=${WARROOM_MIN_GAP:-60}; AGE=${WARROOM_CURSOR_MAX_AGE:-86400}
-REG="$W/seats.tsv"; touch "$REG"; TAB="$(printf '\t')"
-if [ "$SEAT" != NONE ] && ! wr_seat_ok "$SEAT"; then echo "unknown seat '$SEAT' (seats: $SEATS, or NONE)" >&2; exit 2; fi
+REG="$W/seats.tsv"; TAB="$(printf '\t')"
+[ "$SEAT" = NONE ] || wr_seat_arg "$SEAT" ", or NONE"        # before the registry is created or any per-seat path is built
 case "$SID" in ''|unknown) echo "a session id is required: waiter.sh SEAT SESSION_ID (see README, quick start)" >&2; exit 2 ;; esac
 case "$SID" in *[!A-Za-z0-9._-]*) echo "the session id may hold only letters, digits, '.', '_' and '-'" >&2; exit 2 ;; esac
+touch "$REG"
 CUR="$W/.cursor-$SEAT"; LAST="$W/.lastwake-$SEAT"
 # No row without an identity: the waiter's own start time must be readable before it takes anything. Without it a row could
 # only be judged by its pid, and a reused pid would then look like a live waiter.

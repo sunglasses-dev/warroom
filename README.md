@@ -39,7 +39,7 @@ Take care with the edit. On Claude Code 2.1.318 we saw this, in a fresh session:
 
 The hooks apply to every Claude Code session that reads that settings file, including sessions in other projects. Each session you want left alone opts out on its own with `waiter.sh NONE <session id>`.
 
-`warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else.
+`warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else. `$WARROOM_ENV` must be an absolute path.
 
 Keep the clone where it is: the hooks hold its absolute path. After a move, edit the four paths in the settings file by hand. To remove the war room, see the end of `docs/INSTALL.md`: remove the four entries, stop your jobs, and delete the run directory only after looking inside it.
 

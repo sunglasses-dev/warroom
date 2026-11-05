@@ -13,7 +13,7 @@ We aim to reply within 72 hours, tell you what we will do, and credit you in the
 ## What is in scope
 
 - Anything that lets a board line, a file in the run directory, or a pull request run code you did not intend
-- A script or hook in this repository that edits the Claude Code settings file as a feature. No dedicated settings editor is included. Runtime paths are not validated against settings or other state files; a misconfiguration or link can create, overwrite or delete unrelated data.
+- A script or hook in this repository that edits the Claude Code settings file as a feature. No dedicated settings editor is included.
 - The leak check missing a kind of leak it says it checks for (it checks a fixed list of patterns, nothing more)
 
 ## What the scripts do not do
@@ -24,4 +24,4 @@ These describe what the scripts are written to do. They are not a sandbox: the s
 - Ask for elevated rights. Nothing here uses `sudo`, and nothing checks who runs it, so do not run the scripts as root.
 - Read files beyond the ones each tool needs. What each reads: the configured run directory and board path (`$WARROOM_DIR` and `$BOARD`, either of which can point outside the clone), `warroom.env` from `$WARROOM_ENV` or else `~/.warroom/warroom.env` (never found by searching the current folder or the clone), their own scripts, the process list through `ps` (`pids.sh`, `board-guard.sh`, `waiter.sh` and `hooks/waiter-check.sh`). `tools/leak-check.sh` reads the tree and the denylist you point it at.
 - `warroom.env` is data. It is parsed line by line with a short list of allowed keys and characters and is never sourced or passed to a shell, so a value cannot run code. A repeated key is refused.
-- Edit the Claude Code settings file for you. No dedicated settings editor is included. Runtime paths are not validated against settings or other state files; a misconfiguration or link can create, overwrite or delete unrelated data. `docs/INSTALL.md` asks you, or your Claude Code session, to make the one edit by hand after saving a copy.
+- Edit the Claude Code settings file for you. No dedicated settings editor is included. The scripts apply the destination and leaf checks listed below; configured paths are not a filesystem sandbox. After reading configuration, a metadata-only validator rejects listed settings basenames for W/B, the physical config directory for W, and the specified config/state aliases and reserved board paths before bootstrap. Name checks do not identify arbitrary hard-link or Unicode aliases; existing multi-link board files are separately refused, and path mutation, cross-run nesting and external board sidecars have the stated limits. `docs/INSTALL.md` asks you, or your Claude Code session, to make the one edit by hand after saving a copy.

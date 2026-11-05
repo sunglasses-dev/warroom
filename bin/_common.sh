@@ -6,19 +6,152 @@ export LC_ALL=C
 WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=bin/_config.sh
 . "$WR_ROOT/bin/_config.sh"
-# shellcheck disable=SC2034  # WR_ENV_FILE and BOSS_SEAT are read by the scripts that source this file
-WR_ENV_FILE=$(wr_config_path)
 # Exit code for a bad config: 2 in bin/ scripts. Hooks set WR_CONFIG_EXIT=1 before sourcing this file, because Claude
 # Code reads a hook's exit 2 as "block this prompt": one bad line in warroom.env would lock every session out.
 # Exit 1 is shown as a hook error and the prompt goes through. Only 1 and 2 are accepted.
 case "${WR_CONFIG_EXIT:-}" in 1) ;; *) WR_CONFIG_EXIT=2 ;; esac
+# --- Where things go: resolve first, refuse before anything is created ---------------------------------------------
+# The run folder W, the board B and the config file C are resolved once, from metadata only (a stat-like look: the contents
+# of a settings file are never opened), and the run stops before the bootstrap when one of them is unusable, is named like
+# a Claude Code settings file, is the config folder, or collides with a name this tool writes. Not a sandbox: see SECURITY.md.
+wr_refuse() { echo "$1" >&2; exit "$WR_CONFIG_EXIT"; }
+wr_fold() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }          # ASCII only; Unicode spellings are not folded (SECURITY.md)
+# python3 is a hard dependency (locks, state writes, hook input). Checked first, with a call that imports nothing, so the
+# failure names python3 instead of surfacing later as a lock or parse error.
+wr_need_python() {
+  command -v python3 >/dev/null 2>&1 && python3 -I -S -c 'pass' >/dev/null 2>&1 && return 0
+  wr_refuse "python3 is required (locks, state writes and the hooks use it) and must be on the PATH of this process; install it or fix PATH and try again"
+}
+# wr_resolve PATH KIND: KIND is dir, file or input. 0 = _WR_RES holds the physical absolute path; 1 = _WR_WHY says why not.
+# Nothing is created and no file is opened. A missing tail is appended as written (lower parts that exist are resolved).
+wr_resolve() {
+  _WR_RES=""; _WR_WHY=""; _rp=$1; _rk=$2
+  case "$_rp" in /*) ;; *) _WR_WHY="is not an absolute path"; return 1 ;; esac
+  _rb=${_rp#/}
+  if [ "$_rk" = dir ]; then case "$_rb" in */) _rb=${_rb%/} ;; esac; fi          # one trailing / is allowed on a folder
+  [ -n "$_rb" ] || { _WR_WHY="names no folder or file (it is /)"; return 1; }
+  case "/$_rb/" in *//*|*/./*|*/../*) _WR_WHY="has an empty, . or .. component, or ends in a second /"; return 1 ;; esac
+  if [ "$_rk" = dir ]; then _rs="/$_rb"; _rl=""
+  else _rl=${_rb##*/}; case "$_rb" in */*) _rs="/${_rb%/*}" ;; *) _rs=/ ;; esac; fi   # a file or input starts at its parent
+  _rm=""
+  while [ ! -e "$_rs" ] && [ ! -L "$_rs" ]; do _rm="/${_rs##*/}$_rm"; _rs=${_rs%/*}; [ -n "$_rs" ] || _rs=/; done
+  _ra=$(cd -P -- "$_rs" 2>/dev/null && pwd -P) || { _WR_WHY="cannot be resolved: its nearest existing parent is not a searchable folder"; return 1; }
+  [ "$_ra" = / ] && _ra=""
+  case "$_rk" in
+    dir) _WR_RES="$_ra$_rm" ;;
+    file)
+      _WR_RES="$_ra$_rm/$_rl"
+      if [ -L "$_WR_RES" ]; then _WR_WHY="is a symlink; a protected file has one name"; _WR_RES=""; return 1; fi
+      if [ -e "$_WR_RES" ] && [ ! -f "$_WR_RES" ]; then _WR_WHY="exists and is not a regular file"; _WR_RES=""; return 1; fi ;;
+    input)   # the config file may be a symlink (dotfile managers): its identity follows the links; a loop is refused
+      _WR_RES=$(python3 -I -S -c 'import errno, os, sys
+try: os.stat(sys.argv[1])
+except OSError as e:
+    if e.errno == errno.ELOOP: sys.exit(4)
+print(os.path.realpath(sys.argv[1]))' "$_rp" 2>/dev/null); _rr=$?
+      if [ "$_rr" = 4 ]; then _WR_RES=""; _WR_WHY="config path loops"; return 1; fi
+      if [ "$_rr" != 0 ] || [ -z "$_WR_RES" ]; then _WR_RES=""; _WR_WHY="cannot be resolved"; return 1; fi ;;
+    *) _WR_WHY="unknown kind"; return 1 ;;
+  esac
+  return 0
+}
+# The names this tool writes inside a run folder, by family (folded names): a board or config file may not take one.
+wr_reserved_name() {
+  case "$1" in
+    seats.tsv|pids.tsv|.cursor-*|.lastwake-*|.anchor-*|.guard-*|.poll-*|.snap-*|.wrtmp.*|*.flock|*.tmp.[0-9]*|*.chunk.[0-9]*) return 0 ;;
+  esac
+  return 1
+}
+# wr_reserved_below ROOT PATH (both folded): 0 when PATH is below ROOT and a component of the part below ROOT is reserved
+wr_reserved_below() {
+  case "$2" in "$1"/*) ;; *) return 1 ;; esac
+  _rbr=${2#"$1"/}
+  while [ -n "$_rbr" ]; do
+    wr_reserved_name "${_rbr%%/*}" && return 0
+    case "$_rbr" in */*) _rbr=${_rbr#*/} ;; *) _rbr="" ;; esac
+  done
+  return 1
+}
+# wr_ef_reserved FILE: 0 when FILE is the same file (hard link or link target) as an existing top-level reserved entry of W
+wr_ef_reserved() {
+  for _er in "$WR_W_RES"/* "$WR_W_RES"/.[!.]* "$WR_W_RES"/..?*; do
+    [ -e "$_er" ] || continue
+    wr_reserved_name "$(wr_fold "${_er##*/}")" || continue
+    [ "$1" -ef "$_er" ] && return 0
+  done
+  return 1
+}
+# wr_validate_paths: D1-D6, run on the resolved W (WR_W_RES), B (WR_B_RES) and C (WR_C_RES), before any directory is made
+wr_validate_paths() {
+  _fw=$(wr_fold "$WR_W_RES"); _fb=$(wr_fold "$WR_B_RES"); _fc=$(wr_fold "$WR_C_RES")
+  # D1 a Claude Code settings name
+  for _d1 in "${_fw##*/}" "${_fb##*/}"; do
+    case "$_d1" in settings.json|settings.[l]ocal.json|managed-settings.json|.claude.json)
+      wr_refuse "the run folder or the board is named like a Claude Code settings file ($_d1); choose another name" ;; esac
+  done
+  # D2 the Claude Code config folder itself (a subfolder of it stays legal)
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then _cfg=$CLAUDE_CONFIG_DIR
+  else case "${HOME:-}" in /*) _cfg="${HOME%/}/.claude" ;; *) _cfg="" ;; esac; fi
+  case "$_cfg" in /*) ;; *) wr_refuse "cannot locate the Claude Code config folder; set CLAUDE_CONFIG_DIR absolute" ;; esac
+  wr_resolve "$_cfg" dir || wr_refuse "cannot locate the Claude Code config folder ('$_cfg' $_WR_WHY); set CLAUDE_CONFIG_DIR absolute"
+  [ "$_fw" != "$(wr_fold "$_WR_RES")" ] || wr_refuse "WARROOM_DIR is the Claude Code config folder ($WR_W_RES); use a dedicated subfolder or a path outside it"
+  # D5 shapes that make the board and the run folder the same thing or nest them the wrong way round
+  [ "$_fb" != "$_fw" ] || wr_refuse "the board is the run folder ($WR_W_RES); BOARD must name a file"
+  case "$_fw/" in "$_fb"/*) wr_refuse "the board ($WR_B_RES) is a folder above the run folder; bootstrap would make it a directory" ;; esac
+  # D3 a board at a reserved state name, at any depth below the run folder; a board never ends in .flock
+  if wr_reserved_below "$_fw" "$_fb"; then wr_refuse "the board ($WR_B_RES) is at a name this tool writes inside the run folder (seats.tsv, pids.tsv, .cursor-*, .lastwake-*, .anchor-*, .guard-*, .poll-*, .snap-*, .wrtmp.*, *.flock, *.tmp.<digits>, *.chunk.<digits>); choose another name"; fi
+  case "${_fb##*/}" in *.flock) wr_refuse "the board ($WR_B_RES) ends in .flock, which is the lock-file name; choose another name" ;; esac
+  # D4 the board or the run folder is the config file; an existing board is the same file as the config or as a state entry
+  [ "$_fb" != "$_fc" ] || wr_refuse "the board is the config file ($WR_C_RES)"
+  [ "$_fw" != "$_fc" ] || wr_refuse "the run folder is the config file ($WR_C_RES)"
+  if [ -e "$WR_B_RES" ]; then
+    if [ -e "$WR_C_SEL" ] && [ "$WR_B_RES" -ef "$WR_C_SEL" ]; then wr_refuse "the board is the same file as the config file"; fi
+    if wr_ef_reserved "$WR_B_RES"; then wr_refuse "the board is the same file as a state entry of the run folder"; fi
+  fi
+  # D6 the config file at a name this tool writes (it exists or not), or the same file as one that does
+  if wr_reserved_below "$_fw" "$_fc"; then wr_refuse "the config file ($WR_C_RES) is at a name this tool writes inside the run folder; move warroom.env"; fi
+  case "${_fc##*/}" in *.flock) wr_refuse "the config file ($WR_C_RES) ends in .flock, which is the lock-file name; move warroom.env" ;; esac
+  [ "$_fc" != "$_fb.flock" ] || wr_refuse "the config file is the board's lock file ($WR_C_RES)"
+  if [ -e "$WR_C_SEL" ]; then
+    if [ -e "$WR_B_RES" ] && [ "$WR_C_SEL" -ef "$WR_B_RES" ]; then wr_refuse "the config file is the same file as the board"; fi
+    if [ -e "$WR_B_RES.flock" ] && [ "$WR_C_SEL" -ef "$WR_B_RES.flock" ]; then wr_refuse "the config file is the same file as the board's lock file"; fi
+    if wr_ef_reserved "$WR_C_SEL"; then wr_refuse "the config file is the same file as a state entry of the run folder"; fi
+  fi
+  return 0
+}
+# wr_seat_arg SEAT [EXTRA]: a seat name that becomes part of a path must be in SEATS; exit 2 before any per-seat lock, temp or write
+wr_seat_arg() {
+  wr_seat_ok "$1" && return 0
+  echo "unknown seat '$1' (seats: $SEATS${2:-})" >&2; exit 2
+}
+wr_need_python
+WR_C_SEL=$(wr_config_path)
+if [ -z "${WARROOM_ENV:-}" ]; then case "${HOME:-}" in /*) ;; *) wr_refuse "cannot locate warroom.env: HOME is not an absolute path (set WARROOM_ENV to an absolute path)" ;; esac; fi
+case "$WR_C_SEL" in /*) ;; *) wr_refuse "WARROOM_ENV must be an absolute path (got '$WR_C_SEL')" ;; esac
+wr_resolve "$WR_C_SEL" input || wr_refuse "the config file '$WR_C_SEL' $_WR_WHY"
+WR_C_RES=$_WR_RES
+# shellcheck disable=SC2034  # WR_ENV_FILE and BOSS_SEAT are read by the scripts that source this file
+WR_ENV_FILE=$WR_C_SEL
 if [ -f "$WR_ENV_FILE" ]; then wr_load_config "$WR_ENV_FILE" || exit "$WR_CONFIG_EXIT"; else WR_ENV_FILE=""; fi
 SEATS=${SEATS:-"BOSS MANAGER W1 W2"}
 wr_seats_ok "$SEATS" || { echo "SEATS='$SEATS': names are [A-Z][A-Z0-9_]{0,15}, no repeats; ALL, NONE and GUARD are reserved" >&2; exit "$WR_CONFIG_EXIT"; }
-WARROOM_DIR=${WARROOM_DIR:-$HOME/warroom-run}
+if [ -z "${WARROOM_DIR:-}" ]; then
+  case "${HOME:-}" in /*) WARROOM_DIR="${HOME%/}/warroom-run" ;; *) wr_refuse "WARROOM_DIR is not set and HOME is not an absolute path; set WARROOM_DIR to an absolute path" ;; esac
+fi
+case "$WARROOM_DIR" in /*) ;; *) wr_refuse "WARROOM_DIR must be an absolute path (got '$WARROOM_DIR')" ;; esac
+wr_resolve "$WARROOM_DIR" dir || wr_refuse "WARROOM_DIR '$WARROOM_DIR' $_WR_WHY"
+WR_W_RES=$_WR_RES
+W=${WARROOM_DIR%/}
 BOARD=${BOARD:-board.md}
-case "$BOARD" in /*) BOARD_FILE="$BOARD" ;; *) BOARD_FILE="$WARROOM_DIR/$BOARD" ;; esac
-W="$WARROOM_DIR"
+case "$BOARD" in
+  /*) BOARD_FILE="$BOARD" ;;
+  *) case "/$BOARD/" in */./*|*/../*) wr_refuse "BOARD must not contain . or .. components; write board.md" ;; esac
+     BOARD_FILE="$W/$BOARD" ;;
+esac
+wr_resolve "$BOARD_FILE" file || wr_refuse "BOARD '$BOARD_FILE' $_WR_WHY"
+WR_B_RES=$_WR_RES
+wr_validate_paths
+readonly W BOARD_FILE WR_W_RES WR_B_RES WR_C_SEL WR_C_RES
 # Create a missing board with >>, which never truncates: two scripts that both find it missing must not erase each
 # other's first post. If the run directory or the board cannot be created, say so and stop (a hook exits 1, not 2).
 mkdir -p "$W" 2>/dev/null

@@ -9,7 +9,7 @@ WR_CONFIG_EXIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"
 case "${1:-}" in -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat 2>/dev/null)
-SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)
+SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "waiter-check: python3 could not read the hook input as JSON" >&2; exit 1; }
 [ -n "$SID" ] || exit 0
 WAIT=$(printf '%q' "$(cd "$HERE/../bin" && pwd)/waiter.sh")      # printed commands are shell-quoted: a path may hold spaces
 REG="$W/seats.tsv"; touch "$REG"
@@ -17,6 +17,7 @@ row=$(awk -F'\t' -v s="$SID" '$1==s' "$REG" | tail -1)
 if [ -n "$row" ]; then
   seat=$(printf '%s' "$row" | cut -f2); pid=$(printf '%s' "$row" | cut -f3); started=$(printf '%s' "$row" | cut -f5); cols=$(printf '%s' "$row" | awk -F'\t' '{print NF}')
   [ "$seat" = NONE ] && exit 0
+  wr_seat_ok "$seat" || { echo "unknown seat in registry" >&2; exit 0; }       # registry rows are data: a seat that is not in SEATS is not trusted
   # the waiter itself: same pid and same start time (a reused pid is not this waiter). A row with an empty start time and a
   # live pid is "cannot tell", never silent; only an old four-column row is judged by the pid alone.
   case "$(wr_rowproc "$pid" "$started" "$cols")" in
