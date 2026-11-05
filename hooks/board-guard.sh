@@ -36,16 +36,25 @@ for seat in $SEATS; do
   # once per silence: the mark holds the board generation, line number and checksum of the seat's last post; the same
   # three = already said it.
   # Check, mark and post happen under one lock, so two prompts at the same moment say it once. The mark is saved BEFORE
-  # the post: if it cannot be saved nothing is posted (the next prompt tries again), and if the post fails the old mark
-  # is put back, so a failed post is tried again and a failed mark write can never turn into a post at every prompt.
+  # the post (a temp made here, then a rename): if it cannot be saved nothing is posted (the next prompt tries again). If the
+  # post fails the old mark (or "-" when there was none) is put back the same way, so a failed post is tried again; a failed
+  # post may already have reached the board, so that retry is one more attempt, not exactly one visible reminder. If the
+  # restore itself fails the new mark stays, the next reminder for this silence may be skipped, and the hook says so. No mark
+  # file is ever unlinked.
   wr_lock "$mark" || { echo "board-guard: skipped $seat (mark busy), will retry on the next prompt" >&2; continue; }
-  here="$(wr_generation "$BOARD_FILE") $lineno $(printf '%s\n' "$line" | wr_sum)"
+  gen=$(wr_generation "$BOARD_FILE") || { wr_unlock "$mark"; echo "board-guard: skipped $seat (could not read the board), will retry on the next prompt" >&2; continue; }
+  lsum=$(printf '%s\n' "$line" | wr_sum) || { wr_unlock "$mark"; echo "board-guard: skipped $seat (could not checksum the post), will retry on the next prompt" >&2; continue; }
+  here="$gen $lineno $lsum"
   prev=$(cat "$mark" 2>/dev/null)
   if [ "$prev" != "$here" ]; then
-    if ! { printf '%s\n' "$here" > "$mark.tmp.$$" && mv "$mark.tmp.$$" "$mark"; }; then
-      rm -f "$mark.tmp.$$"; echo "board-guard: skipped $seat (could not save the mark in $W), will retry on the next prompt" >&2
+    mark_t=""
+    if ! { wr_temp "$mark" && mark_t=$_WR_TMP && printf '%s\n' "$here" > "$mark_t" && wr_replace "$mark_t" "$mark"; }; then
+      wr_drop "$mark_t"; echo "board-guard: skipped $seat (could not save the mark in $W), will retry on the next prompt" >&2
     elif ! wr_run "$HERE/../bin/board.sh" post GUARD "@${seat} ACTION: no board post from you for ${age} min and no registered job. Take the next unclaimed card, or post what you are waiting on." >/dev/null; then
-      if [ -n "$prev" ]; then { printf '%s\n' "$prev" > "$mark.tmp.$$" && mv "$mark.tmp.$$" "$mark"; } || rm -f "$mark.tmp.$$" "$mark"; else rm -f "$mark"; fi
+      mark_t=""
+      if ! { wr_temp "$mark" && mark_t=$_WR_TMP && printf '%s\n' "${prev:--}" > "$mark_t" && wr_replace "$mark_t" "$mark"; }; then
+        wr_drop "$mark_t"; echo "board-guard: the post for $seat failed and the mark could not be restored; the next reminder for this silence may be skipped" >&2
+      fi
     fi
   fi
   wr_unlock "$mark"

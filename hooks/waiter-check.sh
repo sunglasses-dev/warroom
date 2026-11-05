@@ -12,7 +12,7 @@ IN=$(cat 2>/dev/null)
 SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "waiter-check: python3 could not read the hook input as JSON" >&2; exit 1; }
 [ -n "$SID" ] || exit 0
 WAIT=$(printf '%q' "$(cd "$HERE/../bin" && pwd)/waiter.sh")      # printed commands are shell-quoted: a path may hold spaces
-REG="$W/seats.tsv"; touch "$REG"
+REG="$W/seats.tsv"; wr_create "$REG" || { echo "waiter-check: cannot create the seat registry $REG" >&2; exit 1; }
 row=$(awk -F'\t' -v s="$SID" '$1==s' "$REG" | tail -1)
 if [ -n "$row" ]; then
   seat=$(printf '%s' "$row" | cut -f2); pid=$(printf '%s' "$row" | cut -f3); started=$(printf '%s' "$row" | cut -f5); cols=$(printf '%s' "$row" | awk -F'\t' '{print NF}')
