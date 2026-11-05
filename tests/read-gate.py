@@ -888,6 +888,7 @@ class Analyzer:
         self.envelope_on = False    # the file envelope is checked for a whole tree (fixtures opt in with a header)
         self.env = []               # (file, line, rule, why)
         self.env_files = set()
+        self.env_why = {}
         self.out_files = []         # (path, why): files under bin/ or hooks/ that the gate does not read
 
     # --- loading ---
@@ -1082,7 +1083,13 @@ class Analyzer:
                         bad(f, nd, 'E4', 'a computed command word is outside the envelope (one "$@" runner is listed by file and function)')
         for path, why in self.out_files:
             self.env.append((path, 0, 'E1', why))
-        self.env_files = set(f for f, _, _, _ in self.env)
+        # a file outside the envelope runs in the same shell as everything it sources and everything that sources it: it can
+        # redirect descriptors, define words or rewrite variables for all of them, so no row in that whole closure is trusted
+        self.env_files, self.env_why = set(), {}
+        for f, _, _, why in self.env:
+            for g in ((self.same_shell(f) | {f}) if f in self.files else {f}):
+                self.env_files.add(g)
+                self.env_why.setdefault(g, why if g == f else '%s shares a shell with it: %s' % (f, why))
 
     DIR_FORMS = {
         '$(dirname "$0")': 0,
@@ -2152,7 +2159,7 @@ class Analyzer:
                 o.envelope = o.file in self.env_files
                 if o.envelope and o.status != 'BAD':
                     o.status, o.label = 'BAD', ''
-                    o.why = 'the file is outside the envelope (%s)' % next(w for f, _, _, w in self.env if f == o.file)
+                    o.why = 'the file is outside the envelope (%s)' % self.env_why[o.file]
             seq = {}
             for f, line, rule, why in self.env:
                 seq[f] = seq.get(f, 0) + 1
@@ -2254,6 +2261,18 @@ class Contracts:
             for d in walk(self.an.files[g][2]):
                 if d.k == 'simple' and d.words and unwrapped(d)[0] == fn.name and not any(a is fn for a in self.an.ancestors(d)):
                     calls.append(d)
+        for t, c in self.trap_calls(fname, fn.name):
+            # a call inside a literal trap action runs wherever the signal lands: judged like any call, in the action's own text
+            n = c
+            while n is not None:
+                if any(self.file_out(r) for r in getattr(n, 'redirs', None) or ()):
+                    return 'a call of %s in a trap action sends its output to a file' % fn.name
+                if n.k == 'pipe' and len(n.cmds) > 1:
+                    return 'a call of %s in a trap action is a stage of a pipeline' % fn.name
+                n = n.parent
+            why = self.climb(t, None, depth + 1, capture)
+            if why:
+                return why
         for c in calls:
             if any(self.file_out(r) for r in c.redirs):
                 return 'a call of %s sends its output to a file' % fn.name
@@ -2261,6 +2280,26 @@ class Contracts:
             if why:
                 return why
         return None
+
+    def trap_calls(self, fname, name):
+        """(trap statement, call node) for every call of the function inside a literal trap action in this file's component."""
+        out = []
+        for g in sorted(self.an.component(fname) | {fname}):
+            for d in walk(self.an.files[g][2]):
+                if d.k != 'simple' or not d.words or unwrapped(d)[0] != 'trap':
+                    continue
+                args = unwrapped(d)[1]
+                if args and args[0] == '--':
+                    args = args[1:]
+                if len(args) < 2 or args[0] is None or args[0] in ('-', '-p', '-l'):
+                    continue
+                try:
+                    tree = Parser(args[0]).parse_script()
+                except ParseError:
+                    continue
+                link(tree)
+                out.extend((d, c) for c in walk(tree) if c.k == 'simple' and c.words and unwrapped(c)[0] == name)
+        return out
 
     def stmt_text(self, o):
         return self.an.text(o.file, o.stmt) if o.stmt is not None else ''
@@ -2882,6 +2921,9 @@ TREE_CASES = {
 # changes one thing. A diagnostic that starts with "!" must be ABSENT from the output (the controls).
 CH = 'HERE="$(cd "$(dirname "$0")" && pwd)"\n'
 ENV_COMMON = '#!/usr/bin/env bash\nWR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\ndie() { echo "$1" >&2; exit 1; }\n'
+# the same library with the prelude in the order the refusal rules want (helper first, the one checked capture next)
+ENV_COMMON_CHECKED = ('#!/usr/bin/env bash\ndie() { echo "$1" >&2; exit 1; }\n'
+                      'WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1\n')
 ENV_ENTRY = '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n'
 ENV_HOOK = '#!/usr/bin/env bash\n' + CH + '. "$HERE/../bin/_common.sh" || exit 1\n'
 ENV_BASE = {'bin/_common.sh': ENV_COMMON, 'bin/a.sh': ENV_ENTRY, 'hooks/h.sh': ENV_HOOK}
@@ -2921,6 +2963,16 @@ TREE_CASES.update({
     'env_control_runner_and_sibling': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
                                                    'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/a.sh" check\n'}), 1, '!ENVELOPE E4'),
     'env_control_high_descriptors': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 9>>"$WR_ROOT/x.lock"\nexec 8>&-\nexec 9>&-\n'}), 1, '!ENVELOPE E3'),
+    # a file outside the envelope shares its shell with every file it sources and every file that sources it: no row there stands
+    'env_shared_shell_library_fails': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 2>>"$WR_ROOT/log"\n',
+                                                   'bin/a.sh': ENV_ENTRY + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
+                                        1, 'shares a shell with it'),
+    'env_shared_shell_entry_fails': (env_tree(**{'bin/a.sh': ENV_ENTRY + 'exec 2>>"$HERE/log"\n',
+                                                 'bin/_common.sh': ENV_COMMON_CHECKED + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
+                                     1, 'shares a shell with it'),
+    'env_shared_shell_hook_library_fails': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 2>&9\n',
+                                                        'hooks/h.sh': ENV_HOOK + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
+                                            1, 'shares a shell with it'),
     'env_runner_in_another_function': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'other() { "$@"; }\n'}), 1, 'computed command word'),
     'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
     'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
@@ -3075,6 +3127,8 @@ CODE_MUTANTS = [
      "if False:\n                return 'a call of %s sends its output to a file' % fn.name", 'neg_allow_d_function_called_with_redirect.sh'),
     ('code-ctx-group-to-descriptor', "return t not in ('1', '2', '-')", "return False", 'neg_allow_d_group_to_file_descriptor.sh'),
     ('code-ctx-captured-value', "if capture and p.k in ('cs', 'ps', 'bt'):", "if False:", 'neg_allow_d_function_captured.sh', 'must be printed by echo or printf'),
+    ('code-env-shared-shell', "for g in ((self.same_shell(f) | {f}) if f in self.files else {f}):", "for g in {f}:", 'tree:env_shared_shell_library_fails', 'shares a shell with it'),
+    ('code-ctx-trap-action-call', "for t, c in self.trap_calls(fname, fn.name):", "for t, c in []:", 'neg_allow_d_trap_action_redirect.sh', 'in a trap action sends its output to a file'),
     ('code-env-voids-entries', "if o.kind == 'ENVELOPE' or getattr(o, 'envelope', False):", "if False:", 'neg_allow_d_after_exec_redirect.sh', 'outside the envelope'),
 ]
 
