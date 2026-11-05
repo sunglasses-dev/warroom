@@ -226,10 +226,8 @@ class Parser:
             self.skip_blank()
             if self.s.startswith('||', self.i):
                 break
-            if self.s.startswith('|&', self.i):
-                self.err('|& is outside the supported subset')
             if self.i < self.n and self.s[self.i] == '|':
-                self.i += 1
+                self.i += 2 if self.s.startswith('|&', self.i) else 1      # |& is a pipe that also carries stderr
                 self.skip_ws()
                 cmds.append(self.parse_command())
             else:
@@ -268,7 +266,25 @@ class Parser:
             body = self.parse_list({'}'})
             self.expect('}')
             return self.finish_compound(Node('group', i, self.i, body=body))
-        if w in ('then', 'elif', 'else', 'fi', 'do', 'done', 'esac', 'in', 'function', 'select', 'coproc', 'time'):
+        if w == 'function':
+            self.i += len('function')
+            self.skip_blank()
+            m = re.compile(r'[A-Za-z_][A-Za-z0-9_]*').match(s, self.i)
+            if not m:
+                self.err('function: a name was expected')
+            name = m.group(0)
+            self.i = m.end()
+            self.skip_blank()
+            if s.startswith('(', self.i):
+                self.i += 1
+                self.skip_blank()
+                self.expect(')')
+            self.skip_ws()
+            body = self.parse_command()
+            if body.k not in ('group', 'subshell', 'if', 'while', 'case'):
+                self.err('function body must be a compound command')
+            return Node('func', i, self.i, name=name, body=body)
+        if w in ('then', 'elif', 'else', 'fi', 'do', 'done', 'esac', 'in', 'select', 'coproc', 'time'):
             self.err('unexpected or unsupported reserved word %r' % w)
         m = FUNC_RE.match(s, i)
         if m and w:
@@ -739,10 +755,22 @@ FORBIDDEN = set('eval xargs command builtin source . bash sh zsh env nohup'.spli
 DECLS = set('local export readonly declare typeset'.split())
 FILE_TEST_OPS = set('-e -f -d -L -h -r -w -x -s -S -p -b -c -O -G -k -u -g -nt -ot -ef'.split())
 SAFE_CLEANUP = set('echo printf wr_drop wr_unlock rm : true exec'.split())
-REFUSE_VARS = set(['WR_CONFIG_EXIT'])
-# words a refusal relies on: a script that redefines, removes, disables or aliases one of them is a tool error
+# The refusal ALLOWLIST (six rules). A refusal is exactly: `exit N` / `return N` (literal 1-255, no redirection, no `&`), or a
+# call of a prelude helper, reached from the read only through `||`, `if !` / then and `{ }` groups that carry no redirection.
+# Statements in front of the terminal must be inert. Anything else is not a refusal (UNLISTED), never a tool error.
+INERT = set('echo printf : true rm wr_drop wr_unlock'.split())      # may stand in front of the terminal; the two helpers must not exit
+# words a refusal relies on: a script that redefines, removes, disables or aliases one of them hides the refusal, so the
+# files that source each other stop counting any refusal (the verdict is UNLISTED, not a tool error)
 REFUSAL_WORDS = set('exit return break continue exec trap set shopt unset command builtin eval source . : true false'.split())
+BUILTINS = set(('alias bg bind builtin caller cd command compgen complete compopt continue declare dirs disown echo enable eval '
+                'exec exit export false fc fg getopts hash help history jobs kill let local logout mapfile popd printf pushd pwd '
+                'read readarray readonly return set shift shopt source suspend test times trap true type typeset ulimit umask '
+                'unalias unset wait [ . :').split())
+TAINT_NAMES = REFUSAL_WORDS | BUILTINS | set(['rm'])           # a function named like one of these replaces it
 SHADOW_CMDS = set('alias unalias enable'.split())
+TRAP_SPECIAL = ('EXIT', '0', 'ERR', 'DEBUG', 'RETURN')
+TRAP_SIGNALS = set('HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM STKFLT CHLD CONT STOP TSTP TTIN TTOU URG '
+                   'XCPU XFSZ VTALRM PROF WINCH IO PWR SYS EMT INFO'.split())
 TRAP_SAFE = set('wr_drop wr_unlock rm echo printf : true'.split())
 REASONS = {
     'D': 'display-only value (a time or a quoted path in a message)',
@@ -834,9 +862,11 @@ class Analyzer:
     def __init__(self):
         self.files = {}         # name -> (src, parser, root)
         self.funcs = {}         # name -> [(file, node)]
-        self.refusing = set()
         self.propagating = set()
         self.occs = []
+        self.taint = {}         # file -> why it hides a refusal word (every file of a source component)
+        self.helpers = {}       # file -> {prelude helper name}
+        self.edges = {}
 
     # --- loading ---
     def add(self, name, src):
@@ -859,51 +889,106 @@ class Analyzer:
                 return name
 
     # --- words a refusal depends on must mean what they say ---
+    # A file that redefines, removes, disables or aliases one of them is TAINTED: none of the files that source each other
+    # with it count a refusal. This is a verdict (UNLISTED), not a tool error.
     def validate(self):
+        self.taint = {}
+        edges = {}
         for fname, (src, parser, root) in self.files.items():
+            edges.setdefault(fname, set())
             for nd in walk(root):
-                if nd.k == 'func' and nd.name in REFUSAL_WORDS:
-                    raise ParseError('%s line %d: a function named %s shadows the shell word a refusal relies on' % (
-                        fname, parser.line(nd.start), nd.name))
-                if nd.k != 'simple' or not nd.words:
-                    continue
-                name = cmd_name(nd)
-                args = [word_lit(w) for w in nd.words[1:]]
                 where = '%s line %d' % (fname, parser.line(nd.start))
-                if name in SHADOW_CMDS:
-                    raise ParseError('%s: %s can change what exit, return or a helper means' % (where, name))
-                if name == 'unset':
-                    if '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):
-                        raise ParseError('%s: unset names a function or a refusal word' % where)
-                if name == 'trap':
-                    self.check_trap(where, args)
+                why = None
+                if nd.k == 'func' and nd.name in TAINT_NAMES:
+                    why = '%s: a function named %s shadows the shell word a refusal relies on' % (where, nd.name)
+                elif nd.k == 'simple' and nd.words:
+                    name = cmd_name(nd)
+                    args = [word_lit(w) for w in nd.words[1:]]
+                    if name in SHADOW_CMDS:
+                        why = '%s: %s can change what exit, return or a helper means' % (where, name)
+                    elif name == 'eval':
+                        why = '%s: eval can define or remove any of them' % where
+                    elif name == 'unset':
+                        if any(a is None for a in args) or '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):
+                            why = '%s: unset names a function or a refusal word' % where
+                    elif name == 'trap':
+                        why = self.check_trap(where, args)
+                    elif name in ('.', 'source'):
+                        tgt = self.source_target(nd)
+                        if tgt is None:
+                            why = '%s: a sourced file with no literal name cannot be read' % where
+                        else:
+                            for other in self.files:
+                                if other != fname and os.path.basename(other) == tgt:
+                                    edges[fname].add(other)
+                                    edges.setdefault(other, set()).add(fname)
+                if why and fname not in self.taint:
+                    self.taint[fname] = why
+        # the files that source each other run in one shell: one hidden word taints them all
+        seen = set()
+        for f in list(edges):
+            if f in seen:
+                continue
+            comp, todo = set(), [f]
+            while todo:
+                x = todo.pop()
+                if x in comp:
+                    continue
+                comp.add(x)
+                todo.extend(edges.get(x, ()))
+            seen |= comp
+            bad = [self.taint[x] for x in sorted(comp) if x in self.taint]
+            if bad:
+                for x in comp:
+                    self.taint[x] = bad[0]
+        self.edges = edges
+
+    def source_target(self, nd):
+        """The file name at the end of a `. word` argument (the part after the last slash), or None."""
+        if len(nd.words) != 2:
+            return None
+        for part in reversed(nd.words[1].parts):
+            t = part[1] if isinstance(part, tuple) and part[0] in ('lit', 'sq') else (
+                ''.join(q[1] for q in part.parts if isinstance(q, tuple) and q[0] == 'lit') if isinstance(part, Node) and part.k == 'dq' else None)
+            if t:
+                return os.path.basename(t)
+        return None
 
     def check_trap(self, where, args):
+        """The reason an EXIT/ERR/DEBUG/RETURN trap can rewrite the exit status, or None."""
         if any(a is None for a in args):
-            raise ParseError('%s: trap with a computed argument' % where)
+            return '%s: trap with a computed argument' % where
         if not args or args[0] in ('-p', '-l'):
-            return
+            return None
+        if args[0] == '--':
+            args = args[1:]
+            if not args:
+                return None
         action, sigs = args[0], args[1:]
-        if not sigs or action == '' or not any(x in ('EXIT', '0', 'ERR', 'DEBUG', 'RETURN') for x in sigs):
-            return
+        for x in sigs:
+            if x not in TRAP_SPECIAL and not re.fullmatch(r'[0-9]{1,2}', x) and re.sub(r'^SIG', '', x) not in TRAP_SIGNALS:
+                return '%s: trap on %s, which is not a signal name this gate knows' % (where, x)
+        if not sigs or action == '' or not any(x in TRAP_SPECIAL for x in sigs):
+            return None
         try:
             tree = Parser(action).parse_script()
         except ParseError as e:
-            raise ParseError('%s: trap action does not parse (%s)' % (where, e))
+            return '%s: trap action does not parse (%s)' % (where, e)
         link(tree)
         for c in walk(tree):
             if c.k in ('cs', 'ps', 'bt', 'func'):
-                raise ParseError('%s: trap action holds a substitution or a function' % where)
+                return '%s: trap action holds a substitution or a function' % where
             if c.k == 'simple' and c.words:
                 nm = cmd_name(c)
                 if nm not in TRAP_SAFE:
-                    raise ParseError('%s: an EXIT trap may rewrite the exit status; only %s are allowed in its action, not %s' % (
-                        where, ' '.join(sorted(TRAP_SAFE)), nm))
+                    return '%s: an EXIT trap may rewrite the exit status; only %s are allowed in its action, not %s' % (
+                        where, ' '.join(sorted(TRAP_SAFE)), nm)
                 if self.can_exit(nm, set()):
-                    raise ParseError('%s: trap helper %s can end the shell' % (where, nm))
+                    return '%s: trap helper %s can end the shell' % (where, nm)
+        return None
 
     def can_exit(self, name, seen):
-        """True when function `name`, or a function it calls, runs `exit` (a return only leaves the function)."""
+        """True when function `name`, or a function it calls, runs `exit` or `kill` (a return only leaves the function)."""
         if name in seen:
             return False
         seen.add(name)
@@ -911,13 +996,17 @@ class Analyzer:
             for d in walk(fn):
                 if d.k == 'simple' and d.words:
                     nm = cmd_name(d)
-                    if nm in ('exit', 'kill') or (nm in self.funcs and self.can_exit(nm, seen)):
+                    if nm in ('exit', 'kill', 'exec') or (nm in self.funcs and self.can_exit(nm, seen)):
                         return True
         return False
 
+    def tainted(self, node):
+        return self.taint.get(self.fname_of(node))
+
     def proc_ok(self, node):
-        """True when the refusal at `node` runs in the shell that did the read: not in the background, not a pipeline stage,
-        not a subshell, not inside a substitution."""
+        """Rule 5. True when the refusal at `node` is reached from the read only through `||`, `if !`/then and `{ }`: not in the
+        background, not a pipeline stage, not a subshell, not inside a substitution, and no redirection on any enclosing node
+        (a redirection that fails skips the whole command)."""
         n = node
         while n is not None:
             if getattr(n, 'bg', False):
@@ -929,130 +1018,237 @@ class Analyzer:
                 return False
             if p.k in ('subshell', 'cs', 'ps', 'bt'):
                 return False
+            if p.k in ('group', 'if', 'while', 'for', 'case') and getattr(p, 'redirs', None):
+                return False
             if p.k in ('func', 'script'):
                 return True
             n = p
         return True
 
-    # --- refusal ---
-    def compute_refusing(self):
-        self.refusing = set()
-        changed = True
-        while changed:
-            changed = False
-            for name, defs in self.funcs.items():
-                if name in self.refusing or len(defs) != 1:
-                    continue
-                fn = defs[0][1]
-                body = fn.body
-                if body.k != 'group':
-                    continue
-                if any(n.k == 'simple' and cmd_name(n) == 'return' for n in walk(body)):
-                    continue
-                items = body.body.items
-                if items and self.refusal_stmt(items[-1]):
-                    self.refusing.add(name)
-                    changed = True
+    # --- refusal: the six rules ---
+    def why_not(self, node, default):
+        """The reason text for a branch that is not a refusal: when the file hides a refusal word and the branch looks like a
+        refusal, say that instead of the generic text."""
+        t = self.tainted(node)
+        if t and any(d.k == 'simple' and d.words and (cmd_name(d) in ('exit', 'return') or cmd_name(d) in self.funcs) for d in walk(node)):
+            return 'this file hides or redefines a word the refusal relies on (%s)' % t
+        return default
+
+    def returned_from(self, node):
+        """The name of the function whose status is the refusal when `node` ends in `return N` (its caller sees the status), else None."""
+        if not any(d.k == 'simple' and d.words and cmd_name(d) == 'return' for d in walk(node)):
+            return None
+        for a in self.ancestors(node):
+            if a.k == 'func':
+                return a.name
+        return None
+
+    def exit_status(self, w):
+        """The literal status 1-255 a word spells, else None (256 would wrap to 0)."""
+        t = word_lit(w)
+        if t is not None and re.fullmatch(r'[1-9][0-9]{0,2}', t) and int(t) <= 255:
+            return int(t)
+        return None
+
+    def plain_word(self, w):
+        """A word that is only literals, quotes and plain `$name` references: expanding it cannot fail or run anything."""
+        for p in w.parts:
+            if isinstance(p, Node) and p.k == 'dq':
+                if not all(isinstance(q, tuple) and q[0] in ('lit', 'var') for q in p.parts):
+                    return False
+            elif not (isinstance(p, tuple) and p[0] in ('lit', 'sq', 'var')):
+                return False
+        return True
+
+    def in_function(self, node):
+        return any(a.k == 'func' for a in self.ancestors(node))
+
+    def terminal(self, sm, bare_ok):
+        """Rules 1-3: a simple command, no assignment, no redirection at all, that exits/returns a literal status or calls a
+        prelude helper."""
+        if sm.assigns or sm.redirs or not sm.words:
+            return False
+        name = cmd_name(sm)
+        args = sm.words[1:]
+        if name in ('exit', 'return'):
+            if name == 'return' and not self.in_function(sm):
+                return False        # outside a function (or a sourced file) return fails and the script goes on
+            if not args:
+                return bare_ok
+            return len(args) == 1 and self.exit_status(args[0]) is not None
+        if name in self.helpers.get(self.fname_of(sm), ()):
+            return all(self.plain_word(w) for w in args)
+        return False
+
+    def inert(self, item):
+        """A statement in front of the terminal that cannot stop the list before it gets there."""
+        if item.k != 'andor' or len(item.parts) != 1 or getattr(item, 'bg', False):
+            return False
+        pipe = item.parts[0]
+        if pipe.k != 'pipe' or len(pipe.cmds) != 1 or pipe.neg or pipe.cmds[0].k != 'simple':
+            return False
+        sm = pipe.cmds[0]
+        if sm.assigns or not sm.words:
+            return False
+        name = cmd_name(sm)
+        return name in INERT and not self.can_exit(name, set())
 
     def refusal_stmt(self, item, bare_ok=False):
-        """item: an andor. True when running it always ends the function or script with a nonzero status."""
+        """item: an andor/pipe/group/simple. True when running it always ends the function or script with a nonzero status."""
+        if self.tainted(item):
+            return False
+        return self._refusal(item, bare_ok)
+
+    def _refusal(self, item, bare_ok):
         if item.k == 'andor':
             if len(item.parts) != 1 or getattr(item, 'bg', False):
                 return False
-            return self.refusal_stmt(item.parts[0], bare_ok)
+            return self._refusal(item.parts[0], bare_ok)
         if item.k == 'pipe':
             if len(item.cmds) != 1 or item.neg:
                 return False
-            return self.refusal_stmt(item.cmds[0], bare_ok)
+            return self._refusal(item.cmds[0], bare_ok)
         if item.k == 'group':
-            return self.refusal_list(item.body, bare_ok)
+            if getattr(item, 'redirs', None):
+                return False
+            return self._refusal_list(item.body, bare_ok)
         if item.k == 'simple':
-            if item.assigns or item.redirs and any(r.op in ('<', '<>') for r in item.redirs):
-                return False
-            name = cmd_name(item)
-            args = [word_lit(w) for w in item.words[1:]]
-            if name in ('exit', 'return'):
-                if name == 'return':
-                    a_ = item.parent
-                    while a_ is not None and a_.k != 'func':
-                        a_ = a_.parent
-                    if a_ is None:
-                        return False        # outside a function (or a sourced file) return fails and the script goes on
-                if not args:
-                    return bare_ok
-                a = args[0]
-                if a is not None and re.fullmatch(r'[1-9][0-9]{0,2}', a):
-                    return True
-                if name == 'exit' and len(item.words) == 2:
-                    w = item.words[1]
-                    if len(w.parts) == 1 and isinstance(w.parts[0], Node) and w.parts[0].k == 'dq':
-                        q = w.parts[0].parts
-                        if len(q) == 1 and q[0][0] == 'var' and q[0][1] in REFUSE_VARS:
-                            return True
-                return False
-            if name in self.refusing and self.defined_here(name, item):
-                return True
+            return self.terminal(item, bare_ok)
         return False
 
-    # --- does the helper exist where it is used? ---
-    def sourced_from(self, fname):
-        """{file: offset of the earliest top-level `. file` that makes it available to `fname`} (resolved by the file name at
-        the end of the argument; an argument with no literal tail resolves to nothing)."""
-        reach = {}
-        todo = [(fname, -1)]
-        seen = set()
-        while todo:
-            cur, base = todo.pop(0)
-            if cur in seen:
+    def refusal_list(self, lst, bare_ok=False):
+        if self.tainted(lst):
+            return False
+        return self._refusal_list(lst, bare_ok)
+
+    def _refusal_list(self, lst, bare_ok):
+        items = lst.items
+        if not items or not all(self.inert(x) for x in items[:-1]):
+            return False
+        # a bare exit/return returns the status of the command before it: only a branch that is nothing else keeps the read's status
+        return self._refusal(items[-1], bare_ok and len(items) == 1)
+
+    # --- rule 4: prelude helpers ---
+    def prelude(self, fname):
+        """(the helper names this file defines in its prelude, the files its checked top-level `.` lines bring in). The prelude is
+        the leading run of top-level statements that are a definition, an assignment of literals, `set -o pipefail`, `trap '' PIPE`,
+        a checked `.`, or a checked `NAME=$(...)`; it ends at the first statement that is anything else."""
+        defs, srcs = {}, []
+        root = self.files[fname][2]
+        for it in root.body.items:
+            if getattr(it, 'bg', False) or it.k != 'andor':
+                break
+            first = it.parts[0]
+            if first.k != 'pipe' or len(first.cmds) != 1 or first.neg:
+                break
+            c = first.cmds[0]
+            if len(it.parts) == 1:
+                if c.k == 'func':
+                    if c.body.k != 'group' or getattr(c.body, 'redirs', None):
+                        break       # a redirection on the definition: every call may be skipped
+                    defs[c.name] = c
+                    continue
+                if c.k != 'simple' or c.redirs:
+                    break
+                if not c.words:
+                    if all(word_lit(a.value) is not None for a in c.assigns):
+                        continue
+                    break
+                name = cmd_name(c)
+                args = [word_lit(w) for w in c.words[1:]]
+                if name == 'set' and args == ['-o', 'pipefail']:
+                    continue
+                if name == 'trap' and args == ['', 'PIPE']:
+                    continue
+                break
+            # a checked statement: `. file || exit N`, `NAME=$(...) || exit N`
+            if len(it.parts) != 2 or it.ops != ['||'] or c.k != 'simple' or c.redirs:
+                break
+            rhs = it.parts[1]
+            if not self.plain_exit(rhs):
+                break
+            if c.words and cmd_name(c) in ('.', 'source'):
+                tgt = self.source_target(c)
+                srcs.extend(o for o in self.files if o != fname and os.path.basename(o) == tgt)
                 continue
-            seen.add(cur)
-            for nd in walk(self.files[cur][2]):
-                if nd.k != 'simple' or cmd_name(nd) not in ('.', 'source') or len(nd.words) != 2:
-                    continue
-                if any(a.k == 'func' for a in self.ancestors(nd)):
-                    continue        # only available once that function has run
-                w = nd.words[1]
-                tail = None
-                for part in reversed(w.parts):
-                    t = part[1] if isinstance(part, tuple) and part[0] in ('lit', 'sq') else (
-                        ''.join(q[1] for q in part.parts if isinstance(q, tuple) and q[0] == 'lit') if isinstance(part, Node) and part.k == 'dq' else None)
-                    if t:
-                        tail = t
-                        break
-                if not tail:
-                    continue
-                want = os.path.basename(tail)
-                at = nd.start if cur == fname else base
-                for other in self.files:
-                    if other != cur and os.path.basename(other) == want and other not in reach:
-                        reach[other] = at
-                        todo.append((other, at))
-        return reach
+            if not c.words and len(c.assigns) == 1 and not self.calls_script_function(c):
+                continue
+            break
+        return defs, srcs
+
+    def plain_exit(self, pipe):
+        """`exit N` alone, or in a { } with nothing but inert items in front of it (no helpers: this runs before any exist)."""
+        if pipe.k != 'pipe' or len(pipe.cmds) != 1 or pipe.neg:
+            return False
+        c = pipe.cmds[0]
+        if c.k == 'group':
+            if getattr(c, 'redirs', None):
+                return False
+            items = c.body.items
+            return bool(items) and all(self.inert(x) for x in items[:-1]) and self.is_exit_item(items[-1])
+        return c.k == 'simple' and self.is_exit_cmd(c)
+
+    def is_exit_item(self, it):
+        if it.k != 'andor' or len(it.parts) != 1 or getattr(it, 'bg', False):
+            return False
+        return self.plain_exit(it.parts[0])
+
+    def is_exit_cmd(self, c):
+        return not c.assigns and not c.redirs and c.words and cmd_name(c) == 'exit' and len(c.words) == 2 \
+            and self.exit_status(c.words[1]) is not None
+
+    def calls_script_function(self, nd):
+        return any(d.k == 'simple' and d.words and cmd_name(d) in self.funcs for d in walk(nd))
+
+    def helper_body_ok(self, fn):
+        """A rule-1 body: inert items, then a literal `exit N`."""
+        body = fn.body
+        items = body.body.items
+        return bool(items) and all(self.inert(x) for x in items[:-1]) and self.is_exit_item(items[-1])
+
+    def compute_helpers(self):
+        self.helpers = {}
+        pre = {f: self.prelude(f) for f in self.files}
+        count = {}
+        for name, defs in self.funcs.items():
+            for f, _ in defs:
+                count.setdefault(name, 0)
+                count[name] += 1
+
+        def visible(f, seen):
+            if f in seen:
+                return {}
+            seen = seen | {f}
+            out = dict(pre[f][0])
+            for g in pre[f][1]:
+                out.update(visible(g, seen))
+            return out
+        for f in self.files:
+            names = set()
+            if f not in self.taint:
+                for name, fn in visible(f, set()).items():
+                    # defined exactly once across the file and everything it sources, and a rule-1 body
+                    comp_defs = sum(1 for g in self.component(f) for gn in [self.files[g][2]] for d in walk(gn)
+                                    if d.k == 'func' and d.name == name)
+                    if comp_defs == 1 and self.helper_body_ok(fn):
+                        names.add(name)
+            self.helpers[f] = names
+
+    def component(self, f):
+        comp, todo = set(), [f]
+        while todo:
+            x = todo.pop()
+            if x in comp:
+                continue
+            comp.add(x)
+            todo.extend(self.edges.get(x, ()))
+        return comp
 
     def ancestors(self, node):
         p = node.parent
         while p is not None:
             yield p
             p = p.parent
-
-    def defined_here(self, name, use):
-        """True when `name` exists at the place `use` runs: defined in the same file (before the use, unless the use is inside
-        a function that is called later), or defined in a file this one sources (the `.` before the use). Functions of other files
-        that are never sourced here do not exist here."""
-        defs = self.funcs.get(name, [])
-        if not defs:
-            return False        # (a name defined twice never reaches here: compute_refusing keeps only single definitions)
-        def_file, def_node = defs[0]
-        use_file = self.fname_of(use)
-        in_func = any(a.k == 'func' for a in self.ancestors(use))
-        if def_file == use_file:
-            return in_func or def_node.start < use.start
-        at = self.sourced_from(use_file).get(def_file)
-        return at is not None and (in_func or at < use.start)
-
-    def refusal_list(self, lst, bare_ok=False):
-        # a bare exit/return returns the status of the command before it: only a branch that is nothing else keeps the read's status
-        return bool(lst.items) and self.refusal_stmt(lst.items[-1], bare_ok and len(lst.items) == 1)
 
     # --- pipefail ---
     def pipefail_active(self, pipe):
@@ -1118,10 +1314,10 @@ class Analyzer:
                         if self.refusal_stmt(rhs, bare_ok=True):
                             if not self.proc_ok(p):
                                 return self.bad('the refusal runs in another process (background job, pipeline stage, subshell)')
-                            return self.ok('REFUSE')
+                            return self.ok('REFUSE', func=self.returned_from(rhs))
                         if self.is_continue(rhs):
                             return self.bad('the failure only continues the loop', needs=('C',))
-                        return self.bad('the failure falls back to a default or is ignored (|| x=.., || true, || echo ..)')
+                        return self.bad(self.why_not(rhs, 'the failure falls back to a default or is ignored (|| x=.., || true, || echo ..)'))
                     n = p
                     continue
                 if nxt == '&&':
@@ -1152,17 +1348,18 @@ class Analyzer:
                         if p is cond:
                             if st == 'T':
                                 if not self.refusal_list(body):
-                                    return self.bad('the then branch does not refuse')
+                                    return self.bad(self.why_not(body, 'the then branch does not refuse'))
                                 if not self.proc_ok(p):
                                     return self.bad('the refusal runs in another process (background job, pipeline stage, subshell)')
-                                return self.ok('REFUSE')
+                                return self.ok('REFUSE', func=self.returned_from(body))
                             if j < len(o.clauses) - 1:
                                 return self.bad('an elif chain: the failure goes to the next condition')
                             if o.els is not None and self.refusal_list(o.els):
                                 if not self.proc_ok(p):
                                     return self.bad('the refusal runs in another process (background job, pipeline stage, subshell)')
-                                return self.ok('REFUSE')
-                            return self.bad('the failure falls through the if (no else that refuses)')
+                                return self.ok('REFUSE', func=self.returned_from(o.els))
+                            return self.bad(self.why_not(o.els, 'the failure falls through the if (no else that refuses)') if o.els is not None
+                                            else 'the failure falls through the if (no else that refuses)')
                     n = o
                     continue
                 if o.k == 'case':
@@ -1267,8 +1464,10 @@ class Analyzer:
             op, lit = t
             if op in ('!=', '-ne') and lit == '0':
                 if self.refusal_list(it.clauses[0][1]):
+                    if getattr(it, 'redirs', None) or not self.proc_ok(lst):
+                        return self.bad('the refusal runs in another process or under a redirection')
                     return self.ok('I3')
-                return self.bad('the failed-status branch reports an error but does not return or exit')
+                return self.bad(self.why_not(it.clauses[0][1], 'the failed-status branch reports an error but does not return or exit'))
             if op in ('=', '-eq', '==') and lit == '0':
                 body = it.clauses[0][1]
                 if it.els is not None:
@@ -1276,6 +1475,8 @@ class Analyzer:
                 if not self.ends_success(body):
                     return self.bad('the success branch can fall through into the failure path')
                 if self.refuses_after(lst.items, k):
+                    if not self.proc_ok(lst):
+                        return self.bad('the refusal runs in another process or under a redirection')
                     return self.ok('I3')
                 return self.bad('what follows the success branch does not end in a refusal')
             return self.bad('the saved status is compared with something other than 0')
@@ -1638,7 +1839,7 @@ class Analyzer:
 
     def run(self):
         self.validate()
-        self.compute_refusing()
+        self.compute_helpers()
         self.propagating = set()
         for _ in range(12):
             self.enumerate()
@@ -2159,11 +2360,11 @@ MUTANTS = [
     ('i1-group-pipe-stage', 'pos_i1_exit.sh', 'x=$(cat "$F") || exit 1', '{ x=$(cat "$F") || exit 1; } | cat', 'another process'),
     ('i1-refusal-in-subshell', 'pos_i1_exit.sh', 'x=$(cat "$F") || exit 1', '( x=$(cat "$F") || exit 1 )', 'another process'),
     ('i1-toplevel-return', 'pos_i1_exit.sh', '|| exit 1', '|| return 1', 'falls back'),
-    ('i1-exit-trap-rewrites', 'pos_i1_exit.sh', 'F=${1:-}', "trap 'exit 0' EXIT; F=${1:-}", 'unparsed'),
+    ('i1-exit-trap-rewrites', 'pos_i1_exit.sh', 'F=${1:-}', "trap 'exit 0' EXIT; F=${1:-}", 'hides or redefines'),
     ('i1-exit-trap-cleanup-control', 'pos_i1_exit.sh', 'F=${1:-}', "trap 'rm -f x' EXIT; F=${1:-}", 'ok'),
-    ('i1-exit-function-shadow', 'pos_i1_exit.sh', 'F=${1:-}', 'exit() { echo nope; }; F=${1:-}', 'unparsed'),
-    ('i1-unset-function', 'pos_i1_exit.sh', 'F=${1:-}', 'unset -f die; F=${1:-}', 'unparsed'),
-    ('i1-alias', 'pos_i1_exit.sh', 'F=${1:-}', 'alias exit=true; F=${1:-}', 'unparsed'),
+    ('i1-exit-function-shadow', 'pos_i1_exit.sh', 'F=${1:-}', 'exit() { echo nope; }; F=${1:-}', 'hides or redefines'),
+    ('i1-unset-function', 'pos_i1_exit.sh', 'F=${1:-}', 'unset -f die; F=${1:-}', 'hides or redefines'),
+    ('i1-alias', 'pos_i1_exit.sh', 'F=${1:-}', 'alias exit=true; F=${1:-}', 'hides or redefines'),
     ('i1-masked-sequence', 'pos_i1_exit.sh', 'x=$(cat "$F")', 'x=$(cat "$F"; echo done)', 'statement after it'),
     ('i1-or-in-body', 'pos_i1_exit.sh', 'x=$(cat "$F")', 'x=$(cat "$F" || echo none)', 'falls back'),
     ('i1-declaration', 'pos_i1_exit.sh', 'x=$(cat "$F") || exit 1', 'local x=$(cat "$F") || exit 1', 'declaration builtin'),
@@ -2224,10 +2425,16 @@ LIB = '#!/usr/bin/env bash\ndie() { echo "$1" >&2; exit 1; }\n'
 TREE_CASES = {
     'tree_helper_never_sourced': ({'bin/a.sh': LIB, 'bin/b.sh': 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'},
                                   1, 'falls back'),
-    'tree_helper_sourced_after_use': ({'bin/a.sh': LIB, 'bin/b.sh': 'HERE=${0%/*}\nF=${1:-}\nx=$(cat "$F") || die "cannot read"\n'
+    'tree_helper_sourced_after_use': ({'bin/a.sh': LIB, 'bin/b.sh': 'HERE=$(dirname "$0") || exit 1\nF=/dev/null\nx=$(cat "$F") || die "cannot read"\n'
                                        '. "$HERE/a.sh" || exit 1\necho "$x" > out\n'}, 1, 'falls back'),
-    'tree_helper_sourced_control': ({'bin/a.sh': LIB, 'bin/b.sh': 'HERE=${0%/*}\n. "$HERE/a.sh" || exit 1\nF=${1:-}\n'
+    'tree_helper_sourced_control': ({'bin/a.sh': LIB, 'bin/b.sh': 'HERE=$(dirname "$0") || exit 1\n. "$HERE/a.sh" || exit 1\nF=${1:-}\n'
                                      'x=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}, 0, ''),
+    'tree_helper_unchecked_source': ({'bin/a.sh': LIB, 'bin/b.sh': 'HERE=$(dirname "$0") || exit 1\n. "$HERE/a.sh"\nF=${1:-}\n'
+                                      'x=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}, 1, 'falls back'),
+    'tree_taint_in_sourced_file': ({'bin/a.sh': '#!/usr/bin/env bash\nexit() { :; }\n', 'bin/b.sh': 'HERE=$(dirname "$0") || exit 1\n. "$HERE/a.sh" || exit 1\n'
+                                    'F=${1:-}\nx=$(cat "$F") || exit 1\necho "$x" > out\n'}, 1, 'hides or redefines'),
+    'tree_crossfile_unsourced_helper': ({'bin/a.sh': LIB + 'echo lib\n', 'bin/b.sh': '#!/usr/bin/env bash\nF=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n',
+                                         'hooks/h.sh': '#!/usr/bin/env bash\necho hi\n'}, 1, 'falls back'),
 }
 
 
@@ -2246,20 +2453,56 @@ def run_tree(me, tmpd, name):
 
 # Mutants of this file: take a check out, and the fixture that pins it must stop failing. (name, old text, new text, fixture)
 CODE_MUTANTS = [
-    ('code-no-background-in-branch', "len(item.parts) != 1 or getattr(item, 'bg', False)", 'len(item.parts) != 1', 'neg_proc_background_exit.sh'),
-    ('code-no-background-in-chain', "if getattr(n, 'bg', False):\n                return False", 'if False:\n                return False', 'neg_proc_background_list.sh'),
-    ('code-no-pipe-stage-check', "if p.k == 'pipe' and len(p.cmds) > 1:\n                return False", 'if False:\n                return False', 'neg_proc_group_pipe_stage.sh'),
-    ('code-return-anywhere', 'return False        # outside a function', 'pass        # outside a function', 'neg_proc_toplevel_return.sh'),
-    ('code-no-exit-trap-check', "if name == 'trap':", 'if False:', 'neg_proc_exit_trap_rewrites.sh'),
-    ('code-no-function-shadow-check', "if nd.k == 'func' and nd.name in REFUSAL_WORDS:", 'if False:', 'neg_shadow_exit_function.sh'),
-    ('code-no-return-shadow-check', "if nd.k == 'func' and nd.name in REFUSAL_WORDS:", 'if False:', 'neg_shadow_return_function.sh'),
-    ('code-no-unset-check', "if '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):", 'if False:', 'neg_shadow_unset_function.sh'),
+    # rule 1: exit N (literal 1-255 by value, no redirection, no &), inert items in front
+    ('code-r1-status-by-value', "re.fullmatch(r'[1-9][0-9]{0,2}', t) and int(t) <= 255", "re.fullmatch(r'[1-9][0-9]{0,2}', t)", 'neg_allow_exit_256.sh'),
+    ('code-r1-no-redirection', 'if sm.assigns or sm.redirs or not sm.words:', 'if sm.assigns or not sm.words:', 'neg_allow_exit_bad_redir.sh'),
+    ('code-r1-no-background', "if len(item.parts) != 1 or getattr(item, 'bg', False):\n                return False\n            return self._refusal(item.parts[0], bare_ok)",
+     "if len(item.parts) != 1:\n                return False\n            return self._refusal(item.parts[0], bare_ok)", 'neg_proc_background_exit.sh'),
+    ('code-r1-inert-prefix', 'if not items or not all(self.inert(x) for x in items[:-1]):\n            return False\n        # a bare', 'if not items:\n            return False\n        # a bare',
+     'neg_allow_prefix_exits_zero.sh'),
+    ('code-r1-group-redirection', "if getattr(item, 'redirs', None):\n                return False\n            return self._refusal_list(item.body, bare_ok)",
+     'return self._refusal_list(item.body, bare_ok)', 'neg_allow_group_bad_redir.sh'),
+    # rule 2: return N only inside a function
+    ('code-r2-return-anywhere', 'return False        # outside a function', 'pass        # outside a function', 'neg_proc_toplevel_return.sh'),
+    # rule 3: a call of a prelude helper with plain arguments
+    ('code-r3-any-function', 'if name in self.helpers.get(self.fname_of(sm), ()):', 'if name in self.funcs:', 'neg_allow_die_param.sh'),
+    ('code-r3-any-argument', 'return all(self.plain_word(w) for w in args)', 'return True', 'neg_allow_die_arg_expansion_err.sh'),
+    # rule 4: the prelude (top-level, before the first other statement, defined once, no redirection, checked sources)
+    ('code-r4-prelude-ends-at-use', 'if not self.plain_exit(rhs):\n                break', 'if not self.plain_exit(rhs):\n                pass',
+     'neg_allow_use_before_definition_in_prelude_run.sh'),
+    ('code-r4-prelude-ends-at-statement', "if name == 'trap' and args == ['', 'PIPE']:\n                    continue\n                break",
+     "if name == 'trap' and args == ['', 'PIPE']:\n                    continue\n                continue", 'neg_allow_statement_before_definition.sh'),
+    ('code-r4-top-level-only', 'for it in root.body.items:', "for it in [x for x in walk(root) if x.k == 'andor']:", 'neg_allow_def_in_uncalled_fn.sh'),
+    ('code-r4-defined-once', 'if comp_defs == 1 and self.helper_body_ok(fn):', 'if comp_defs >= 1 and self.helper_body_ok(fn):', 'neg_allow_def_after_in_fn_body.sh'),
+    ('code-r4-definition-redirection', "if c.body.k != 'group' or getattr(c.body, 'redirs', None):", "if c.body.k != 'group':", 'neg_allow_fn_def_redir.sh'),
+    ('code-r4-helpers-per-file', 'for name, fn in visible(f, set()).items():\n                    # defined exactly once across the file and everything it sources, and a rule-1 body\n'
+     '                    comp_defs = sum(1 for g in self.component(f)',
+     'for name, fn in {k: v for g in self.files for k, v in pre[g][0].items()}.items():\n                    # defined exactly once across the file and everything it sources, and a rule-1 body\n'
+     '                    comp_defs = sum(1 for g in self.files', 'tree:tree_helper_never_sourced'),
+    ('code-r4-taint-reaches-sourcers', 'if bad:\n                for x in comp:\n                    self.taint[x] = bad[0]', 'if bad:\n                for x in []:\n                    self.taint[x] = bad[0]',
+     'tree:tree_taint_in_sourced_file'),
+    # rule 5: the path from the read to the refusal
+    ('code-r5-no-background-in-chain', "if getattr(n, 'bg', False):\n                return False", 'if False:\n                return False', 'neg_proc_background_list.sh'),
+    ('code-r5-no-pipe-stage-check', "if p.k == 'pipe' and len(p.cmds) > 1:\n                return False", 'if False:\n                return False', 'neg_proc_group_pipe_stage.sh'),
+    ('code-r5-no-redirection-on-enclosing-if', "if p.k in ('group', 'if', 'while', 'for', 'case') and getattr(p, 'redirs', None):\n                return False",
+     'if False:\n                return False', 'neg_allow_if_redirect_enclosing.sh'),
+    ('code-r5-no-redirection-on-enclosing-group', "if p.k in ('group', 'if', 'while', 'for', 'case') and getattr(p, 'redirs', None):\n                return False",
+     'if False:\n                return False', 'neg_allow_group_redirect_enclosing.sh'),
+    # rule 6: anything else is not a refusal
+    ('code-r6-unknown-command-refuses', '        return False\n\n    def inert(self, item):', '        return True\n\n    def inert(self, item):', 'neg_allow_unknown_command.sh'),
+    # words a refusal relies on
+    ('code-no-function-shadow-check', "if nd.k == 'func' and nd.name in TAINT_NAMES:", 'if False:', 'neg_shadow_exit_function.sh'),
+    ('code-no-return-shadow-check', "if nd.k == 'func' and nd.name in TAINT_NAMES:", 'if False:', 'neg_shadow_return_function.sh'),
+    ('code-no-unset-check', "if any(a is None for a in args) or '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):", 'if False:', 'neg_shadow_unset_function.sh'),
+    ('code-no-exit-trap-check', "elif name == 'trap':\n                        why = self.check_trap(where, args)", "elif False:\n                        why = self.check_trap(where, args)",
+     'neg_proc_exit_trap_rewrites.sh'),
+    ('code-inert-helper-may-exit', "if nm in ('exit', 'kill', 'exec') or (nm in self.funcs and self.can_exit(nm, seen)):", 'if False:', 'neg_allow_cleanup_helper_exits_zero.sh'),
+    ('code-no-alias-check', 'if name in SHADOW_CMDS:', 'if False:', 'neg_allow_alias.sh'),
+    ('code-no-unknown-signal-check', "return '%s: trap on %s, which is not a signal name this gate knows' % (where, x)", 'continue', 'neg_allow_trap_sigexit.sh'),
+    # calls of script functions
     ('code-no-background-call-check', "if getattr(n, 'bg', False):\n                return 'bg'", "if False:\n                return 'bg'", 'neg_func_called_in_background.sh'),
     ('code-no-pipe-stage-call-check', "if kind == 'pipe' and name not in self.propagating:", 'if False:', 'neg_func_pipe_stage_unchecked.sh'),
-    ('code-no-definition-order', 'return in_func or def_node.start < use.start', 'return True', 'neg_helper_defined_after_use.sh'),
-    ('code-global-function-table', 'return at is not None and (in_func or at < use.start)', 'return True', 'tree:tree_helper_never_sourced'),
-    ('code-no-source-order', 'return at is not None and (in_func or at < use.start)', 'return at is not None', 'tree:tree_helper_sourced_after_use'),
-    ('code-redefined-helper', 'name in self.refusing or len(defs) != 1', 'name in self.refusing or len(defs) < 1', 'neg_shadow_helper_redefined.sh'),
+    ('code-return-refusal-propagates', "return self.ok('REFUSE', func=self.returned_from(rhs))", "return self.ok('REFUSE')", 'neg_allow_return_in_function_called_unchecked.sh'),
 ]
 
 
