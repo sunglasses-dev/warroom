@@ -2022,7 +2022,12 @@ class Analyzer:
         if m:
             tgt = posixpath.normpath(posixpath.join(posixpath.dirname(o.file), m.group(1)))
             if tgt in self.files and tgt != o.file:     # the pattern already refuses a library: its first character is a letter or digit
-                return self.ok('RUN')
+                # the child's failure is the call's own status: that status must reach a refusal (as for a capture); a status
+                # saved in a variable and used later, or dropped, is not checked
+                res = self.consume(nd)
+                if res[0] != 'OK':
+                    return self.bad('the runner call is not checked: ' + res[1], res[2])
+                return self.ok('RUN', func=res[3]) if res[1] == 'REFUSE' else res
         return self.bad('the runner is called with a target that is not a named scanned script')
 
     def async_call(self, nd):
@@ -2427,19 +2432,16 @@ class Contracts:
 
     def display_stmt(self, o):
         """The value is printed by an echo/printf (climbing out of nested substitutions that are arguments). That printing
-        statement must itself sit in a plain place: not captured by a substitution, no redirection to a file, no pipe. The one
-        capture accepted is the stored hint `NAME=$(printf ...)`, a printf that is the whole body of the substitution."""
+        statement must itself sit in a plain place: not captured by a substitution, no redirection to a file, no pipe. A value
+        printed inside an outer capture is never accepted, even when that capture is checked: its status says nothing about the
+        display inside it."""
         sm = self.outer_simple(o)
         while sm is not None:
             if sm.words and cmd_name(sm) in ('echo', 'printf') and not any(self.file_out(r) or r.op == '<' for r in sm.redirs):
                 cs = self.nearest_cs(sm)
                 if cs is None:
                     return self.climb(sm, None, 0, True) is None
-                owner = self.outer_simple_of(cs)
-                if (cmd_name(sm) == 'printf' and len(cs.body.items) == 1 and self.an.single_simple(cs.body.items[0]) is sm
-                        and owner is not None and not owner.words and len(owner.assigns) == 1 and not owner.redirs):
-                    return self.climb(owner, None, 0, False) is None
-                sm = owner
+                sm = self.outer_simple_of(cs)       # printed inside another substitution: that capture hides the failure of this one
                 continue
             cs = self.nearest_cs(sm)
             if cs is None:
@@ -3068,6 +3070,25 @@ TREE_CASES.update({
     'env_runcall_target_is_a_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
                                                     'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/_common.sh" check || exit 1\n'}), 1, 'not a named scanned script'),
     'env_runcall_runner_body_is_not_a_dispatch': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n'}), 1, '!computed command word'),
+    # the status of a runner call is the child's: it must reach a refusal, not be saved, dropped or defaulted
+    'runcall_status_saved_and_unused': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                       'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                                       'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check > out\nrc=$?\nprintf "%s" "$rc" > out2\n'}), 1, 'the runner call is not checked'),
+    'runcall_status_dropped': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                              'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                              'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check\necho done\n'}), 1, 'the runner call is not checked'),
+    'runcall_status_defaulted': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                                'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check || true\n'}), 1, 'the runner call is not checked'),
+    'runcall_checked_or_exit': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                               'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                               'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check > out || exit 1\n'}), 1, '!the runner call is not checked'),
+    'runcall_checked_if_not': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                              'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                              'bin/a.sh': ENV_ENTRY + 'if ! wr_run "$HERE/b.sh" check > out; then exit 1; fi\n'}), 1, '!the runner call is not checked'),
+    'runcall_checked_capture': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                               'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                               'bin/a.sh': ENV_ENTRY + 'x=$(wr_run "$HERE/b.sh" check) || exit 1\n'}), 1, '!the runner call is not checked'),
     'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
     'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
 })
@@ -3221,6 +3242,10 @@ CODE_MUTANTS = [
     ('code-e4-runner-listed', "and (f, fn.name) in self.ENV_RUNNERS):", "):", 'tree:env_runner_in_another_function', 'computed command word'),
     ('code-runcall-target-named', "if tgt in self.files and tgt != o.file:", "if True:",
      'tree:env_runcall_target_not_scanned', 'not a named scanned script'),
+    ('code-runcall-status-reaches-refusal', "res = self.consume(nd)\n                if res[0] != 'OK':", "res = self.ok('REFUSE')\n                if res[0] != 'OK':",
+     'tree:runcall_status_saved_and_unused', 'the runner call is not checked'),
+    ('code-display-in-outer-capture', "sm = self.outer_simple_of(cs)       # printed inside another substitution: that capture hides the failure of this one\n                continue",
+     "return True", 'neg_allow_d_inside_checked_capture.sh', 'must be printed by echo or printf'),
     ('code-runcall-literal-form', "m = self.RE_RUN_TARGET.match(src[nd.words[1].start:nd.words[1].end])", "m = re.match(r'^.*$', src[nd.words[1].start:nd.words[1].end])",
      'tree:env_runcall_computed_target', 'not a named scanned script'),
     ('code-e4-sibling-scanned', "if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:", "if sib:", 'tree:env_sibling_not_scanned', 'computed command word'),
