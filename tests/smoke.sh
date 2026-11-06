@@ -880,7 +880,7 @@ fx_n6c() { # the same file under another name: a hard link to a state entry or t
   pa_cfgbytes "$W/board.md.flock"; ln "$W/board.md.flock" "$PAW/hl-flock.env"
   pa_want 'lock file' 2 WARROOM_ENV="$PAW/hl-flock.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
   rm -f "${W:?}/.anchor-W1"; ln -s "$W/.anchor-W1" "$PAW/dangling.env"
-  pa_want 'name this tool writes' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$W" "$PB/board.sh" path
+  pa_want 'leads nowhere|name this tool writes' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$W" "$PB/board.sh" path
 }
 fx_n6d() { # a config path whose links loop is refused, and so is a link that leads nowhere
   pa_setup; ln -s "$PAW/loop2" "$PAW/loop1"; ln -s "$PAW/loop1" "$PAW/loop2"
@@ -1381,6 +1381,9 @@ fx_t1() { # process judgement: dead only on "no such process" or another start t
   printf '#!/bin/sh\nprintf "Thu Nov"\nexit 1\n' > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
   _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; o=$(wr_started $$); echo "rc=$? out=[$o]"; echo "proc:$(wr_proc $$ "Thu Nov")"' _ "$PB" 2>&1)
   case "$_t1" in *"rc=1 out=[]"*"proc:unknown"*) ;; *) PA_WHY="proc a ps that prints part of a time and fails: '$_t1' (want rc 1 with nothing, and unknown)"; return 1 ;; esac
+  printf '#!/bin/sh\nprintf "Thu Nov  5 10:00:00 2026\\n"\nexit 1\n' > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
+  _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; o=$(wr_started $$); echo "rc=$? out=[$o]"' _ "$PB" 2>&1)
+  case "$_t1" in *"rc=1 out=[]"*) ;; *) PA_WHY="proc a ps that prints a whole time and then fails: '$_t1' (want rc 1 with nothing)"; return 1 ;; esac
 }
 fx_gr1() { # the guard judges only from reads it could make: a failed board / job-ledger / mark read, an odd stamp or an odd clock is no post and says why; an absent ledger or mark is the normal first use
   pa_setup; mkdir -p "$PAW/shim"; _aw=$(command -v awk)
@@ -2030,7 +2033,7 @@ pa_mcopy gledger; pa_msed gledger hooks/board-guard.sh 's/^    || { echo "board-
 [ "$(grep -c 'cannot read the job ledger' "$MA/gledger/hooks/board-guard.sh")" = 0 ] && pa_mut gledger fx_gr1 || bad "mutant gledger: the change was not applied"
 pa_mcopy gboard; pa_msed gboard hooks/board-guard.sh 's/^    || { echo "board-guard: skipped \$seat (could not read the board), will retry on the next prompt" >&2; return 1; }$/    || true/'
 [ "$(grep -c '^    || true$' "$MA/gboard/hooks/board-guard.sh")" = 1 ] && pa_mut gboard fx_gr1 || bad "mutant gboard: the change was not applied"
-pa_mcopy gmark; pa_msed gmark hooks/board-guard.sh 's/^    if \[ "\$prev" != "-" \] \&\& ! \[\[ \$prev =~ \$mre \]\]; then$/    if false; then/'
+pa_mcopy gmark; pa_msed gmark hooks/board-guard.sh 's/^    if \[ "\$mexact" = no \] || { \[ "\$prev" != "-" \] \&\& ! \[\[ \$prev =~ \$mre \]\]; }; then$/    if false; then/'
 [ "$(grep -c '^    if false; then$' "$MA/gmark/hooks/board-guard.sh")" = 1 ] && pa_mut gmark fx_gr1 || bad "mutant gmark: the change was not applied"
 pa_mcopy gstamp; pa_msed gstamp hooks/board-guard.sh '/^  wr_hhmm "\$hm" || /d'
 [ "$(grep -c 'its last post is stamped' "$MA/gstamp/hooks/board-guard.sh")" = 0 ] && pa_mut gstamp fx_gr1 || bad "mutant gstamp: the change was not applied"
