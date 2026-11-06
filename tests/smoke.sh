@@ -1259,6 +1259,56 @@ fx_g1() { # a failed post with no old mark leaves "-" (kills the old rollback th
   hold "$PW/board.md"; pa_run WARROOM_DIR="$PW" WARROOM_LOCK_WAIT=1 WARROOM_IDLE_MIN=0 bash "$PHK/board-guard.sh" </dev/null >/dev/null 2>&1; unhold "$PW/board.md"
   [ "$(cat "$PW/.guard-W1" 2>/dev/null)" = "-" ] || { PA_WHY="G1: mark after a failed post is '$(cat "$PW/.guard-W1" 2>&1)' (want '-')"; return 1; }
 }
+fx_c1() { # the cursor record grammar: a valid record resumes, a valid old one is "none", an absent one is "none"; every corrupt shape is status 1, nothing on stdout, a line on stderr
+  pa_setup; printf '[00:00 · BOSS] a\n[00:00 · BOSS] b\n' > "$PAW/cb.md"
+  _c1g=$(pa_run WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_generation "$BOARD_FILE"' _ "$PB") || { PA_WHY="C1: no generation"; return 1; }
+  _c1p=$(pa_run WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_prefixsum "$BOARD_FILE" 2' _ "$PB") || { PA_WHY="C1: no prefix sum"; return 1; }
+  _c1n=$(date +%s); _c1i=0
+  while IFS='|' read -r _nm _body _wrc _wout; do
+    [ -n "$_nm" ] || continue
+    _c1i=$((_c1i + 1)); _cf="$PAW/cur$_c1i"
+    # shellcheck disable=SC2059
+    printf "$(printf '%s' "$_body" | sed -e "s/@G/$_c1g/g" -e "s/@P/$_c1p/g" -e "s/@N/$_c1n/g" -e "s/@OLD/$((_c1n - 200000))/g" -e "s/@FUT/$((_c1n + 90000))/g")" > "$_cf"
+    PA_IN=""; pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2" "$BOARD_FILE" 99999 2>"$3"' _ "$PB" "$_cf" "$PAW/err$_c1i"
+    [ "$PA_RC" = "$_wrc" ] && [ "$PA_OUT" = "$_wout" ] || { PA_WHY="C1 $_nm: rc $PA_RC out '$PA_OUT' (want rc $_wrc out '$_wout')"; return 1; }
+    if [ "$_wrc" = 1 ]; then [ -s "$PAW/err$_c1i" ] || { PA_WHY="C1 $_nm: status 1 with nothing on stderr"; return 1; }; fi
+  done <<'TBL'
+current|@G 2 @N @P\n|0|2
+no-sum|@G 2 @N\n|0|2
+last-line-sum, wrong|@G 2 @N 12345\n|0|0
+prefix-sum, wrong|@G 2 @N 1-2\n|0|0
+valid but old|@G 2 @OLD @P\n|0|none
+future by more than a day|@G 2 @FUT @P\n|1|
+leading zero in the count|@G 08 @N @P\n|1|
+twenty-digit time|@G 2 12345678901234567890 @P\n|1|
+negative count|@G -1 @N @P\n|1|
+sixteen-digit count|@G 1000000000000000 @N @P\n|1|
+extra field|@G 2 @N @P x\n|1|
+extra line|@G 2 @N @P\nx\n|1|
+no final newline|@G 2 @N @P|1|
+empty file||1|
+generation not digits:digits|abc 2 @N\n|1|
+generation without a colon|55 2 @N\n|1|
+generation with a trailing colon|5: 2 @N\n|1|
+generation with two colons|1:2:3 2 @N\n|1|
+checksum not digits|@G 2 @N x-y\n|1|
+checksum with an empty half|@G 2 @N 5-\n|1|
+TBL
+  pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2/absent" "$BOARD_FILE" 99999' _ "$PB" "$PAW"
+  { [ "$PA_RC" = 0 ] && [ "$PA_OUT" = none ]; } || { PA_WHY="C1 absent: rc $PA_RC out '$PA_OUT' (want rc 0 none)"; return 1; }
+  ln -s "$PAW/cb.md" "$PAW/curlink"
+  pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2" "$BOARD_FILE" 99999 2>/dev/null' _ "$PB" "$PAW/curlink"
+  { [ "$PA_RC" = 1 ] && [ -z "$PA_OUT" ]; } || { PA_WHY="C1 symlink: rc $PA_RC out '$PA_OUT' (want rc 1, nothing)"; return 1; }
+  printf '%s 2 %s %s\n' "$_c1g" "$_c1n" "$_c1p" > "$PAW/curunr"; chmod 000 "$PAW/curunr"
+  pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2" "$BOARD_FILE" 99999 2>/dev/null' _ "$PB" "$PAW/curunr"; _r=$PA_RC; _o=$PA_OUT; chmod 600 "$PAW/curunr"
+  if [ "$(id -u)" != 0 ]; then { [ "$_r" = 1 ] && [ -z "$_o" ]; } || { PA_WHY="C1 unreadable: rc $_r out '$_o' (want rc 1, nothing)"; return 1; }; fi
+  mkdir "$PAW/nosearch"; chmod 000 "$PAW/nosearch"
+  pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2/c" "$BOARD_FILE" 99999 2>/dev/null' _ "$PB" "$PAW/nosearch"; _r=$PA_RC; _o=$PA_OUT; chmod 700 "$PAW/nosearch"
+  if [ "$(id -u)" != 0 ]; then { [ "$_r" = 1 ] && [ -z "$_o" ]; } || { PA_WHY="C1 unsearchable folder: rc $_r out '$_o' (want rc 1, nothing: absence is not proven)"; return 1; }; fi
+  printf '%s 2 %s %s\n' "$_c1g" "$_c1n" "$_c1p" > "$PAW/curfix"
+  pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2" "$BOARD_FILE" 99999' _ "$PB" "$PAW/curfix"
+  { [ "$PA_RC" = 0 ] && [ "$PA_OUT" = 2 ]; } || { PA_WHY="C1 repaired record: rc $PA_RC out '$PA_OUT' (want rc 0, 2)"; return 1; }
+}
 fx_g2() { # the restore fails: the new mark stays and the hook says so (kills a failed-restore-only "rm")
   pa_setup; pa_w; printf '[00:00 · W1] working\n' > "$PW/board.md"; mkdir -p "$PAW/shim"; _py=$(command -v python3)
   printf '#!/bin/sh\ncase "$*" in *os.replace*.guard-W1) c=$(cat "%s" 2>/dev/null || echo 0); c=$((c+1)); echo $c > "%s"; [ $c = 2 ] && { echo "shim: replace refused" >&2; exit 1; } ;; esac\nexec %s "$@"\n' "$PAW/cnt" "$PAW/cnt" "$_py" > "$PAW/shim/python3"; chmod +x "$PAW/shim/python3"
@@ -1374,6 +1424,7 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
   _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" tail BOSS 2>"$PAW/e"); _r=$?; pa_ckoff
   { [ "$_r" = 1 ] && [ -z "$_o" ] && pa_ckhit && grep -q "could not read the board" "$PAW/e" && [ ! -e "$PW/.anchor-BOSS" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="F1c: rc $_r, out '$_o', hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
 }
+pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
 pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
 pa_run_fx fx_f9c "F9: a failed generation or prefix checksum in the prompt hook shows no count and says why"
@@ -1527,6 +1578,12 @@ pa_mcopy nofiltercheck; pa_msed nofiltercheck bin/waiter.sh 's|&& new=$(filter <
 [ "$(grep -c 'filter < "\$chunk_t" || true' "$MA/nofiltercheck/bin/waiter.sh")" = 1 ] && pa_mut nofiltercheck fx_k11 || bad "mutant nofiltercheck: the change was not applied"
 else echo "skip mutant nofiltercheck (ps cannot read process start times here, so a waiter cannot arm)"; fi
 
+pa_mcopy c1len; pa_msed c1len bin/_cursor.sh 's/^  \[ "\${#1}" -le 15 \]$/  true/'
+[ "$(grep -c '^  true$' "$MA/c1len/bin/_cursor.sh")" = 1 ] && pa_mut c1len fx_c1 || bad "mutant c1len: the change was not applied"
+pa_mcopy c1fut; pa_msed c1fut bin/_cursor.sh '/more than a day ahead of the clock" >&2; return 1; }$/d'
+[ "$(grep -c 'more than a day ahead of the clock" >&2' "$MA/c1fut/bin/_cursor.sh")" = 0 ] && pa_mut c1fut fx_c1 || bad "mutant c1fut: the change was not applied"
+pa_mcopy c1abs; pa_msed c1abs bin/_cursor.sh 's/^    \[ -x "\$_cd" \] || { echo "cursor \$1: its folder cannot be searched" >&2; return 1; }$/    :/'
+[ "$(grep -c 'its folder cannot be searched' "$MA/c1abs/bin/_cursor.sh")" = 0 ] && pa_mut c1abs fx_c1 || bad "mutant c1abs: the change was not applied"
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9tail/bin/board.sh")" = 1 ] && pa_mut f9tail fx_f9a || bad "mutant f9tail: the change was not applied"

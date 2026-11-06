@@ -47,27 +47,71 @@ wr_lines() {
   case "$_wl" in ''|*[!0-9]*) return 1 ;; esac
   echo "$_wl"
 }
+# wr_digits X — status 0 when X is one or more digits and nothing else
+wr_digits() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+# wr_canon N — status 0 when N is a canonical decimal: "0", or 1 to 15 digits with no leading zero (no wrap in the shell's
+# arithmetic, no octal reading of "08")
+wr_canon() {
+  case "$1" in
+    0) return 0 ;;
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 15 ]
+}
+# wr_cursor_parse FILE — status 0 and the three or four fields in _g _l _t _s when FILE holds exactly one newline-ended
+# record of the current grammar: GEN = digits ":" digits (the board's inode and the checksum of its first line), LINES and
+# EPOCH canonical decimals, each checked on its own, SUM absent (three fields, a cursor from the oldest version), digits
+# (the last line only) or digits "-" digits (the consumed prefix). Anything else is status 1 and a line on stderr naming
+# the file and the first rule it breaks; nothing is printed on stdout.
+wr_cursor_parse() {
+  _g=""; _l=""; _t=""; _s=""; _px=""; _pn=""; _pr=""; _pq=""
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] || { echo "cursor $1 is not a readable regular file" >&2; return 1; }
+  { IFS=' ' read -r _g _l _t _s _px; _pr=$?; IFS= read -r _pn; _pq=$?; } < "$1" 2>/dev/null
+  [ "$_pr" = 0 ] || { echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1; }
+  { [ "$_pq" = 1 ] && [ -z "$_pn" ]; } || { echo "cursor $1 is not exactly one line" >&2; return 1; }
+  [ -z "$_px" ] || { echo "cursor $1 has more than four fields" >&2; return 1; }
+  wr_digits "${_g%%:*}" && wr_digits "${_g#*:}" && case "$_g" in *:*:*) false ;; *:*) true ;; *) false ;; esac \
+    || { echo "cursor $1: the generation is not digits:digits" >&2; return 1; }
+  wr_canon "$_l" || { echo "cursor $1: the line count is not a canonical decimal" >&2; return 1; }
+  wr_canon "$_t" || { echo "cursor $1: the time is not a canonical decimal" >&2; return 1; }
+  case "$_s" in
+    '') ;;
+    *-*) wr_digits "${_s%%-*}" && wr_digits "${_s#*-}" || { echo "cursor $1: the checksum is not digits-digits" >&2; return 1; } ;;
+    *) wr_digits "$_s" || { echo "cursor $1: the checksum is not digits" >&2; return 1; } ;;
+  esac
+  return 0
+}
 # wr_cursor_get CURSOR_FILE BOARD MAX_AGE_SECONDS
 #   prints the line to resume from; 0 when the board was replaced, shrank or changed in the part already read (all of it
-#   is new to this reader); "none" when there is no usable cursor (first run, unreadable, or older than MAX_AGE_SECONDS).
-#   A checksum that cannot be computed is not "the board changed": nothing is printed and the status is 1, and the caller
-#   consumes nothing.
+#   is new to this reader); "none" when there is no cursor (first run: the file is absent and its folder can be searched)
+#   or the cursor is valid but older than MAX_AGE_SECONDS. A cursor that is unreadable, not of the grammar above, or dated
+#   more than a day ahead of the clock is corrupt, never "none": nothing is printed and the status is 1, and the caller
+#   consumes nothing. A checksum that cannot be computed is not "the board changed": same, status 1.
 wr_cursor_get() {
-  _g=""; _l=""; _t=""; _s=""; _cg=""; _cs=""
-  [ -r "$1" ] || { echo none; return; }                     # a missing cursor is normal on the first arm: say nothing
-  read -r _g _l _t _s < "$1" 2>/dev/null || { echo none; return; }
-  case "$_l$_t" in ''|*[!0-9]*) echo none; return ;; esac
-  [ $(( $(date +%s) - _t )) -le "${3:-86400}" ] || { echo none; return; }
+  _cg=""; _cs=""; _cd=""; _cn=""
+  case "$1" in */*) _cd=${1%/*} ;; *) _cd=. ;; esac
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+    [ -x "$_cd" ] || { echo "cursor $1: its folder cannot be searched" >&2; return 1; }
+    echo none; return 0                                     # a missing cursor is normal on the first arm: say nothing
+  fi
+  wr_cursor_parse "$1" || return 1
+  _cn=$(date +%s) || return 1
+  wr_canon "$_cn" || return 1
+  [ "$_t" -le $(( _cn + 86400 )) ] || { echo "cursor $1: its time is more than a day ahead of the clock" >&2; return 1; }
+  [ $(( _cn - _t )) -le "${3:-86400}" ] || { echo none; return 0; }
   _cg=$(wr_generation "$2") || return 1
   if [ "$_g" = "$_cg" ]; then
     _n=$(wr_lines "$2") || return 1
     if [ "$_l" -le "$_n" ]; then
-      if [ "$_l" -eq 0 ] || [ -z "$_s" ]; then echo "$_l"; return; fi     # nothing read yet, or a cursor without SUM (accepted once)
+      if [ "$_l" -eq 0 ] || [ -z "$_s" ]; then echo "$_l"; return 0; fi    # nothing read yet, or a cursor without SUM (accepted once)
       case "$_s" in
         *-*) _cs=$(wr_prefixsum "$2" "$_l") || return 1 ;;
         *)   _cs=$(wr_linesum "$2" "$_l") || return 1 ;;                   # older cursor: the last line only
       esac
-      [ "$_s" = "$_cs" ] && { echo "$_l"; return; }
+      [ "$_s" = "$_cs" ] && { echo "$_l"; return 0; }
     fi
   fi
   echo 0
