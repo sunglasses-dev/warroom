@@ -2404,11 +2404,13 @@ class Contracts:
             return 'H needs the two-stage help pipeline'
         a = [word_lit(w) for w in pipe.cmds[0].words]
         b = [word_lit(w) for w in pipe.cmds[1].words]
-        okA = len(a) == 4 and a[0] == 'sed' and a[1] == '-n' and re.fullmatch(r"[0-9]+,[0-9]+p", a[2] or '') and word_lit(pipe.cmds[0].words[3]) is None \
-            and self.dollar0(pipe.cmds[0].words[3])
+        # the "--" before the script is required: GNU sed takes an option from anywhere in its arguments, so a script run as "-dir/name"
+        # would be one (BSD sed stops at the script, and a "--" after it is a file name)
+        okA = len(a) == 5 and a[0] == 'sed' and a[1] == '-n' and a[2] == '--' and re.fullmatch(r"[0-9]+,[0-9]+p", a[3] or '') \
+            and word_lit(pipe.cmds[0].words[4]) is None and self.dollar0(pipe.cmds[0].words[4])
         okB = b == ['sed', 's/^# \\{0,1\\}//']
         if not (okA and okB):
-            return 'H pipeline is not sed -n N,Mp "$0" | sed s/^# \\{0,1\\}//'
+            return 'H pipeline is not sed -n -- N,Mp "$0" | sed s/^# \\{0,1\\}//'
         return None
 
     def dollar0(self, w):
@@ -2571,19 +2573,46 @@ class Contracts:
             n = p
         return False
 
-    def f_writes(self, root, seen):
+    def f_consumed(self, d, root, tail):
+        """True when the status of the command `d` is used: it is the left side of a `||` whose right side is not `:` / `true`, or it
+        is the last command of an `if` / `while` / `until` condition. A later statement in the same list drops it. `tail` says the
+        status of the last command of ROOT is the status of ROOT (a function body: its caller consumes it)."""
+        n, c = d, d
+        while n is not root and n.parent is not None:
+            p = n.parent
+            if p.k == 'andor':
+                i = next((k for k, x in enumerate(p.parts) if x is n), None)
+                if i is not None:
+                    for j in range(i, len(p.ops)):
+                        if p.ops[j] == '||' and not self.f_vacuous(p.parts[j + 1]):
+                            return True
+            if p.k == 'list' and p.items and p.items[-1] is not n:
+                return False
+            if p.k == 'if' and any(n is cl[0] for cl in p.clauses):
+                return True
+            if p.k == 'while' and n is p.cond:
+                return True
+            c, n = n, p
+        return tail and n is root
+
+    def f_writes(self, root, seen, tail=False):
         """True when `root` holds a state write that counts: wr_replace or wr_append, a redirect to a file (a computed target is a
-        file: the row's digest freezes it), or a script function whose own body holds one. Writes to /dev/*, duplications onto a
-        descriptor, assignments, wr_drop / wr_unlock and `echo` to stderr are not state."""
+        file: the row's digest freezes it), or a script function whose own body holds one. A write counts only when its status is
+        used (see f_consumed): a dropped status is the same as a swallowed one. A function name defined more than once never
+        counts. Writes to /dev/*, duplications onto a descriptor, assignments, wr_drop / wr_unlock and `echo` to stderr are not
+        state."""
         for d in walk(root):
             if d.k != 'simple' or not self.f_place_ok(d, root) or self.f_swallowed(d, root):
                 continue
             nm = cmd_name(d) if d.words else ''
-            if nm in ('wr_replace', 'wr_append'):
+            if len(self.an.funcs.get(nm, [])) > 1:
+                continue
+            used = self.f_consumed(d, root, tail)
+            if used and nm in ('wr_replace', 'wr_append'):
                 return True
-            if nm in self.an.funcs and nm not in seen:
+            if used and nm in self.an.funcs and nm not in seen:
                 seen.add(nm)
-                if any(self.f_writes(fn, seen) for _, fn in self.an.funcs[nm]):
+                if any(self.f_writes(fn, seen, True) for _, fn in self.an.funcs[nm]):
                     return True
             for r in d.redirs:
                 if r.heredoc or r.op not in ('>', '>>', '>|', '&>'):
@@ -2591,7 +2620,8 @@ class Contracts:
                 t = word_lit(r.target) if r.target is not None else None
                 if t is not None and t.startswith('/dev/'):
                     continue
-                return True
+                if used:
+                    return True
         return False
 
     def c_X(self, o, e):
@@ -3061,6 +3091,7 @@ MUTANTS = [
     ('d-other-format', 'pos_d_display.sh', '$(date +%H:%M)', '$(date +%s)', '@allows only date'),
     ('k-not-a-tab', 'pos_k_tab.sh', "printf '\\t'", "printf '%s' x", '@literal tab'),
     ('h-other-file', 'pos_h_help.sh', '"$0"', '"$F"', '@H pipeline is not sed'),
+    ('h-no-end-of-options', 'pos_h_help.sh', " -- ", " ", '@H pipeline is not sed'),
     ('m-reads-a-file', 'pos_m_drain.sh', 'cat >/dev/null', 'cat "$F" >/dev/null', '@bare cat'),
     ('x-writes-state', 'pos_x_formatter.sh', '{ : >> "$1.flock"; }', '{ echo hi >> "$1.flock"; }', '@null-command probe'),
     ('x-not-terminal', 'pos_x_formatter.sh', '>&2; return 1', '>&2; echo more', '@followed by return or exit'),
@@ -3233,20 +3264,34 @@ TREE_CASES.update({
                                              'standard output sent to /dev/null explicitly'),
     # reason F, the branch must write state and the row binds the whole if statement
     'f_pos_branch_wr_replace': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || return 1; fi\n'), 0, '!holds no state write'),
-    'f_pos_branch_function_writes': (f_tree('keepit() { printf x >> "$HERE/k" || return 1; }\nif ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit; fi\n'), 0,
+    'f_pos_branch_function_writes': (f_tree('keepit() { printf x >> "$HERE/k" || return 1; }\nif ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 0,
                                      '!holds no state write'),
     'f_neg_branch_colon': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then :; fi\n'), 1, 'holds no state write'),
     'f_neg_branch_assignment_only': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then bad=1; fi\n'), 1, 'holds no state write'),
     'f_neg_branch_drop_unlock_only': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_drop "$HERE/t"; wr_unlock "$HERE/k"; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_stderr_only': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo restore > /dev/stderr; printf x >&2; fi\n'), 1, 'holds no state write'),
+    'f_neg_branch_stderr_only': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo restore > /dev/stderr || return 1; printf x >&2; fi\n'), 1, 'holds no state write'),
     'f_neg_branch_command_true': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then command true; fi\n'), 1, 'must not exit'),
     'f_neg_branch_write_swallowed': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || true; printf x >> "$HERE/k" || :; fi\n'), 1,
                                      'holds no state write'),
-    'f_neg_branch_write_swallowed_by_next': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k"; true; fi\n'), 1, 'holds no state write'),
+    'f_neg_branch_write_swallowed_by_next': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || return 1; true; fi\n'), 1, 'holds no state write'),
     'f_neg_branch_write_in_background': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" &\nfi\n'), 1, 'holds no state write'),
-    'f_neg_branch_write_in_subshell': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then ( wr_replace "$HERE/t" "$HERE/k" ); fi\n'), 1, 'holds no state write'),
+    'f_neg_branch_write_in_subshell': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then ( wr_replace "$HERE/t" "$HERE/k" || return 1 ); fi\n'), 1, 'holds no state write'),
     'f_neg_branch_write_in_pipe_stage': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" | cat; fi\n'), 1, 'holds no state write'),
     'f_neg_branch_vacuous_function': (f_tree('vac() { :; }\nif ! wr_run "$HERE/b.sh" post x >/dev/null; then vac; fi\n'), 1, 'holds no state write'),
+    # a write counts only when its status is used: by a || that is not : / true, by an if or while condition, or (a function's
+    # last command) by the caller; a name defined twice never counts
+    'f_neg_branch_write_unchecked': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k"; fi\n'), 1, 'holds no state write'),
+    'f_neg_branch_printf_unchecked': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then printf x >> "$HERE/k"; fi\n'), 1, 'holds no state write'),
+    'f_neg_branch_write_then_other': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k"; echo done >&2; fi\n'), 1, 'holds no state write'),
+    'f_neg_branch_function_call_unchecked': (f_tree('keepit() { printf x >> "$HERE/k" || return 1; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit; fi\n'), 1,
+                                             'holds no state write'),
+    'f_neg_branch_function_body_dropped': (f_tree('keepit() { printf x >> "$HERE/k"; echo y >&2; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 1,
+                                           'holds no state write'),
+    'f_neg_branch_function_defined_twice': (f_tree('keepit() { printf x >> "$HERE/k" || return 1; }\nkeepit() { echo y >&2; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 1,
+                                            'holds no state write'),
+    'f_pos_branch_function_last_write': (f_tree('keepit() { echo y >&2; printf x >> "$HERE/k"; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 0,
+                                         '!holds no state write'),
+    'f_pos_branch_write_in_condition': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then if wr_replace "$HERE/t" "$HERE/k"; then echo y >&2; fi; fi\n'), 0, '!holds no state write'),
     'f_neg_binding_stale': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || return 1; fi\n', stale=True), 1,
                             'the if statement changed: pin'),
     'f_neg_dup_stderr_to_stdout': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null 2>&1; then echo restore >&2; fi\n'), 1, 'allows only redirections'),
@@ -3427,8 +3472,14 @@ CODE_MUTANTS = [
     # reason F: each part of its contract is pinned by a tree that only that part rejects
     ('code-f-binding-compare', "if e.ctx != want:", "if False:", 'tree:f_neg_binding_stale', 'the if statement changed'),
     ('code-f-state-write-required', "if not self.f_writes(branch, set()):", "if False:", 'tree:f_neg_branch_colon', 'holds no state write'),
-    ('code-f-write-not-swallowed', " or self.f_swallowed(d, root):", ":", 'tree:f_neg_branch_write_swallowed', 'holds no state write'),
+    ('code-f-write-not-swallowed', " or self.f_swallowed(d, root):", ":", 'tree:f_neg_branch_write_swallowed_by_next', 'holds no state write'),
     ('code-f-write-in-place', "not self.f_place_ok(d, root) or ", "", 'tree:f_neg_branch_write_in_subshell', 'holds no state write'),
+    ('code-f-write-status-used', "used = self.f_consumed(d, root, tail)", "used = True", 'tree:f_neg_branch_write_unchecked', 'holds no state write'),
+    ('code-f-redirect-status-used', "                if used:\n                    return True", "                return True", 'tree:f_neg_branch_printf_unchecked', 'holds no state write'),
+    ('code-f-call-site-status-used', "if used and nm in self.an.funcs and nm not in seen:", "if nm in self.an.funcs and nm not in seen:", 'tree:f_neg_branch_function_call_unchecked', 'holds no state write'),
+    ('code-f-later-statement-drops-status', "if p.k == 'list' and p.items and p.items[-1] is not n:\n                return False", "if False:\n                return False", 'tree:f_neg_branch_function_body_dropped', 'holds no state write'),
+    ('code-f-tail-status-passes-up', "return tail and n is root", "return n is root", 'tree:f_neg_branch_write_unchecked', 'holds no state write'),
+    ('code-f-name-defined-twice', "if len(self.an.funcs.get(nm, [])) > 1:", "if False:", 'tree:f_neg_branch_function_defined_twice', 'holds no state write'),
     ('code-f-write-not-dev', "if t is not None and t.startswith('/dev/'):", "if False:", 'tree:f_neg_branch_stderr_only', 'holds no state write'),
     ('code-f-stdout-explicit', "if not any(r.op == '>' and (r.fd or '1') == '1' and word_lit(r.target) == '/dev/null' for r in nd.redirs):",
      "if False:", 'tree:f_neg_stdout_inherited', 'standard output sent to /dev/null explicitly'),
