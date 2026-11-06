@@ -2774,13 +2774,13 @@ def summarize(an, entries, dead, invalid, ambiguous):
     return occs, ok, listed, unlisted
 
 
-def report(an, entries, dead, invalid, ambiguous, verbose=False, tsv=None, out=sys.stdout):
+def report(an, entries, dead, invalid, ambiguous, verbose=False, tsv=None, out=sys.stdout, enforce=False):
     occs, ok, listed, unlisted = summarize(an, entries, dead, invalid, ambiguous)
     kinds = {}
     for o in occs:
         kinds[o.kind] = kinds.get(o.kind, 0) + 1
-    out.write('read-gate (report mode): files=%d occurrences=%d classes=%d unlisted=%d listed=%d ok=%d dead=%d invalid=%d ambiguous=%d%s\n'
-              % (len(an.files), len(occs), len(kinds), len(unlisted), len(listed), len(ok), len(dead), len(invalid), len(ambiguous),
+    out.write('read-gate (%s): files=%d occurrences=%d classes=%d unlisted=%d listed=%d ok=%d dead=%d invalid=%d ambiguous=%d%s\n'
+              % ('enforcing' if enforce else 'report mode', len(an.files), len(occs), len(kinds), len(unlisted), len(listed), len(ok), len(dead), len(invalid), len(ambiguous),
                  '' if an.envelope_on else ' envelope=off'))
     out.write('  classes: %s\n' % ', '.join('%s=%d' % (k, kinds[k]) for k in sorted(kinds)))
     st = {}
@@ -3411,7 +3411,7 @@ def main(argv):
             exp, allows, minocc = parse_header(text)
             entries = bind_entries(name, text, allows)
             an, d, i, x, u = run_text(name, text, entries)
-            bad = report(an, entries, d, i, x, verbose=True)
+            bad = report(an, entries, d, i, x, verbose=True, enforce=a.enforce)
             return (1 if bad else 0) if a.enforce else 0
         files = tree_files(a.root)
         if not files:
@@ -3431,7 +3431,7 @@ def main(argv):
             with open(a.allow, encoding='utf-8') as fh:
                 entries = load_allow(fh.read(), a.allow)
         dead, invalid, ambiguous = apply_allow(an, entries)
-        bad = report(an, entries, dead, invalid, ambiguous, verbose=a.verbose, tsv=a.tsv)
+        bad = report(an, entries, dead, invalid, ambiguous, verbose=a.verbose, tsv=a.tsv, enforce=a.enforce)
         if a.enforce:
             return 1 if bad else 0
         return 0

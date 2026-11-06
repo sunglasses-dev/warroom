@@ -38,9 +38,9 @@
 #  55. injected poll filter/checksum failures keep the waiter alive and its position unchanged until retry delivers; arm and tail checksum failures exit without advancing their saved state, and empty-board tail succeeds.
 #  59. selected fixtures fail on deliberately mutated copies of bin/ and hooks/ and pass on the pristine copy; the failing assertion is printed.
 #      touchlast, legacytemp, mvreplace, oldrollback, restorerm and nofiltercheck are the six B write/filter mutants.
-#  60. read gate (report mode): tests/read-gate.py checks its own fixtures and mutants, then lists every read in bin/ and hooks/ whose
-#      failure can reach a state change. It prints the inventory and never fails on it yet; a tool error (unparsable script, empty
-#      discovery) or a failed self-test does fail.
+#  60. read gate (enforcing): tests/read-gate.py checks its own fixtures and mutants, then lists every read in bin/ and hooks/ whose
+#      failure can reach a state change. An unlisted read, a dead, invalid or ambiguous allow entry, a tool error (unparsable
+#      script, empty discovery) or a failed self-test fails the suite.
 # Some hosts (a Node-based CI runner, for one) start every child with SIGPIPE ignored, and bash cannot restore a signal that was
 # ignored when it started, so `trap '' PIPE` changes nothing there and the closed-pipe tests mean something else. Seats run in
 # terminals, where SIGPIPE is at its default. When the probe sees otherwise, the suite restarts itself once through python3,
@@ -2001,7 +2001,7 @@ else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process st
 fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }
 _f0=$fail; pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant skipctl (control: this fixture always skips)$' "$T/skipctl.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skipctl.out")" = 0 ] && ok "mutants: a skipped fixture makes pa_mut print a skip and count neither ok nor FAIL" || bad "mutants: pa_mut on a skipped fixture: $(cat "$T/skipctl.out")"
-# 60. read gate, report mode (enforcing after the repairs). The block must fail when the gate cannot run or runs as an empty
+# 60. read gate, enforcing. The block must fail when the gate cannot run or runs as an empty
 # no-op: each stage has to print its own summary line, the inventory has to cover every script in bin/ and hooks/, and a missing
 # python3 is a failure, not a skip.
 rg_stage() {    # $1 gate script, $2 tree root; prints one "ok" or "FAIL" line per stage
@@ -2016,9 +2016,9 @@ rg_stage() {    # $1 gate script, $2 tree root; prints one "ok" or "FAIL" line p
   # every file under bin/ and hooks/, found without the gate's own glob: a script the gate does not read (no .sh, a subfolder, a link)
   # makes the counts differ, and the inventory stage fails
   want=$(find "$root/bin" "$root/hooks" \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')
-  out=$(python3 -I "$gate" --root "$root" 2>&1); rc=$?
-  if [ "$rc" = 0 ] && [ "$want" != 0 ] && printf '%s\n' "$out" | head -1 | grep -Eq "^read-gate \(report mode\): files=$want occurrences=[1-9][0-9]* "; then
-    ok "read gate inventory (report only): $(printf '%s\n' "$out" | head -1)"
+  out=$(python3 -I "$gate" --enforce --root "$root" 2>&1); rc=$?
+  if [ "$rc" = 0 ] && [ "$want" != 0 ] && printf '%s\n' "$out" | head -1 | grep -Eq "^read-gate \(enforcing\): files=$want occurrences=[1-9][0-9]* classes=[1-9][0-9]* unlisted=0 listed=[0-9]+ ok=[0-9]+ dead=0 invalid=0 ambiguous=0"; then
+    ok "read gate inventory (enforcing): $(printf '%s\n' "$out" | head -1)"
     printf '%s\n' "$out" | sed -n '2,$p' | sed 's/^/     /'
   else
     bad "read gate inventory (rc $rc, want files=$want): $(printf '%s\n' "$out" | head -8)"
