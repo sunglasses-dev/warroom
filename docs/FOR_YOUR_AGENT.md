@@ -103,7 +103,7 @@ You are an AI agent. Your user said something like "read this repo and set it up
 | When you want it | Seats that stay open for hours. |
 | Ask | Offer three choices and wait: adopt our value, keep the compaction setting the user already has, or stay on the default. No rule says which is right for their work. |
 
-Build the setting (the key is `autoCompactWindow`, a token count; check it against the settings reference of the user's Claude Code version, because it is a setting we use and not part of this repo). Put it in the project's `.claude/settings.json`:
+Build the setting. The key is `autoCompactWindow`: how full the context gets before Claude Code compacts, as a token count from 100000 to 1000000. The Claude Code settings reference lists it as valid in any settings file (user, project, local or managed). The per-model form needs a newer Claude Code version, so check the reference for the user's version. It is a setting we use and not part of this repo. Put it in the project's `.claude/settings.json`:
 
 ```json
 { "autoCompactWindow": 250000 }
