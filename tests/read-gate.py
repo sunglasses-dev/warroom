@@ -970,8 +970,11 @@ class Analyzer:
     # Before any statement is judged, every file must be written in the forms the tree uses today. A file outside the envelope
     # has no statement that is ever accepted or listed. The forms are matched literally on purpose: a rule per construct would
     # be a recognizer, and a recognizer can be out-thought; a list of what the files do can only be too short, which fails.
-    CANON_HERE = '"$(cd "$(dirname "$0")" && pwd)"'
-    CANON_WR_ROOT = '"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"'
+    # An entry script finds its own folder with a plain parameter expansion (no dirname, whose status would be lost) and one
+    # checked capture: the case line, then HERE, the line after it. A library finds the repository root the same way.
+    CANON_HERE_CASE = 'case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac'
+    CANON_HERE = '$(cd -P "$_d" && pwd)'
+    CANON_WR_ROOT = '$(cd -P "${BASH_SOURCE[0]%/*}/.." && pwd)'
     ENV_RUNNERS = {('bin/_common.sh', 'wr_run')}        # file + function that may run a computed command word, as exactly "$@"
     RE_SRC_ENTRY_BIN = re.compile(r'^"\$HERE/(_[A-Za-z0-9_]+)\.sh"$')
     RE_SRC_ENTRY_HOOK = re.compile(r'^"\$HERE/\.\./bin/(_[A-Za-z0-9_]+)\.sh"$')
@@ -1019,17 +1022,22 @@ class Analyzer:
 
                 def bare(it):
                     while True:
-                        if it.k == 'andor' and len(it.parts) == 1:
+                        if it.k == 'andor' and (len(it.parts) == 1 or it.ops == ['||']):
                             it = it.parts[0]
                         elif it.k == 'pipe' and len(it.cmds) == 1 and not it.neg:
                             it = it.cmds[0]
                         else:
                             return it
                 top = [it for it in root.body.items if any(bare(it) is d for d in here_nodes)]    # the statement itself, not a group around it
-                ok_here = (len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1 and len(top) == 1
-                           and src[here_hits[0].value.start:here_hits[0].value.end].strip() == self.CANON_HERE)
+                items = root.body.items
+                at = items.index(top[0]) if top else -1
+                ok_here = (len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1
+                           and src[here_hits[0].value.start:here_hits[0].value.end].strip() == self.CANON_HERE
+                           and at > 0
+                           and src[items[at - 1].start:items[at - 1].end].strip() == self.CANON_HERE_CASE
+                           and self.writes_var(root, '_d') == 2)
                 if not ok_here:
-                    bad(f, None, 'E2', 'an entry script sets HERE exactly once, at top level, by the canonical line')
+                    bad(f, None, 'E2', 'an entry script sets HERE exactly once, at top level, by the canonical case line and the canonical line after it')
             if lib and f == 'bin/_common.sh' or (lib and wr_root_total):
                 pass
             for nd in walk(root):
@@ -1121,6 +1129,8 @@ class Analyzer:
         '"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"': 0,
         '"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"': 1,
         '"$(cd "$(dirname "$0")/.." && pwd)"': 1,
+        '$(cd -P "$_d" && pwd)': 0,
+        '$(cd -P "${BASH_SOURCE[0]%/*}/.." && pwd)': 1,
     }
 
     @staticmethod
@@ -1216,7 +1226,7 @@ class Analyzer:
         if up is None:
             return None
         _, _, tails, unknown = self.loose_edges()
-        if '"$0"' in key and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):
+        if ('"$0"' in key or '"$_d"' in key) and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):
             return None         # $0 is the file that was run: when this file is sourced it names the sourcer, not this file
         # a top-level statement, before the `.` and not inside anything
         top = None
@@ -2942,11 +2952,11 @@ TREE_CASES = {
 
 # The file envelope (envelope on): a tree that is written in the forms the tree uses today shows no ENVELOPE row; each case below
 # changes one thing. A diagnostic that starts with "!" must be ABSENT from the output (the controls).
-CH = 'HERE="$(cd "$(dirname "$0")" && pwd)"\n'
-ENV_COMMON = '#!/usr/bin/env bash\nWR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\ndie() { echo "$1" >&2; exit 1; }\n'
+CH = 'case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac\nHERE=$(cd -P "$_d" && pwd) || exit 1\n'
+ENV_COMMON = '#!/usr/bin/env bash\nWR_ROOT=$(cd -P "${BASH_SOURCE[0]%/*}/.." && pwd)\ndie() { echo "$1" >&2; exit 1; }\n'
 # the same library with the prelude in the order the refusal rules want (helper first, the one checked capture next)
 ENV_COMMON_CHECKED = ('#!/usr/bin/env bash\ndie() { echo "$1" >&2; exit 1; }\n'
-                      'WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1\n')
+                      'WR_ROOT=$(cd -P "${BASH_SOURCE[0]%/*}/.." && pwd) || exit 1\n')
 ENV_ENTRY = '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n'
 ENV_HOOK = '#!/usr/bin/env bash\n' + CH + '. "$HERE/../bin/_common.sh" || exit 1\n'
 ENV_BASE = {'bin/_common.sh': ENV_COMMON, 'bin/a.sh': ENV_ENTRY, 'hooks/h.sh': ENV_HOOK}
@@ -2968,9 +2978,12 @@ TREE_CASES.update({
     'env_out_library_in_hooks': (env_tree(**{'hooks/_x.sh': ':\n'}), 1, 'lives in bin/ only'),
     'env_entry_without_here': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n:\n'}), 1, 'sets HERE exactly once'),
     'env_entry_here_twice': (env_tree(**{'bin/a.sh': ENV_ENTRY + 'HERE=/x\n'}), 1, 'sets HERE exactly once'),
-    'env_entry_here_other_form': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\nHERE=$(dirname "$0")\n. "$HERE/_common.sh" || exit 1\n'}),
+    'env_entry_here_other_form': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n' + CH.replace('cd -P', 'cd') + '. "$HERE/_common.sh" || exit 1\n'}),
                                   1, 'sets HERE exactly once'),
-    'env_entry_here_not_top_level': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\nf() {\n' + CH + '}\nf\n. "$HERE/_common.sh" || exit 1\n'}),
+    'env_entry_here_no_case': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n_d=.\n_d=.\n:\nHERE=$(cd -P "$_d" && pwd) || exit 1\n. "$HERE/_common.sh" || exit 1\n'}),
+                               1, 'sets HERE exactly once'),
+    'env_entry_here_d_written_again': (env_tree(**{'bin/a.sh': ENV_ENTRY + '_d=/x\n'}), 1, 'sets HERE exactly once'),
+    'env_entry_here_not_top_level': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\ncase $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac\nf() {\nHERE=$(cd -P "$_d" && pwd) || exit 1\n}\n'}),
                                      1, 'sets HERE exactly once'),
     'env_library_sets_here': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'HERE=/x\n'}), 1, 'never sets HERE'),
     'env_library_names_itself': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'x=$(dirname "$0")\n'}), 1, 'never names itself'),
@@ -2988,12 +3001,12 @@ TREE_CASES.update({
     'env_control_trap_action_plain_calls': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'wr_drop \"$a\"; wr_drop \"$b\"' EXIT\n"}), 1, '!ENVELOPE E4'),
     'env_trap_action_exec_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'exec 2>\"$1\"' DEBUG\n"}), 1, 'a trap action holds only plain calls'),
     # a hook that sources an entry script is outside the envelope and so is everything in its own shell, but a separate entry
-    # script is another process: its own rows stand (the one checked read below is still accepted)
+    # script is another process: its own rows stand (its two checked reads below, the folder capture and the file read, are still accepted)
     'env_hook_failure_leaves_other_processes': (env_tree(**{'bin/_common.sh': ENV_COMMON_CHECKED,
                                                             'bin/b.sh': ENV_ENTRY + 'y=1\n',
                                                             'hooks/h.sh': ENV_HOOK + '. "$HERE/../bin/b.sh" || exit 1\n',
                                                             'bin/a.sh': ENV_ENTRY + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
-                                                1, 'ok=1 '),
+                                                1, 'ok=2 '),
     'env_control_high_descriptors': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 9>>"$WR_ROOT/x.lock"\nexec 8>&-\nexec 9>&-\n'}), 1, '!ENVELOPE E3'),
     # a file outside the envelope shares its shell with every file it sources and every file that sources it: no row there stands
     'env_shared_shell_library_fails': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 2>>"$WR_ROOT/log"\n',
@@ -3126,10 +3139,13 @@ CODE_MUTANTS = [
     ('code-e2-entry-sets-wr-root', "if self.writes_var(root, 'WR_ROOT'):\n                    bad(f, None, 'E2', 'only the library sets WR_ROOT')",
      "if False:\n                    bad(f, None, 'E2', 'only the library sets WR_ROOT')", 'tree:env_entry_sets_wr_root', 'only the library sets WR_ROOT'),
     ('code-e2-entry-here-once', "if not ok_here:", "if False:", 'tree:env_entry_without_here', 'sets HERE exactly once'),
-    ('code-e2-entry-here-count', "len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1 and len(top) == 1", "len(top) >= 1",
+    ('code-e2-entry-here-count', "len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1", "len(top) >= 1",
      'tree:env_entry_here_twice', 'sets HERE exactly once'),
-    ('code-e2-entry-here-canonical', "== self.CANON_HERE)", "!= '')", 'tree:env_entry_here_other_form', 'sets HERE exactly once'),
-    ('code-e2-entry-here-top-level', "and len(top) == 1\n", "\n", 'tree:env_entry_here_not_top_level', 'sets HERE exactly once'),
+    ('code-e2-entry-here-canonical', "== self.CANON_HERE\n", "!= ''\n", 'tree:env_entry_here_other_form', 'sets HERE exactly once'),
+    ('code-e2-entry-here-case-line', "                           and src[items[at - 1].start:items[at - 1].end].strip() == self.CANON_HERE_CASE\n", "",
+     'tree:env_entry_here_no_case', 'sets HERE exactly once'),
+    ('code-e2-entry-here-d-once', "\n                           and self.writes_var(root, '_d') == 2)", ")", 'tree:env_entry_here_d_written_again', 'sets HERE exactly once'),
+    ('code-e2-entry-here-top-level', "                           and at > 0\n", "", 'tree:env_entry_here_not_top_level', 'sets HERE exactly once'),
     ('code-e2-source-keyword', "if name == 'source':\n                    bad(", "if False:\n                    bad(", 'tree:env_source_keyword', 'only the dot form'),
     ('code-e2-source-entry-bin-form', "m = self.RE_SRC_ENTRY_BIN.match(text0)", "m = self.RE_SRC_ENTRY_BIN.match(text0) or self.RE_SRC_ENTRY_HOOK.match(text0)",
      'tree:env_source_hook_form_in_bin', 'one of three exact forms'),
@@ -3153,7 +3169,7 @@ CODE_MUTANTS = [
     ('code-e4-runner-listed', "and (f, fn.name) in self.ENV_RUNNERS):", "):", 'tree:env_runner_in_another_function', 'computed command word'),
     ('code-e4-sibling-scanned', "if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:", "if sib:", 'tree:env_sibling_not_scanned', 'computed command word'),
     # source identity and call-site context
-    ('code-src-dollar0-names-the-sourcer', """if '"$0"' in key and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):""",
+    ('code-src-dollar0-names-the-sourcer', """if ('"$0"' in key or '"$_d"' in key) and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):""",
      "if False:", 'tree:tree_source_dollar0_in_sourced_file'),
     ('code-src-sourced-file-writes-the-variable', "if self.writes_var(self.files[g][2], var) != (1 if g == fname else 0):", "if False:",
      'tree:tree_source_sourced_file_reassigns_here'),

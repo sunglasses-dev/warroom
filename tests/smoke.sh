@@ -1627,11 +1627,31 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
   _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" tail BOSS 2>"$PAW/e"); _r=$?; pa_ckoff
   { [ "$_r" = 1 ] && [ -z "$_o" ] && pa_ckhit && grep -q "could not read the board" "$PAW/e" && [ ! -e "$PW/.anchor-BOSS" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="F1c: rc $_r, out '$_o', hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
 }
+fx_ep1() { # entry paths: every script finds its own folder by a plain expansion, from a bare name, ./name, an absolute path, a symlinked folder and a folder with a space in it
+  pa_setup; pa_w; _ep="$PAW/sp ace"; mkdir -p "$_ep" || { PA_WHY="EP1: no folder"; return 1; }
+  cp -R "$PB" "$_ep/bin" && cp -R "$PHK" "$_ep/hooks" && ln -s "$_ep/bin" "$PAW/lnkbin" && ln -s "$_ep/hooks" "$PAW/lnkhooks" || { PA_WHY="EP1: copy"; return 1; }
+  for _s in bin/board.sh bin/pids.sh bin/waiter.sh hooks/board-tail.sh hooks/waiter-check.sh hooks/board-guard.sh; do
+    _d=${_s%/*}; _b=${_s##*/}
+    PA_IN='{"session_id": "sid-pa"}' pa_exec WARROOM_DIR="$PW" bash "$_ep/$_s"; _r0=$PA_RC; _o0=$PA_OUT
+    case "$_o0" in *"No such file"*|*"cannot"*"folder"*) PA_WHY="EP1: $_s by absolute path -> $_o0"; return 1 ;; esac
+    for _how in "bare" "dot" "link"; do
+      case "$_how" in
+        bare) _cmd="cd '$_ep/$_d' && bash '$_b'" ;;
+        dot) _cmd="cd '$_ep/$_d' && bash './$_b'" ;;
+        link) _cmd="bash '$PAW/lnk$_d/$_b'" ;;
+      esac
+      _o=$(printf '%s' '{"session_id": "sid-pa"}' | pa_run WARROOM_DIR="$PW" bash -c "$_cmd" 2>&1); _r=$?
+      { [ "$_r" = "$_r0" ] && [ "$_o" = "$_o0" ]; } || { PA_WHY="EP1: $_s ($_how) -> rc $_r '$_o' (absolute: rc $_r0 '$_o0')"; return 1; }
+    done
+  done
+  return 0
+}
 pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
 pa_run_fx fx_t1 "process judgement: a gone pid or another start time is dead; a live process of another owner and a ps that fails after printing part of a time are unknown, never dead"
 pa_run_fx fx_gr1 "guard reads: an absent ledger or mark is first use and posts once; an unreadable ledger or board, an odd mark, stamp or clock posts nothing and says why"
 pa_run_fx fx_st1 "identity stat: an inode, a link count and a modification time are a plain decimal or nothing; a failing or odd stat is never a default, and the generation, the leaf check and the lock refuse on it"
 pa_run_fx fx_ck1 "clock: a bad or failing date is no post stamp, no arming and no delivery past the gap; the epoch reader accepts only a canonical decimal"
+pa_run_fx fx_ep1 "entry paths: every script finds its own folder by a plain expansion and one checked capture, from a bare name, ./name, an absolute path, a symlinked folder and a folder with a space in it"
 pa_run_fx fx_m1 "seat registry unreadable: the waiter stays up at the poll check and at the locked delivery check, delivers nothing and keeps its position, then delivers when the registry reads again"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
 pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
@@ -1827,6 +1847,8 @@ pa_mcopy stcase; pa_msed stcase bin/_common.sh "s/^  case \"\$_sn\" in ''|0\*|/ 
 [ "$(grep -c "case \"\$_sn\" in ''|\*\[!0-9\]\*) return 1" "$MA/stcase/bin/_common.sh")" = 1 ] && pa_mut stcase fx_st1 || bad "mutant stcase: the change was not applied"
 pa_mcopy stgen; pa_msed stgen bin/_cursor.sh 's/_gi=\$(wr_inode "\$1") || return 1; /_gi=$(wr_inode "$1"); /'
 [ "$(grep -c '_gi=\$(wr_inode "\$1"); _gs=' "$MA/stgen/bin/_cursor.sh")" = 1 ] && pa_mut stgen fx_st1 || bad "mutant stgen: the change was not applied"
+pa_mcopy epslash; pa_msed epslash bin/board.sh 's|\*) _d=\. ;; esac|*) _d=/nonexistent ;; esac|'
+[ "$(grep -c '_d=/nonexistent ;; esac' "$MA/epslash/bin/board.sh")" = 1 ] && pa_mut epslash fx_ep1 || bad "mutant epslash: the change was not applied"
 else echo "skip mutants karm and kgap (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'

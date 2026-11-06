@@ -7,7 +7,10 @@
 #   board.sh path                  print the board file path
 # Grammar: a post wakes a seat only when its first line starts with "@SEAT ACTION:" (see docs/PROTOCOL.md).
 # Posts are limited to 10 lines. WARROOM_LONG=1 lifts the limit for one call.
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"; . "$HERE/_cursor.sh"
+case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
+HERE=$(cd -P "$_d" && pwd) || exit 1
+. "$HERE/_common.sh" || exit 1
+. "$HERE/_cursor.sh" || exit 1
 cmd=${1:-}
 case "$cmd" in
   post)

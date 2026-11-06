@@ -3,9 +3,9 @@
 # Reads warroom.env as data (bin/_config.sh: one file, a strict KEY=VALUE grammar, never sourced), then sets SEATS,
 # WARROOM_DIR, BOARD (full path in $BOARD_FILE) and a few helpers. A bad config stops the script with the reason.
 export LC_ALL=C
-WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WR_ROOT=$(cd -P "${BASH_SOURCE[0]%/*}/.." && pwd) || exit 1
 # shellcheck source=bin/_config.sh
-. "$WR_ROOT/bin/_config.sh"
+. "$WR_ROOT/bin/_config.sh" || exit 1
 # Exit code for a bad config: 2 in bin/ scripts. Hooks set WR_CONFIG_EXIT=1 before sourcing this file, because Claude
 # Code reads a hook's exit 2 as "block this prompt": one bad line in warroom.env would lock every session out.
 # Exit 1 is shown as a hook error and the prompt goes through. Only 1 and 2 are accepted.

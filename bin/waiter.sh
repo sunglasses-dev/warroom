@@ -13,7 +13,10 @@
 # The FIRST arm, or one after that age, starts at the end of the board and sees only what follows.
 # Rotate a board by moving it away (a new file starts); see bin/_cursor.sh for what is and is not noticed.
 # Tuning (warroom.env): WARROOM_POLL seconds between checks (5), WARROOM_MIN_GAP seconds between two wakes (60).
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/_common.sh"; . "$HERE/_cursor.sh"
+case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
+HERE=$(cd -P "$_d" && pwd) || exit 1
+. "$HERE/_common.sh" || exit 1
+. "$HERE/_cursor.sh" || exit 1
 case "${1:-}" in -h|--help|help|"") sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 SEAT=$1; SID=${2:-}; POLL=${WARROOM_POLL:-5}; GAP=${WARROOM_MIN_GAP:-60}; AGE=${WARROOM_CURSOR_MAX_AGE:-86400}
 REG="$W/seats.tsv"; TAB="$(printf '\t')"

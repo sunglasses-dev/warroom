@@ -6,7 +6,9 @@
 # a bad warroom.env must not block the prompt (exit 2 would): see WR_CONFIG_EXIT in bin/_common.sh
 # shellcheck disable=SC2034
 WR_CONFIG_EXIT=1
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"
+case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
+HERE=$(cd -P "$_d" && pwd) || exit 1
+. "$HERE/../bin/_common.sh" || exit 1
 case "${1:-}" in -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat 2>/dev/null)
 SID=$(printf '%s' "$IN" | python3 -I -S -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "waiter-check: python3 could not read the hook input as JSON" >&2; exit 1; }
