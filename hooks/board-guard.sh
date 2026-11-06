@@ -13,14 +13,30 @@ WR_CONFIG_EXIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"; . "$HERE/../bin/_cursor.sh"
 case "${1:-}" in -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 cat >/dev/null 2>&1
-IDLE=${WARROOM_IDLE_MIN:-30}; h=$(date +%H); m=$(date +%M); TAB="$(printf '\t')"
-nowmin=$((10#$h*60+10#$m))
+IDLE=${WARROOM_IDLE_MIN:-30}; TAB="$(printf '\t')"
+# one reading of the clock, checked and range-tested before any arithmetic (a failed or odd date is no "now")
+now=$(wr_now) || { echo "board-guard: could not read the clock; no reminder this time" >&2; exit 1; }
+wr_hhmm "$now" || { echo "board-guard: the clock gave '$now', not HH:MM; no reminder this time" >&2; exit 1; }
+nowmin=$((10#${now%%:*}*60+10#${now##*:}))
 for seat in $SEATS; do
-  hit=$(grep -nE "^\[[0-9]{2}:[0-9]{2} · ${seat}\]" "$BOARD_FILE" | tail -1); lineno=${hit%%:*}; line=${hit#*:}
-  [ -n "$line" ] || continue                                   # never posted: not started yet
-  hm=${line:1:5}; lastmin=$((10#${hm%%:*}*60+10#${hm##*:})); age=$(( (nowmin-lastmin+1440) % 1440 ))
+  # the seat's last post, found in one pass to the end of the board: "<line number>:<line>". A read that fails is not
+  # "never posted" (that would hide a silent seat); no output with status 0 is.
+  hit=$(awk -v s="$seat" 'BEGIN { p = "^\\[[0-9][0-9]:[0-9][0-9] · " s "\\]" } $0 ~ p { n = NR; l = $0 } END { if (n) print n ":" l }' "$BOARD_FILE" 2>/dev/null) \
+    || { echo "board-guard: skipped $seat (could not read the board), will retry on the next prompt" >&2; continue; }
+  [ -n "$hit" ] || continue                                    # never posted: not started yet
+  lineno=${hit%%:*}; line=${hit#*:}
+  hm=${line:1:5}
+  wr_hhmm "$hm" || { echo "board-guard: skipped $seat (its last post is stamped '$hm', not a time)" >&2; continue; }
+  lastmin=$((10#${hm%%:*}*60+10#${hm##*:})); age=$(( (nowmin-lastmin+1440) % 1440 ))
   [ "$age" -ge "$IDLE" ] || continue
   # a seat that owns a registered job whose process is still alive is working (pids.tsv: label pid owner started)
+  # the ledger is read whole first (a failed or partial read is never "no jobs"), then walked from that copy. A ledger
+  # that is not there yet means no jobs; one that is there and cannot be read means the guard cannot judge: no post.
+  rows=""
+  if ! wr_absent "$W/pids.tsv"; then
+    rows=$(awk -F'\t' -v s="$seat" '$3==s' "$W/pids.tsv") \
+      || { echo "board-guard: skipped $seat (cannot read the job ledger $W/pids.tsv), will retry on the next prompt" >&2; continue; }
+  fi
   busy=0
   while IFS="$TAB" read -r jl jp _o js; do
     [ -n "$jp" ] || continue
@@ -30,7 +46,9 @@ for seat in $SEATS; do
       alive) busy=1 ;;
       unknown) busy=1; echo "board-guard: cannot read the start time of pid $jp (job '$jl'); $seat counted as working" >&2 ;;
     esac
-  done < <(awk -F'\t' -v s="$seat" '$3==s' "$W/pids.tsv" 2>/dev/null)
+  done <<EOF_ROWS
+$rows
+EOF_ROWS
   [ "$busy" = 0 ] || continue
   mark="$W/.guard-$seat"
   # once per silence: the mark holds the board generation, line number and checksum of the seat's last post; the same
@@ -45,7 +63,16 @@ for seat in $SEATS; do
   gen=$(wr_generation "$BOARD_FILE") || { wr_unlock "$mark"; echo "board-guard: skipped $seat (could not read the board), will retry on the next prompt" >&2; continue; }
   lsum=$(printf '%s\n' "$line" | wr_sum) || { wr_unlock "$mark"; echo "board-guard: skipped $seat (could not checksum the post), will retry on the next prompt" >&2; continue; }
   here="$gen $lineno $lsum"
-  prev=$(cat "$mark" 2>/dev/null)
+  # the mark: absent = no silence spoken about yet ("-"); present = one checked read that must be "-" or a real mark.
+  # An empty or odd mark is refused with a message, never taken as a new silence (the reminder would repeat at every prompt).
+  if wr_absent "$mark"; then prev="-"
+  else
+    prev=$(cat "$mark") || { wr_unlock "$mark"; echo "board-guard: skipped $seat (cannot read the mark $mark), will retry on the next prompt" >&2; continue; }
+    mre='^[0-9]+:[0-9]+ [0-9]+ [0-9]+$'
+    if [ "$prev" != "-" ] && ! [[ $prev =~ $mre ]]; then
+      wr_unlock "$mark"; echo "board-guard: skipped $seat (the mark $mark is not a mark; delete that one file to start a new silence)" >&2; continue
+    fi
+  fi
   if [ "$prev" != "$here" ]; then
     mark_t=""
     if ! { wr_temp "$mark" && mark_t=$_WR_TMP && printf '%s\n' "$here" > "$mark_t" && wr_replace "$mark_t" "$mark"; }; then

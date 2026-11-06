@@ -244,7 +244,7 @@ case "$e" in *"could not lock the job ledger"*) ok "lock: a busy ledger during t
 b0=$(cksum < "$R3/board.md"); hold "$R3/board.md"
 e=$(WARROOM_DIR="$R3" WARROOM_LOCK_WAIT=1 "$B/pids.sh" check 2>&1 >/dev/null); unhold "$R3/board.md"
 grep -q "job3" "$R3/pids.tsv" && [ "$(cksum < "$R3/board.md")" = "$b0" ] && case "$e" in *"could not lock the board"*) true ;; *) false ;; esac && ok "lock: pids.sh check with the board busy keeps the row, shows the board error, board unchanged" || bad "lock: check with a busy board: '$e', row $(grep -c job3 "$R3/pids.tsv")"
-printf '[00:00 · W1] hello\n' > "$R3/board.md"; b0=$(cksum < "$R3/board.md"); : > "$R3/.guard-W1"; hold "$R3/.guard-W1"
+printf '[00:00 · W1] hello\n' > "$R3/board.md"; b0=$(cksum < "$R3/board.md"); printf -- '-\n' > "$R3/.guard-W1"; hold "$R3/.guard-W1"
 e=$(WARROOM_DIR="$R3" WARROOM_LOCK_WAIT=1 WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null 2>&1 >/dev/null); r=$?; unhold "$R3/.guard-W1"
 [ $r = 0 ] && [ "$(cksum < "$R3/board.md")" = "$b0" ] && case "$e" in *"board-guard: skipped W1 (mark busy)"*) true ;; *) false ;; esac && ok "lock: board-guard with the mark busy says so, exits 0, posts nothing" || bad "lock: busy mark: rc $r, '$e'"
 hold "$R3/board.md"; e=$(WARROOM_DIR="$R3" WARROOM_LOCK_WAIT=1 WARROOM_IDLE_MIN=0 bash "$ROOT/hooks/board-guard.sh" </dev/null 2>&1 >/dev/null); unhold "$R3/board.md"
@@ -1323,6 +1323,52 @@ fx_t1() { # process judgement: dead only on "no such process" or another start t
   _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; o=$(wr_started $$); echo "rc=$? out=[$o]"; echo "proc:$(wr_proc $$ "Thu Nov")"' _ "$PB" 2>&1)
   case "$_t1" in *"rc=1 out=[]"*"proc:unknown"*) ;; *) PA_WHY="proc a ps that prints part of a time and fails: '$_t1' (want rc 1 with nothing, and unknown)"; return 1 ;; esac
 }
+fx_gr1() { # the guard judges only from reads it could make: a failed board / job-ledger / mark read, an odd stamp or an odd clock is no post and says why; an absent ledger or mark is the normal first use
+  pa_setup; mkdir -p "$PAW/shim"; _aw=$(command -v awk)
+  cat > "$PAW/shim/awk" <<SHIM
+#!/bin/sh
+for a; do last=\$a; done
+if [ -f "$PAW/awkfault" ] && [ "\$last" = "\$(cat "$PAW/awkfault")" ]; then echo "shim: awk refused" >&2; exit 2; fi
+exec $_aw "\$@"
+SHIM
+  chmod +x "$PAW/shim/awk"
+  printf '#!/bin/sh\nif [ -f "%s/datefault" ]; then cat "%s/datefault"; exit 0; fi\nexec /bin/date "$@"\n' "$PAW" "$PAW" > "$PAW/shim/date"; chmod +x "$PAW/shim/date"
+  _gw() { PW="$PAW/g$1"; rm -rf "$PW"; mkdir -p "$PW"; printf '%s\n' "${2:-[00:00 · W1] working}" > "$PW/board.md"; rm -f "$PAW/awkfault" "$PAW/datefault"; }
+  _gposts() { grep -c '@W1 ACTION: no board post' "$PW/board.md"; }
+  _gwant() { # _gwant NAME PATTERN POSTS : the hook ends 0 (a hook never blocks the prompt) unless said, says PATTERN, and the board has POSTS reminders
+    pa_exec WARROOM_DIR="$PW" WARROOM_IDLE_MIN=0 PATH="$PAW/shim:$PATH" "$PHK/board-guard.sh"
+    [ "$PA_RC" = "${4:-0}" ] || { PA_WHY="$1: rc $PA_RC (want ${4:-0}): $(printf '%s' "$PA_OUT" | head -c 200)"; return 1; }
+    [ -z "$2" ] || printf '%s\n' "$PA_OUT" | grep -q -- "$2" || { PA_WHY="$1: no '$2' in: $(printf '%s' "$PA_OUT" | head -c 200)"; return 1; }
+    [ "$(_gposts)" = "$3" ] || { PA_WHY="$1: $(_gposts) reminders on the board (want $3): $(printf '%s' "$PA_OUT" | head -c 200)"; return 1; }
+  }
+  PA_IN='{}'
+  # control: first use (no ledger, no mark) posts once and leaves a real mark; the same prompt again says nothing more
+  _gw 1; _gwant "G1 first use" "" 1 || return 1
+  [ "$(cat "$PW/.guard-W1")" != "-" ] && grep -Eq '^[0-9]+:[0-9]+ [0-9]+ [0-9]+$' "$PW/.guard-W1" || { PA_WHY="G1: the mark after first use is '$(cat "$PW/.guard-W1")'"; return 1; }
+  _gwant "G1 again" "" 1 || return 1
+  # an empty, odd or two-line mark is refused (not a new silence), the file stays as it was
+  for _mk in "" "garbage" "1:2 3" "1:2 3 4
+5"; do
+    _gw 2; printf '%s' "$_mk" > "$PW/.guard-W1"; _m0=$(cksum < "$PW/.guard-W1")
+    _gwant "G2 mark '$_mk'" "is not a mark" 0 || return 1
+    [ "$(cksum < "$PW/.guard-W1")" = "$_m0" ] || { PA_WHY="G2: the refused mark changed"; return 1; }
+  done
+  # the "-" sentinel is a valid mark and the post goes out
+  _gw 3; printf -- '-\n' > "$PW/.guard-W1"; _gwant "G2 sentinel" "" 1 || return 1
+  # a job ledger that is there and cannot be read is no judgement: no post, no mark, one line saying so
+  _gw 4; printf 'job\t99999999\tW9\t\n' > "$PW/pids.tsv"; printf '%s' "$PW/pids.tsv" > "$PAW/awkfault"
+  _gwant "G3 ledger" "cannot read the job ledger" 0 || return 1
+  [ ! -e "$PW/.guard-W1" ] || { PA_WHY="G3: a mark was written although the ledger could not be read"; return 1; }
+  rm -f "$PAW/awkfault"; _gwant "G3 ledger readable again" "" 1 || return 1
+  # a board that cannot be read is not "never posted"
+  _gw 5; printf '%s' "$PW/board.md" > "$PAW/awkfault"
+  _gwant "G4 board" "could not read the board" 0 || return 1
+  [ ! -e "$PW/.guard-W1" ] || { PA_WHY="G4: a mark was written although the board could not be read"; return 1; }
+  # a stamp that is not a time, and a clock that is not a time
+  _gw 6 '[99:99 · W1] odd'; _gwant "G5 stamp" "not a time" 0 || return 1
+  _gw 7; printf '25:99\n' > "$PAW/datefault"; _gwant "G6 clock" "not HH:MM" 0 1 || return 1
+  return 0
+}
 fx_m1() { # the seat registry cannot be read: the waiter stays up and delivers nothing (poll check and delivery check), then delivers once it can read; only a registry that is read and lacks the row ends it
   [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
   pa_setup; pa_w; mkdir -p "$PAW/shim"; _aw=$(command -v awk)
@@ -1478,6 +1524,7 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
 }
 pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
 pa_run_fx fx_t1 "process judgement: a gone pid or another start time is dead; a live process of another owner and a ps that fails after printing part of a time are unknown, never dead"
+pa_run_fx fx_gr1 "guard reads: an absent ledger or mark is first use and posts once; an unreadable ledger or board, an odd mark, stamp or clock posts nothing and says why"
 pa_run_fx fx_m1 "seat registry unreadable: the waiter stays up at the poll check and at the locked delivery check, delivers nothing and keeps its position, then delivers when the registry reads again"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
 pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
@@ -1623,8 +1670,8 @@ pa_mcopy legacytemp; pa_msed legacytemp bin/_common.sh 's|^  _wr_tn=$(mktemp "$(
 pa_mcopy mvreplace; pa_msed mvreplace bin/_common.sh "s#^  _wr_re=\$(python3 -I -S -c 'import os,sys; os.replace(sys.argv\[1\], sys.argv\[2\])' \"\$_wr_rt\" \"\$_wr_rf\" 2>&1) \&\& return 0#  _wr_re=\$(mv -f -- \"\$_wr_rt\" \"\$_wr_rf\" 2>\&1) \&\& return 0#"
 [ "$(grep -c '_wr_re=$(mv -f -- ' "$MA/mvreplace/bin/_common.sh")" = 1 ] && [ "$(grep -c 'os.replace(sys.argv' "$MA/mvreplace/bin/_common.sh")" = 0 ] && pa_mut mvreplace fx_l3 || bad "mutant mvreplace: the change was not applied"
 else echo "skip mutants touchlast, legacytemp, mvreplace (ps cannot read process start times here, so a waiter cannot arm)"; fi
-pa_mcopy oldrollback; pa_msed oldrollback hooks/board-guard.sh 's|^      if ! { wr_temp "\$mark" \&\& mark_t=\$_WR_TMP \&\& printf .%s\\n. "\${prev:--}"|      if [ -z "$prev" ]; then rm -f "$mark"; elif ! { wr_temp "$mark" \&\& mark_t=$_WR_TMP \&\& printf "%s\\n" "${prev:--}"|'
-[ "$(grep -c 'if \[ -z "\$prev" \]; then rm -f "\$mark"; elif' "$MA/oldrollback/hooks/board-guard.sh")" = 1 ] && pa_mut oldrollback fx_g1 || bad "mutant oldrollback: the change was not applied"
+pa_mcopy oldrollback; pa_msed oldrollback hooks/board-guard.sh 's|^      if ! { wr_temp "\$mark" \&\& mark_t=\$_WR_TMP \&\& printf .%s\\n. "\${prev:--}"|      if [ "$prev" = "-" ]; then rm -f "$mark"; elif ! { wr_temp "$mark" \&\& mark_t=$_WR_TMP \&\& printf "%s\\n" "${prev:--}"|'
+[ "$(grep -c 'if \[ "\$prev" = "-" \]; then rm -f "\$mark"; elif' "$MA/oldrollback/hooks/board-guard.sh")" = 1 ] && pa_mut oldrollback fx_g1 || bad "mutant oldrollback: the change was not applied"
 pa_mcopy restorerm; pa_msed restorerm hooks/board-guard.sh 's|^        wr_drop "\$mark_t"; echo "board-guard: the post for|        rm -f "$mark"; wr_drop "$mark_t"; echo "board-guard: the post for|'
 [ "$(grep -c 'rm -f "\$mark"; wr_drop' "$MA/restorerm/hooks/board-guard.sh")" = 1 ] && pa_mut restorerm fx_g2 || bad "mutant restorerm: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
@@ -1648,6 +1695,16 @@ pa_mcopy m1poll; pa_msed m1poll bin/waiter.sh 's/^  if \[ "\$_m" = 1 \]; then re
 pa_mcopy m1lock; pa_msed m1lock bin/waiter.sh 's/^    if \[ "\$_m" = 1 \]; then wr_unlock "\$CUR"; replaced; elif/    if [ "$_m" != 0 ]; then wr_unlock "$CUR"; replaced; elif/'
 [ "$(grep -c '^    if \[ "\$_m" != 0 \]; then wr_unlock "\$CUR"; replaced; elif' "$MA/m1lock/bin/waiter.sh")" = 1 ] && pa_mut m1lock fx_m1 || bad "mutant m1lock: the change was not applied"
 else echo "skip mutants m1poll and m1lock (ps cannot read process start times here, so a waiter cannot arm)"; fi
+pa_mcopy gledger; pa_msed gledger hooks/board-guard.sh 's/^      || { echo "board-guard: skipped \$seat (cannot read the job ledger.*$/      || true/'
+[ "$(grep -c 'cannot read the job ledger' "$MA/gledger/hooks/board-guard.sh")" = 0 ] && pa_mut gledger fx_gr1 || bad "mutant gledger: the change was not applied"
+pa_mcopy gboard; pa_msed gboard hooks/board-guard.sh 's/^    || { echo "board-guard: skipped \$seat (could not read the board), will retry on the next prompt" >&2; continue; }$/    || true/'
+[ "$(grep -c '^    || true$' "$MA/gboard/hooks/board-guard.sh")" = 1 ] && pa_mut gboard fx_gr1 || bad "mutant gboard: the change was not applied"
+pa_mcopy gmark; pa_msed gmark hooks/board-guard.sh 's/^    if \[ "\$prev" != "-" \] \&\& ! \[\[ \$prev =~ \$mre \]\]; then$/    if false; then/'
+[ "$(grep -c '^    if false; then$' "$MA/gmark/hooks/board-guard.sh")" = 1 ] && pa_mut gmark fx_gr1 || bad "mutant gmark: the change was not applied"
+pa_mcopy gstamp; pa_msed gstamp hooks/board-guard.sh '/^  wr_hhmm "\$hm" || /d'
+[ "$(grep -c 'its last post is stamped' "$MA/gstamp/hooks/board-guard.sh")" = 0 ] && pa_mut gstamp fx_gr1 || bad "mutant gstamp: the change was not applied"
+pa_mcopy gclock; pa_msed gclock hooks/board-guard.sh '/^wr_hhmm "\$now" || /d'
+[ "$(grep -c "not HH:MM" "$MA/gclock/hooks/board-guard.sh")" = 0 ] && pa_mut gclock fx_gr1 || bad "mutant gclock: the change was not applied"
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9tail/bin/board.sh")" = 1 ] && pa_mut f9tail fx_f9a || bad "mutant f9tail: the change was not applied"

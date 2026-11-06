@@ -223,6 +223,8 @@ fi
 BOSS_SEAT=${SEATS%% *}
 
 wr_now()   { date +%H:%M; }
+# wr_hhmm T — T is a real clock time: HH:MM with HH 00-23 and MM 00-59 (checked before any arithmetic on it)
+wr_hhmm() { case "$1" in [0-9][0-9]:[0-9][0-9]) [ "$((10#${1%%:*}))" -lt 24 ] && [ "$((10#${1##*:}))" -lt 60 ] ;; *) return 1 ;; esac; }
 # GNU stat first: on Linux `stat -f` means "file system status" and prints several lines, so it must not run first.
 # On macOS/BSD `stat -c` fails without printing anything, and the BSD form runs instead.
 wr_mtime() {
