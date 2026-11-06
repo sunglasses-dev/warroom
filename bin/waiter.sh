@@ -83,7 +83,7 @@ filter() {
 }
 # gap_closed: 0 the last delivery is less than GAP seconds old (hold the lines), 1 the gap is open, 2 cannot tell (the clock
 # could not be read). On 2 nothing is delivered and the waiter looks again.
-gap_closed() { [ -e "$LAST" ] || return 1; _gn=$(wr_epoch) || return 2; [ $(( _gn - $(wr_mtime "$LAST") )) -lt "$GAP" ]; }
+gap_closed() { [ -e "$LAST" ] || return 1; _gn=$(wr_epoch) || return 2; _gm=$(wr_mtime "$LAST") || return 2; [ $(( _gn - _gm )) -lt "$GAP" ]; }
 # mine: is this still the seat's waiter? 0 yes, 1 no (the registry was read and holds no such row), 2 cannot tell (the
 # registry could not be read). Only 1 ends the waiter; on 2 it keeps its place and looks again.
 mine() {

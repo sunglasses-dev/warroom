@@ -127,10 +127,17 @@ wr_seat_arg() {
 # --- Writing state: create, temp, replace, stamp -------------------------------------------------------------------
 # Data and state files are made and changed through these four functions. Each caller copies the result of wr_temp into its own
 # variable at once, so one helper never overwrites the temp another caller recorded.
-_wr_links() { # FILE -> its link count, "" if unreadable (GNU stat first, see wr_mtime)
-  _wr_n=$(stat -c %h "$1" 2>/dev/null) || _wr_n=$(stat -f %l "$1" 2>/dev/null) || _wr_n=""
-  case "$_wr_n" in ''|*[!0-9]*) echo "" ;; *) echo "$_wr_n" ;; esac
+# wr_statnum GNUFMT BSDFMT FILE: the number stat reports for FILE, or status 1 with nothing printed. A number is a plain
+# decimal of 1 to 15 digits with no leading zero and not zero (an inode, a link count and a modification time are never 0),
+# so a failed or odd answer is never turned into a default. GNU stat first: on Linux `stat -f` means "file system status" and
+# prints several lines, so it must not run first; on macOS and BSD `stat -c` fails without printing and the BSD form runs.
+wr_statnum() {
+  _sn=$(stat -c "$1" "$3" 2>/dev/null) || _sn=$(stat -f "$2" "$3" 2>/dev/null) || return 1
+  case "$_sn" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#_sn}" -le 15 ] || return 1
+  printf '%s\n' "$_sn"
 }
+_wr_links() { wr_statnum %h %l "$1"; }   # FILE -> its link count; status 1 and nothing printed if it cannot be read
 # wr_absent FILE: 0 only when FILE is genuinely absent: it is not there, it is not a (dangling) link, and the folder that would
 # hold it is a folder this process can search. "-e says no" alone is also what a folder we cannot search, a parent that is a
 # file and a link loop look like, so those are status 1 (cannot tell), never "absent".
@@ -140,7 +147,7 @@ wr_absent() {
   [ -d "$_wr_ad" ] && [ -x "$_wr_ad" ]
 }
 # wr_leaf_ok FILE: 0 when FILE is a regular file with one name and is not a link
-wr_leaf_ok() { [ ! -L "$1" ] && [ -f "$1" ] && [ "$(_wr_links "$1")" = 1 ]; }
+wr_leaf_ok() { [ ! -L "$1" ] && [ -f "$1" ] || return 1; _wl=$(_wr_links "$1") || return 1; [ "$_wl" = 1 ]; }
 # wr_create FILE: make an empty FILE with a noclobber create (it never truncates a regular file, and it fails on an existing
 # regular file or a dangling link; a non-regular entry planted at the name is outside this tool's scope and is refused by the recheck). An existing entry, or a lost race, is accepted only when it is a regular file with one name.
 wr_create() {
@@ -227,13 +234,7 @@ wr_now()   { date +%H:%M; }
 wr_epoch() { _we=$(date +%s) || return 1; case "$_we" in ''|0*|*[!0-9]*) return 1 ;; esac; [ "${#_we}" -le 15 ] || return 1; printf '%s\n' "$_we"; }
 # wr_hhmm T — T is a real clock time: HH:MM with HH 00-23 and MM 00-59 (checked before any arithmetic on it)
 wr_hhmm() { case "$1" in [0-9][0-9]:[0-9][0-9]) [ "$((10#${1%%:*}))" -lt 24 ] && [ "$((10#${1##*:}))" -lt 60 ] ;; *) return 1 ;; esac; }
-# GNU stat first: on Linux `stat -f` means "file system status" and prints several lines, so it must not run first.
-# On macOS/BSD `stat -c` fails without printing anything, and the BSD form runs instead.
-wr_mtime() {
-  _m=$(stat -c %Y "$1" 2>/dev/null) || _m=$(stat -f %m "$1" 2>/dev/null) || _m=0
-  case "$_m" in ''|*[!0-9]*) _m=0 ;; esac
-  echo "$_m"
-}
+wr_mtime() { wr_statnum %Y %m "$1"; }   # FILE -> its modification time in seconds; status 1 and nothing printed if it cannot be read
 wr_seat_ok() { case " $SEATS " in *" $1 "*) return 0 ;; esac; return 1; }
 # --- The writer lock -----------------------------------------------------------------------------------------------
 # One writer at a time per protected file, for writers that use these functions (the lock is advisory).
@@ -276,8 +277,7 @@ wr_lock() {
   _wr_k=$_WR_KEY
   if [ -L "$_wr_k" ]; then echo "$1 is a symlink; point the war room at the real path (a protected file has one name)" >&2; return 2; fi
   if [ -e "$_wr_k" ]; then
-    _wr_c=$(_wr_links "$_wr_k")
-    [ -n "$_wr_c" ] || { echo "could not open lock file for $1: its link count cannot be read" >&2; return 1; }
+    _wr_c=$(_wr_links "$_wr_k") || { echo "could not open lock file for $1: its link count cannot be read" >&2; return 1; }
     [ "$_wr_c" -le 1 ] || { echo "$1 has $_wr_c hard links; a protected file must have exactly one name" >&2; return 2; }
   fi
   if [ -L "$_wr_k.flock" ]; then echo "lock file $_wr_k.flock is a symlink; refusing to lock through it" >&2; return 2; fi

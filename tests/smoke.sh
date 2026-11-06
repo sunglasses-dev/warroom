@@ -1369,6 +1369,46 @@ SHIM
   _gw 7; printf '25:99\n' > "$PAW/datefault"; _gwant "G6 clock" "not HH:MM" 0 1 || return 1
   return 0
 }
+fx_st1() { # identity stat: an inode, a link count and a modification time are a plain decimal or nothing (status 1, nothing printed); a stat that fails or prints something odd is never turned into a default
+  pa_setup; pa_w; mkdir -p "$PAW/shim"; _rst=$(command -v stat) || { PA_WHY="ST1: no stat to wrap"; return 1; }
+  cat > "$PAW/shim/stat" <<SHIM
+#!/bin/sh
+f="$PAW/statfault"
+if [ -f "\$f" ]; then
+  m=\$(cat "\$f")
+  case "\$m" in
+    fail) exit 1 ;;
+    print:*) echo "\${m#print:}"; exit 0 ;;
+  esac
+fi
+exec "$_rst" "\$@"
+SHIM
+  chmod +x "$PAW/shim/stat"; _f="$PW/board.md"
+  # the real file: each reader gives a decimal and status 0
+  for _fn in wr_inode _wr_links wr_mtime; do
+    _o=$(pa_run WARROOM_DIR="$PW" bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; "$2" "$3"' _ "$PB" "$_fn" "$_f" 2>/dev/null); _r=$?
+    { [ $_r = 0 ] && case "$_o" in ''|0*|*[!0-9]*) false ;; *) true ;; esac; } || { PA_WHY="ST1: $_fn on a real file -> rc $_r out '$_o' (want a plain decimal)"; return 1; }
+  done
+  # a failing stat, and every odd answer: status 1 and nothing printed, for all three readers
+  for _m in fail print: print:0 print:012 print:abc print:-4 print:1234567890123456 'print:12 34'; do
+    printf '%s\n' "$_m" > "$PAW/statfault"
+    for _fn in wr_inode _wr_links wr_mtime; do
+      _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; "$2" "$3"' _ "$PB" "$_fn" "$_f" 2>/dev/null); _r=$?
+      { [ $_r != 0 ] && [ -z "$_o" ]; } || { PA_WHY="ST1: $_fn with stat '$_m' -> rc $_r out '$_o' (want failure and no output)"; return 1; }
+    done
+  done
+  # the consequences: no generation for a board whose inode cannot be read; a leaf with an unreadable link count is not ok; a lock
+  # on an existing file refuses; the gap check cannot tell
+  printf 'fail\n' > "$PAW/statfault"
+  pa_exec WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_generation "$2"' _ "$PB" "$_f"
+  { [ "$PA_RC" != 0 ] && [ -z "$PA_OUT" ]; } || { PA_WHY="ST1: wr_generation with a failing stat -> rc $PA_RC out '$PA_OUT'"; return 1; }
+  pa_exec WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; wr_leaf_ok "$2"' _ "$PB" "$_f"
+  [ "$PA_RC" != 0 ] || { PA_WHY="ST1: wr_leaf_ok accepted a file whose link count cannot be read"; return 1; }
+  : > "$PW/lk"; pa_exec WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; wr_lock "$2"' _ "$PB" "$PW/lk"
+  { [ "$PA_RC" = 1 ] && printf '%s\n' "$PA_OUT" | grep -q "its link count cannot be read"; } || { PA_WHY="ST1: wr_lock on an existing file with a failing stat -> rc $PA_RC out '$PA_OUT'"; return 1; }
+  rm -f "$PAW/statfault"
+  pa_pass WARROOM_DIR="$PW" bash -c '. "$1/_common.sh"; wr_leaf_ok "$2"' _ "$PB" "$_f" || return 1
+}
 fx_ck1() { # the clock is read once, checked and validated: a bad stamp or time is no post, no arming, no delivery (never an empty or odd value on the board, in the registry or in a gap sum)
   pa_setup; pa_w; mkdir -p "$PAW/shim"
   cat > "$PAW/shim/date" <<SHIM
@@ -1590,6 +1630,7 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
 pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
 pa_run_fx fx_t1 "process judgement: a gone pid or another start time is dead; a live process of another owner and a ps that fails after printing part of a time are unknown, never dead"
 pa_run_fx fx_gr1 "guard reads: an absent ledger or mark is first use and posts once; an unreadable ledger or board, an odd mark, stamp or clock posts nothing and says why"
+pa_run_fx fx_st1 "identity stat: an inode, a link count and a modification time are a plain decimal or nothing; a failing or odd stat is never a default, and the generation, the leaf check and the lock refuse on it"
 pa_run_fx fx_ck1 "clock: a bad or failing date is no post stamp, no arming and no delivery past the gap; the epoch reader accepts only a canonical decimal"
 pa_run_fx fx_m1 "seat registry unreadable: the waiter stays up at the poll check and at the locked delivery check, delivers nothing and keeps its position, then delivers when the registry reads again"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
@@ -1780,6 +1821,12 @@ pa_mcopy karm; pa_msed karm bin/waiter.sh '/^_at=\$(wr_now) \&\& wr_hhmm/{s/.*/_
 [ "$(grep -c '^_at=\$(wr_now)$' "$MA/karm/bin/waiter.sh")" = 1 ] && pa_mut karm fx_ck1 || bad "mutant karm: the change was not applied"
 pa_mcopy kgap; pa_msed kgap bin/waiter.sh 's/^gap_closed() { \(.*\)_gn=\$(wr_epoch) || return 2;/gap_closed() { \1_gn=$(wr_epoch) || return 1;/'
 [ "$(grep -c '_gn=\$(wr_epoch) || return 1;' "$MA/kgap/bin/waiter.sh")" = 1 ] && pa_mut kgap fx_ck1 || bad "mutant kgap: the change was not applied"
+pa_mcopy stfall; pa_msed stfall bin/_common.sh 's/^  _sn=\(.*\) || return 1$/  _sn=\1 || _sn=1/'
+[ "$(grep -c '|| _sn=1$' "$MA/stfall/bin/_common.sh")" = 1 ] && pa_mut stfall fx_st1 || bad "mutant stfall: the change was not applied"
+pa_mcopy stcase; pa_msed stcase bin/_common.sh "s/^  case \"\$_sn\" in ''|0\*|/  case \"\$_sn\" in ''|/"
+[ "$(grep -c "case \"\$_sn\" in ''|\*\[!0-9\]\*) return 1" "$MA/stcase/bin/_common.sh")" = 1 ] && pa_mut stcase fx_st1 || bad "mutant stcase: the change was not applied"
+pa_mcopy stgen; pa_msed stgen bin/_cursor.sh 's/_gi=\$(wr_inode "\$1") || return 1; /_gi=$(wr_inode "$1"); /'
+[ "$(grep -c '_gi=\$(wr_inode "\$1"); _gs=' "$MA/stgen/bin/_cursor.sh")" = 1 ] && pa_mut stgen fx_st1 || bad "mutant stgen: the change was not applied"
 else echo "skip mutants karm and kgap (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'

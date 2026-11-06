@@ -8,15 +8,11 @@
 # Supported ways to rotate a board: move it away (mv board.md board.old, then start a new file: new inode), or empty it
 # and let it fill again. A cursor written by an older version holds the checksum of the last line only; it is still
 # accepted once, and every cursor written from now on carries the prefix sum.
-wr_inode() {
-  _ino=$(stat -c %i "$1" 2>/dev/null) || _ino=$(stat -f %i "$1" 2>/dev/null) || _ino=0
-  case "$_ino" in ''|*[!0-9]*) _ino=0 ;; esac
-  echo "$_ino"
-}
+wr_inode() { wr_statnum %i %i "$1"; }   # FILE -> its inode number; status 1 and nothing printed if it cannot be read
 # The checksum functions report a failed read or a failed stage of their pipeline (pipefail inside a subshell), never a sum
 # of whatever arrived. A caller that gets a nonzero status consumes nothing.
 wr_generation() {
-  _gi=$(wr_inode "$1"); _gs=$( set -o pipefail; head -n 1 "$1" 2>/dev/null | cksum | cut -d' ' -f1 ) || return 1
+  _gi=$(wr_inode "$1") || return 1; _gs=$( set -o pipefail; head -n 1 "$1" 2>/dev/null | cksum | cut -d' ' -f1 ) || return 1
   [ -n "$_gs" ] || return 1
   echo "$_gi:$_gs"
 }
