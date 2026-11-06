@@ -15,26 +15,26 @@ bin/_common.sh	f744-1f0f-528e	0	O	a6e9-acbc-5160	$(python3 -I -S -c 'import os,s
 bin/_common.sh	cfbc-8809-07af	0	X	-	$( { : >> "$_wr_k.flock"; } 2>&1 | sed 's/.*: //' | head -1)
 bin/_common.sh	47a0-1de1-9d1d	0	O	9243-1e66-5421	$(python3 -I -S -c ' import errno, fcntl, sys, time fd, wait = int(sys
 bin/board.sh	eaa3-fb43-ecaa	0	V	-	tail -n "$n" "$BOARD_FILE"
-bin/board.sh	fcca-ad70-f406	0	H	-	sed -n '2,9p' "$0"
-bin/board.sh	fcca-ad70-f406	1	H	-	sed 's/^# \{0,1\}//'
+bin/board.sh	d04e-1790-4919	0	H	-	sed -n -- '2,9p' "$0"
+bin/board.sh	d04e-1790-4919	1	H	-	sed 's/^# \{0,1\}//'
 bin/pids.sh	4733-ce47-337d	0	K	-	$(printf '\t')
 bin/pids.sh	79a4-26b6-ec47	0	V	-	cat "$P"
-bin/pids.sh	856b-7d1a-e897	0	H	-	sed -n '2,16p' "$0"
-bin/pids.sh	856b-7d1a-e897	1	H	-	sed 's/^# \{0,1\}//'
-bin/waiter.sh	5a13-5986-ece7	0	H	-	sed -n '2,15p' "$0"
-bin/waiter.sh	5a13-5986-ece7	1	H	-	sed 's/^# \{0,1\}//'
+bin/pids.sh	7d2c-7cd4-3c67	0	H	-	sed -n -- '2,16p' "$0"
+bin/pids.sh	7d2c-7cd4-3c67	1	H	-	sed 's/^# \{0,1\}//'
+bin/waiter.sh	b3e3-f3ec-4b53	0	H	-	sed -n -- '2,15p' "$0"
+bin/waiter.sh	b3e3-f3ec-4b53	1	H	-	sed 's/^# \{0,1\}//'
 bin/waiter.sh	4733-ce47-337d	0	K	-	$(printf '\t')
 bin/waiter.sh	ae7f-9ab2-f441	0	D	-	$(date +%H:%M:%S)
-hooks/board-guard.sh	fcca-ad70-f406	0	H	-	sed -n '2,9p' "$0"
-hooks/board-guard.sh	fcca-ad70-f406	1	H	-	sed 's/^# \{0,1\}//'
+hooks/board-guard.sh	d04e-1790-4919	0	H	-	sed -n -- '2,9p' "$0"
+hooks/board-guard.sh	d04e-1790-4919	1	H	-	sed 's/^# \{0,1\}//'
 hooks/board-guard.sh	d612-2a20-368d	0	M	-	cat >/dev/null 2>&1
 hooks/board-guard.sh	4733-ce47-337d	0	K	-	$(printf '\t')
-hooks/board-tail.sh	8dff-96f4-661a	0	H	-	sed -n '2,3p' "$0"
-hooks/board-tail.sh	8dff-96f4-661a	1	H	-	sed 's/^# \{0,1\}//'
+hooks/board-tail.sh	a964-c11f-2307	0	H	-	sed -n -- '2,3p' "$0"
+hooks/board-tail.sh	a964-c11f-2307	1	H	-	sed 's/^# \{0,1\}//'
 hooks/board-tail.sh	20ba-b462-056e	0	D	-	$(printf '%q' "$(cd "$HERE/../bin" && pwd)/board.sh")
 hooks/board-tail.sh	0933-3c0a-906b	0	D	-	$(cd "$HERE/../bin" && pwd)
-hooks/waiter-check.sh	22f2-8be5-8a0d	0	H	-	sed -n '2,6p' "$0"
-hooks/waiter-check.sh	22f2-8be5-8a0d	1	H	-	sed 's/^# \{0,1\}//'
+hooks/waiter-check.sh	219d-0d3d-ccbc	0	H	-	sed -n -- '2,6p' "$0"
+hooks/waiter-check.sh	219d-0d3d-ccbc	1	H	-	sed 's/^# \{0,1\}//'
 hooks/waiter-check.sh	509c-0826-5031	0	D	-	$(printf '%q' "$SID")
 hooks/waiter-check.sh	fa30-0e5d-0dd6	0	D	-	$(printf '%q' "$SID")
 hooks/waiter-check.sh	abf5-7714-0a56	0	D	-	$(printf '%q' "$SID")

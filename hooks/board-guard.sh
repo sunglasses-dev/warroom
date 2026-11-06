@@ -14,7 +14,7 @@ case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
 HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/../bin/_common.sh" || exit 1
 . "$HERE/../bin/_cursor.sh" || exit 1
-case "${1:-}" in -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help) sed -n -- '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 cat >/dev/null 2>&1
 IDLE=${WARROOM_IDLE_MIN:-30}; TAB="$(printf '\t')"
 # one reading of the clock, checked and range-tested before any arithmetic (a failed or odd date is no "now")

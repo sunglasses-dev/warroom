@@ -8,7 +8,7 @@ case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
 HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/../bin/_common.sh" || exit 1
 . "$HERE/../bin/_cursor.sh" || exit 1
-case "${1:-}" in -h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help) sed -n -- '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat) || { echo "board-tail: could not read the hook input" >&2; exit 1; }
 SID=$(printf '%s' "$IN" | python3 -I -S -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "board-tail: python3 could not read the hook input as JSON" >&2; exit 1; }
 [ -n "$SID" ] || exit 0

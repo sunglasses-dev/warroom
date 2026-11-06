@@ -384,7 +384,8 @@ for i in 1 2 3 4 5 6; do
   "$B/board.sh" post BOSS "@W1 ACTION: round $i"
   sleep 0.$((i * 2))                                   # a different distance from the wake each round
   "$B/waiter.sh" W1 "sid-d$i" > "$T/d_b.out" 2>/dev/null & pb=$!
-  sleep 4; kill $pa $pb 2>/dev/null; wait $pa $pb 2>/dev/null
+  for _t in $(seq 1 100); do [ "$(cat "$T/d_a.out" "$T/d_b.out" 2>/dev/null | grep -c "WAKE -> W1")" -ge 1 ] && break; sleep 0.2; done   # a slow runner: wait for the wake, never a fixed 4 s
+  sleep 3; kill $pa $pb 2>/dev/null; wait $pa $pb 2>/dev/null
   w=$(cat "$T/d_a.out" "$T/d_b.out" | grep -c "WAKE -> W1"); [ "$w" = 1 ] || { dup=$((dup + 1)); echo "   round $i: $w wakes"; }
 done
 [ $dup = 0 ] && ok "replacing a waiter at the moment of a wake gives exactly one wake (6 rounds)" || bad "same-session replacement: $dup of 6 rounds did not give exactly one wake"
@@ -1832,7 +1833,9 @@ fx_ro1() { # entry scripts: a $0 that is "/name" looks in "/", not in the curren
     _o=$(cd "$_ep/$_d" && printf '%s' '{}' | env WARROOM_DIR="$PW" bash -c '. "$1"' "/$_b" "./$_b" 2>&1); _r=$?
     { [ "$_r" != 0 ] && printf '%s\n' "$_o" | grep -q '//[^ ]*_common.sh: No such file'; } || { PA_WHY="RO1: $_s with \$0=/$_b -> rc $_r '$_o' (want the source of //...common.sh to fail)"; return 1; }
     PA_IN='{"session_id": "sid-pa"}' pa_exec WARROOM_DIR="$PW" bash "$_ep/$_s"; _r0=$PA_RC; _o0=$PA_OUT
-    _o=$(printf '%s' '{"session_id": "sid-pa"}' | pa_run WARROOM_DIR="$PW" bash -- "-dash/$_s" 2>&1); _r=$?
+    # GNU sed takes an option from anywhere in its arguments, so a file named "-dash/..." is an option there unless a "--" comes first; this sed says the same
+    mkdir -p "$_ep/shim"; printf '#!/bin/sh\nfor a in "$@"; do case "$a" in --) break ;; -dash/*) echo "sed: invalid option -- d" >&2; exit 1 ;; esac; done\nexec %s "$@"\n' "$(command -v sed)" > "$_ep/shim/sed"; chmod +x "$_ep/shim/sed"
+    _o=$(printf '%s' '{"session_id": "sid-pa"}' | pa_run WARROOM_DIR="$PW" PATH="$PAW/cwd/-dash/shim:$PATH" bash -- "-dash/$_s" 2>&1); _r=$?
     { [ "$_r" = "$_r0" ] && [ "$_o" = "$_o0" ]; } || { PA_WHY="RO1: $_s from a folder named -dash -> rc $_r '$_o' (absolute: rc $_r0 '$_o0')"; return 1; }
   done
   return 0
@@ -1954,7 +1957,7 @@ fx_k1() { # delivery, the position cannot be saved (the 3rd temp of the run, the
   [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
   [ "$(id -u)" != 0 ] || { PA_SKIP="running as root: mode 444 does not block root"; return 0; }
   pa_b2; rm -f "$PW/seats.tsv"; pa_probe_bin || { PA_WHY="K1: no probe copy"; return 1; }
-  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" PATH="$SHRO:$PATH" "$PBP/waiter.sh" W1 sid-k > "$PAW/o" 2>"$PAW/e" & _wp=$!; sleep 2; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"
+  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" PATH="$SHRO:$PATH" "$PBP/waiter.sh" W1 sid-k > "$PAW/o" 2>"$PAW/e" & _wp=$!; wait_text "$PAW/e" '^armed ' 20; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"
   ro_set "3 waiter.sh"; pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: k1 line" >/dev/null
   wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k" 2>/dev/null; ro_clear; PA_WHY="K1: the waiter did not exit"; return 1; }; wait $_wp 2>/dev/null; _r=$?; _hit=n; ro_hit && _hit=y; ro_clear
   _hdr=$(grep -n '^\[WAKE' "$PAW/o" | head -1 | cut -d: -f1); _ln=$(grep -n 'k1 line' "$PAW/o" | head -1 | cut -d: -f1)
@@ -1976,7 +1979,7 @@ fx_k5() { # delivery, the reader closes after the header while the payload is la
   [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
   pa_b2; rm -f "$PW/seats.tsv"; _ff="$PAW/ff"; mkfifo "$_ff"; pa_probe_bin || { PA_WHY="K5: no probe copy"; return 1; }
   pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" "$PBP/waiter.sh" W1 sid-k > "$_ff" 2>"$PAW/e" & _wp=$!
-  ( IFS= read -r _h; sleep 1 ) < "$_ff" & _rp=$!; sleep 2; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"
+  ( IFS= read -r _h; sleep 1 ) < "$_ff" & _rp=$!; wait_text "$PAW/e" '^armed ' 20; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"
   _pad=$(printf 'x%.0s' $(seq 1 3000)); for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do printf '[00:00 · BOSS] @W1 ACTION: k5 %s %s\n' "$_i" "$_pad"; done >> "$PW/board.md"
   wait_exit $_wp 12 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k" 2>/dev/null; PA_WHY="K5: the waiter did not exit"; return 1; }; wait $_wp 2>/dev/null; _r=$?; wait $_rp 2>/dev/null
   { [ "$_r" = 1 ] && grep -q "could not write the lines" "$PAW/e" && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ] && [ ! -e "$PW/.lastwake-W1" ]; } || { PA_WHY="K5: rc $_r (141 = killed by SIGPIPE), err '$(cat "$PAW/e" | head -c 200)'"; return 1; }
@@ -1985,7 +1988,7 @@ fx_k5() { # delivery, the reader closes after the header while the payload is la
 fx_k3() { # delivery, the gap marker cannot be written (a dangling link at the marker name): the header and the line are printed first, exit 1 'printed but not marked', the position is untouched, and the cursor lock is released before the diagnostic
   [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
   pa_b2; rm -f "$PW/seats.tsv"; pa_probe_bin || { PA_WHY="K3: no probe copy"; return 1; }
-  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" "$PBP/waiter.sh" W1 sid-k > "$PAW/o" 2>"$PAW/e" & _wp=$!; sleep 2; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"; ln -s "$PAW/no-such-dir/marker" "$PW/.lastwake-W1"
+  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" "$PBP/waiter.sh" W1 sid-k > "$PAW/o" 2>"$PAW/e" & _wp=$!; wait_text "$PAW/e" '^armed ' 20; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"; ln -s "$PAW/no-such-dir/marker" "$PW/.lastwake-W1"
   pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: k3 line" >/dev/null
   wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k" 2>/dev/null; PA_WHY="K3: the waiter did not exit"; return 1; }; wait $_wp 2>/dev/null; _r=$?
   { [ "$_r" = 1 ] && grep -q '^\[WAKE' "$PAW/o" && grep -q "k3 line" "$PAW/o" && grep -q "printed but not marked" "$PAW/e" && grep -q "gap marker" "$PAW/e" && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ]; } || { PA_WHY="K3: rc $_r, out '$(head -c 200 "$PAW/o")', err '$(head -c 300 "$PAW/e")'"; return 1; }

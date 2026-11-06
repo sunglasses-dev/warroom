@@ -17,7 +17,7 @@ case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
 HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/_common.sh" || exit 1
 . "$HERE/_cursor.sh" || exit 1
-case "${1:-}" in -h|--help|help|"") sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help|help|"") sed -n -- '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 SEAT=$1; SID=${2:-}; POLL=${WARROOM_POLL:-5}; GAP=${WARROOM_MIN_GAP:-60}; AGE=${WARROOM_CURSOR_MAX_AGE:-86400}
 REG="$W/seats.tsv"; TAB="$(printf '\t')"
 [ "$SEAT" = NONE ] || wr_seat_arg "$SEAT" ", or NONE"        # before the registry is created or any per-seat path is built

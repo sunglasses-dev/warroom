@@ -66,6 +66,6 @@ EOT
     wr_drop "$chunk_t"; wr_drop "$snap_t"; wr_unlock "$a"; exit 0 ;;
   read) n=${2:-20}; tail -n "$n" "$BOARD_FILE" ;;
   path) echo "$BOARD_FILE" ;;
-  -h|--help|help|"") sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help|"") sed -n -- '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) echo "unknown command '$cmd' (post|tail|read|path|--help)" >&2; exit 2 ;;
 esac

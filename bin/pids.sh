@@ -79,6 +79,6 @@ case "${1:-}" in
     # a failed write to the new ledger means it is incomplete: keep the old one (a wake may then repeat) and say so
     if [ "$bad" = 0 ] && wr_replace "$keep" "$P"; then wr_unlock "$P"; [ "$unk" = 0 ] || exit 3
     else wr_drop "$keep"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; fi ;;
-  -h|--help|help|"") sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help|"") sed -n -- '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) echo "unknown command (add|done|list|check|--help)" >&2; exit 2 ;;
 esac
