@@ -979,6 +979,7 @@ class Analyzer:
     RE_SRC_ENTRY_BIN = re.compile(r'^"\$HERE/(_[A-Za-z0-9_]+)\.sh"$')
     RE_SRC_ENTRY_HOOK = re.compile(r'^"\$HERE/\.\./bin/(_[A-Za-z0-9_]+)\.sh"$')
     RE_RUN_SIBLING = re.compile(r'^"\$HERE/([A-Za-z0-9_-]+\.sh)"$')
+    RE_RUN_TARGET = re.compile(r'^"\$HERE/((?:\.\./bin/)?[A-Za-z0-9][A-Za-z0-9_-]*\.sh)"$')
     RE_SRC_LIB = re.compile(r'^"\$WR_ROOT/bin/(_[A-Za-z0-9_]+)\.sh"$')
 
     def self_refs(self, f):
@@ -1293,6 +1294,10 @@ class Analyzer:
             for d in walk(fn):
                 if d.k == 'simple' and d.words:
                     nm = cmd_name(d)
+                    if nm == 'exec' and len(d.words) == 1 and all(
+                            r.op in ('>&', '<&') and r.target is not None and word_lit(r.target) == '-'
+                            and r.fd.isdigit() and int(r.fd) >= 3 for r in d.redirs):
+                        continue       # `exec 8>&-` only closes a descriptor of 3 or up: it cannot fail and never leaves the shell
                     if nm in ('exit', 'kill', 'exec', 'command', 'builtin', 'eval', '$') or (nm in self.funcs and self.can_exit(nm, seen)):
                         return True
         return False
@@ -1961,7 +1966,16 @@ class Analyzer:
                 if kind == 'pipe' and name not in self.propagating:
                     yield 'FCALL', nd       # judged like any command: does the pipeline's status reach a refusal?
                     return
+            if name in self.runner_names():
+                yield 'RUNCALL', nd         # a call of the one listed runner: its target is judged where it is called
+                return
             if name == '$':
+                fn = nd
+                while fn is not None and fn.k != 'func':
+                    fn = fn.parent
+                w0 = self.files[fname][0][nd.words[0].start:nd.words[0].end]
+                if w0 == '"$@"' and fn is not None and (fname, fn.name) in self.ENV_RUNNERS:
+                    return                  # the listed runner's own body (the envelope holds it to exactly this word)
                 yield 'DISPATCH', nd
             elif name == 'command' and len(args) == 2 and args[0] == '-v' and args[1] is not None:
                 yield 'TEST', nd
@@ -1992,6 +2006,24 @@ class Analyzer:
                     yield 'RD', nd
             elif name in self.propagating:
                 yield 'HCALL', nd
+
+    def runner_names(self):
+        """Names of the listed runner functions that are defined in their listed file."""
+        return {fn for (f, fn) in self.ENV_RUNNERS if f in self.files and any(df == f for df, _ in self.funcs.get(fn, []))}
+
+    def runcall(self, o):
+        """The runner runs whatever it is given, so a call must name a scanned script as its target: \"$HERE/x.sh\" or
+        \"$HERE/../bin/x.sh\". The reads inside that script are judged in that script."""
+        nd = o.node
+        if len(nd.words) < 2:
+            return self.bad('the runner is called with no target')
+        src = self.files[o.file][0]
+        m = self.RE_RUN_TARGET.match(src[nd.words[1].start:nd.words[1].end])
+        if m:
+            tgt = posixpath.normpath(posixpath.join(posixpath.dirname(o.file), m.group(1)))
+            if tgt in self.files and tgt != o.file:     # the pattern already refuses a library: its first character is a letter or digit
+                return self.ok('RUN')
+        return self.bad('the runner is called with a target that is not a named scanned script')
 
     def async_call(self, nd):
         """'bg' when this call of a script function runs in the background (whatever it refuses ends that process only and the
@@ -2038,6 +2070,8 @@ class Analyzer:
                 res = inner
         elif o.kind == 'ACALL':
             res = self.bad('a script function is called in the background: its refusal ends only that process')
+        elif o.kind == 'RUNCALL':
+            res = self.runcall(o)
         elif o.kind == 'DISPATCH':
             res = self.bad('dispatch through a variable, eval, xargs, command or a shell -c string cannot be audited')
         elif o.kind == 'HERE':
@@ -3021,6 +3055,19 @@ TREE_CASES.update({
                                                         'hooks/h.sh': ENV_HOOK + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
                                             1, 'shares a shell with it'),
     'env_runner_in_another_function': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'other() { "$@"; }\n'}), 1, 'computed command word'),
+    # the runner's call sites: the target must be a named scanned script, judged where it is called
+    'env_runcall_named_script': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                             'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                                             'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check || exit 1\n'}), 1, '!not a named scanned script'),
+    'env_runcall_computed_target': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                                'bin/a.sh': ENV_ENTRY + 'wr_run "$1" check || exit 1\n'}), 1, 'not a named scanned script'),
+    'env_runcall_no_target': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                          'bin/a.sh': ENV_ENTRY + 'wr_run || exit 1\n'}), 1, 'called with no target'),
+    'env_runcall_target_not_scanned': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                                   'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/nope.sh" check || exit 1\n'}), 1, 'not a named scanned script'),
+    'env_runcall_target_is_a_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                                    'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/_common.sh" check || exit 1\n'}), 1, 'not a named scanned script'),
+    'env_runcall_runner_body_is_not_a_dispatch': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n'}), 1, '!computed command word'),
     'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
     'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
 })
@@ -3117,6 +3164,7 @@ CODE_MUTANTS = [
     ('code-no-unset-check', "if any(a is None for a in args) or '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):", 'if False:', 'neg_shadow_unset_function.sh'),
     ('code-no-exit-trap-check', "elif name == 'trap':\n                        why = self.check_trap(where, args)", "elif False:\n                        why = self.check_trap(where, args)",
      'neg_proc_exit_trap_rewrites.sh'),
+    ('code-can-exit-exec-close-only', "if nm == 'exec' and len(d.words) == 1 and all(", "if nm == 'exec' and len(d.words) == 1 and True or all(", 'neg_allow_cleanup_helper_exec_opens_file.sh'),
     ('code-inert-helper-may-exit', "if nm in ('exit', 'kill', 'exec', 'command', 'builtin', 'eval', '$') or (nm in self.funcs and self.can_exit(nm, seen)):", 'if False:', 'neg_allow_cleanup_helper_exits_zero.sh'),
     ('code-no-alias-check', 'if name in SHADOW_CMDS:', 'if False:', 'neg_allow_alias.sh'),
     ('code-no-unknown-signal-check', "return '%s: trap on %s, which is not a signal name this gate knows' % (where, x)", 'continue', 'neg_allow_trap_unknown_signal_harmless.sh'),
@@ -3171,6 +3219,10 @@ CODE_MUTANTS = [
     ('code-e4-computed-word', """if not (w0 == '"$@"' and fn is not None and (f, fn.name) in self.ENV_RUNNERS):""", "if False:",
      'neg_envelope_computed_word.sh', 'computed command word'),
     ('code-e4-runner-listed', "and (f, fn.name) in self.ENV_RUNNERS):", "):", 'tree:env_runner_in_another_function', 'computed command word'),
+    ('code-runcall-target-named', "if tgt in self.files and tgt != o.file:", "if True:",
+     'tree:env_runcall_target_not_scanned', 'not a named scanned script'),
+    ('code-runcall-literal-form', "m = self.RE_RUN_TARGET.match(src[nd.words[1].start:nd.words[1].end])", "m = re.match(r'^.*$', src[nd.words[1].start:nd.words[1].end])",
+     'tree:env_runcall_computed_target', 'not a named scanned script'),
     ('code-e4-sibling-scanned', "if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:", "if sib:", 'tree:env_sibling_not_scanned', 'computed command word'),
     # source identity and call-site context
     ('code-src-dollar0-names-the-sourcer', """if ('"$0"' in key or '"$_d"' in key) and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):""",
