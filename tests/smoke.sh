@@ -870,6 +870,15 @@ fx_p2() { # python3 passes the startup check and fails only the hook's JSON pars
   PA_IN='not json'; for h in waiter-check board-tail; do pa_want 'could not read the hook input' 1 WARROOM_DIR="$PAW/p2" "$PHK/$h.sh" || { PA_IN='{"session_id": "sid-pa"}'; return 1; }; done
   PA_IN='{"session_id": "sid-pa"}'
 }
+fx_p3() { # a json.py planted in the folder the hook runs from is never imported: the hooks start python3 isolated
+  pa_setup; mkdir -p "$PAW/plant"; printf 'open("PWNED", "w").write("ran")\n' > "$PAW/plant/json.py"
+  PA_CWD="$PAW/plant"
+  for h in waiter-check board-tail; do
+    pa_pass WARROOM_DIR="$PAW/p3" "$PHK/$h.sh" || { PA_CWD=""; return 1; }
+    [ ! -e "$PAW/plant/PWNED" ] || { PA_WHY="$h imported the json.py from its working folder"; PA_CWD=""; return 1; }
+  done
+  PA_CWD=""
+}
 fx_h1() { # a bad warroom.env: every hook exits 1, never 2, and the message names the line
   pa_setup; printf 'SEATS=$(touch x)\n' > "$PAW/bad.env"
   for h in waiter-check board-tail board-guard; do
@@ -904,6 +913,7 @@ pa_run_fx fx_s1 "seat arguments: board.sh tail with ../x, W1/x, empty, omitted, 
 pa_run_fx fx_s2 "seat arguments: a registry row with a seat outside SEATS is not trusted by waiter-check (says so, exit 0) or board-tail (silent, exit 0)"
 pa_run_fx fx_p1 "python3: missing or broken, every bin/ script exits 2 and every hook exits 1 with 'python3 is required' before anything is created"
 pa_run_fx fx_p2 "python3: a failing JSON parse makes both read hooks exit 1 with a message, never a silent 0"
+pa_run_fx fx_p3 "python3: a json.py planted in the hook's working folder is not imported (both read hooks start python3 with -I -S)"
 pa_run_fx fx_h1 "hooks: a bad warroom.env exits 1 (never 2) and names the line"
 
 SH51="$T/shim51"; mkdir -p "$SH51"; REALPY=$(command -v python3)
@@ -1188,6 +1198,8 @@ pa_mcopy tailseat; pa_msed tailseat bin/board.sh 's|^    wr_seat_arg "\$seat"; a
 [ "$(grep -c 'wr_seat_arg' "$MA/tailseat/bin/board.sh")" = 0 ] && [ "$(grep -c '^    a="\$W/.anchor-\$seat"' "$MA/tailseat/bin/board.sh")" = 1 ] && pa_mut tailseat fx_s1 || bad "mutant tailseat: the change was not applied"
 pa_mcopy nopython; pa_msed nopython bin/_common.sh 's|^wr_need_python$|:|'
 [ "$(grep -c '^wr_need_python$' "$MA/nopython/bin/_common.sh")" = 0 ] && [ "$(grep -c '^:$' "$MA/nopython/bin/_common.sh")" = 1 ] && pa_mut nopython fx_p1 || bad "mutant nopython: the change was not applied"
+pa_mcopy noiso; pa_msed noiso hooks/waiter-check.sh 's|python3 -I -S -c |python3 -c |'; pa_msed noiso hooks/board-tail.sh 's|python3 -I -S -c |python3 -c |'
+[ "$(grep -c "python3 -I -S -c" "$MA/noiso/hooks/waiter-check.sh" "$MA/noiso/hooks/board-tail.sh" | grep -vc ':0$')" = 0 ] && [ "$(grep -c "python3 -c 'import sys,json" "$MA/noiso/hooks/waiter-check.sh" "$MA/noiso/hooks/board-tail.sh" | grep -c ':1$')" = 2 ] && pa_mut noiso fx_p3 || bad "mutant noiso: the change was not applied"
 pa_mcopy relw; pa_msed relw bin/_common.sh '/^case "\$WARROOM_DIR" in \/\*) ;; \*) wr_refuse/d;/^  case "\$_rp" in \/\*) ;; \*) _WR_WHY="is not an absolute path"/d'
 [ "$(grep -c 'WARROOM_DIR must be an absolute path' "$MA/relw/bin/_common.sh")" = 0 ] && [ "$(grep -c '_WR_WHY="is not an absolute path"' "$MA/relw/bin/_common.sh")" = 0 ] && pa_mut relw fx_r6 || bad "mutant relw: the change was not applied"
 pa_mcopy noancestor; pa_msed noancestor bin/_common.sh '/^  case "\$_fw\/" in "\$_fb"\/\*) wr_refuse/d'

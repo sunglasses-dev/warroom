@@ -9,7 +9,7 @@ WR_CONFIG_EXIT=1
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../bin/_common.sh"
 case "${1:-}" in -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat 2>/dev/null)
-SID=$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "waiter-check: python3 could not read the hook input as JSON" >&2; exit 1; }
+SID=$(printf '%s' "$IN" | python3 -I -S -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "waiter-check: python3 could not read the hook input as JSON" >&2; exit 1; }
 [ -n "$SID" ] || exit 0
 WAIT=$(printf '%q' "$(cd "$HERE/../bin" && pwd)/waiter.sh")      # printed commands are shell-quoted: a path may hold spaces
 REG="$W/seats.tsv"; wr_create "$REG" || { echo "waiter-check: cannot create the seat registry $REG" >&2; exit 1; }
