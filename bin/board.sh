@@ -34,7 +34,7 @@ EOT
     wr_lock "$a" || { echo "could not lock the anchor for $seat" >&2; exit 1; }     # two tails never write an older line over a newer one
     g=$(wr_generation "$BOARD_FILE") || { echo "could not read the board $BOARD_FILE: nothing marked as read" >&2; wr_unlock "$a"; exit 1; }
     n=$(wr_lines "$BOARD_FILE") || { echo "could not count the lines of the board $BOARD_FILE: nothing marked as read" >&2; wr_unlock "$a"; exit 1; }
-    last=$(wr_cursor_get "$a" "$BOARD_FILE" 31536000) || { echo "could not checksum the board $BOARD_FILE: nothing marked as read" >&2; wr_unlock "$a"; exit 1; }
+    last=$(wr_cursor_get "$a" "$BOARD_FILE" 31536000) || { echo "could not read the read position of seat $seat ($a), or checksum the board $BOARD_FILE: nothing marked as read. A damaged position file named above can be removed to start again at the end of the board." >&2; wr_unlock "$a"; exit 1; }
     [ "$last" = none ] && last=0
     # print what is new; the anchor remembers where, and a checksum of everything, it read. The two scratch files are temps
     # this call made (snap_t, chunk_t) and removes; a temp that cannot be removed is reported with its path.

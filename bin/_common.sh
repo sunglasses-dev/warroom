@@ -148,6 +148,19 @@ wr_absent() {
 }
 # wr_leaf_ok FILE: 0 when FILE is a regular file with one name and is not a link
 wr_leaf_ok() { [ ! -L "$1" ] && [ -f "$1" ] || return 1; _wl=$(_wr_links "$1") || return 1; [ "$_wl" = 1 ]; }
+# wr_registry_read FILE: the rows of a registry (one text file) on stdout. A registry that is genuinely absent is an empty
+# registry (status 0, nothing printed); one that cannot be read, or is not a regular file with one name, is status 1 with
+# nothing printed. The whole file is read before anything is printed, so a read that fails halfway prints no rows.
+wr_registry_read() {
+  if wr_absent "$1"; then return 0; fi
+  wr_leaf_ok "$1" || return 1
+  _wr_rg=$(cat -- "$1") || return 1
+  [ -z "$_wr_rg" ] || printf '%s\n' "$_wr_rg"
+}
+# wr_col N ROW: column N of a tab separated ROW held in memory; status 1 and nothing printed when the cut fails
+wr_col() { _wr_c=$( set -o pipefail; printf '%s' "$2" | cut -f"$1" ) || return 1; printf '%s\n' "$_wr_c"; }
+# wr_ncols ROW: the number of tab separated columns of ROW; status 1 and nothing printed when the count fails
+wr_ncols() { _wr_n=$( set -o pipefail; printf '%s' "$1" | awk -F'\t' '{print NF}' ) || return 1; printf '%s\n' "$_wr_n"; }
 # wr_create FILE: make an empty FILE with a noclobber create (it never truncates a regular file, and it fails on an existing
 # regular file or a dangling link; a non-regular entry planted at the name is outside this tool's scope and is refused by the recheck). An existing entry, or a lost race, is accepted only when it is a regular file with one name.
 wr_create() {

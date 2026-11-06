@@ -42,19 +42,24 @@ if [ "$SEAT" != NONE ]; then
   # a holder is the waiter process the row names: same pid AND same start time (column 5), so a stale row whose pid now
   # belongs to an unrelated process does not block the seat. A row with an empty start time (not written by this version)
   # is unknown while its pid lives; only a four-column row from an older version is judged by the pid alone.
-  while IFS="$TAB" read -r holder hstart hcols; do
-    [ "$hstart" = - ] && hstart=""          # "-" stands for an empty column: read would merge the two tabs
-    case "$(wr_rowproc "$holder" "$hstart" "$hcols")" in
-      alive) wr_unlock "$REG"; wr_unlock "$CUR"
-        echo "REFUSED: seat $SEAT is held by another live session (waiter pid $holder). Arm as NONE, or free the seat first." >&2; exit 1 ;;
-      unknown) wr_unlock "$REG"; wr_unlock "$CUR"
-        echo "REFUSED: seat $SEAT is held by pid $holder, whose start time is not recorded or cannot be read (ps failed), so it cannot be told from a reused pid. Nothing changed; try again, or free the seat." >&2; exit 1 ;;
-    esac
-  done < <(awk -F'\t' -v s="$SID" -v seat="$SEAT" 'BEGIN{OFS="\t"} $2==seat && $1!=s {print $3, ($5==""?"-":$5), NF}' "$REG")
+  # the registry is read once, checked, and then walked from that copy: a registry that cannot be read is not "no holder"
+  regrows=$(wr_registry_read "$REG") || armfail "could not read the seat registry $REG: not armed"
+  holders=$( set -o pipefail; printf '%s\n' "$regrows" | awk -F'\t' -v s="$SID" -v seat="$SEAT" 'BEGIN{OFS="\t"} $2==seat && $1!=s {print $3, ($5==""?"-":$5), NF}' ) || armfail "could not look up seat $SEAT in the seat registry $REG: not armed"
+  if [ -n "$holders" ]; then
+    while IFS="$TAB" read -r holder hstart hcols; do
+      [ "$hstart" = - ] && hstart=""          # "-" stands for an empty column: read would merge the two tabs
+      case "$(wr_rowproc "$holder" "$hstart" "$hcols")" in
+        alive) wr_unlock "$REG"; wr_unlock "$CUR"
+          echo "REFUSED: seat $SEAT is held by another live session (waiter pid $holder). Arm as NONE, or free the seat first." >&2; exit 1 ;;
+        unknown) wr_unlock "$REG"; wr_unlock "$CUR"
+          echo "REFUSED: seat $SEAT is held by pid $holder, whose start time is not recorded or cannot be read (ps failed), so it cannot be told from a reused pid. Nothing changed; try again, or free the seat." >&2; exit 1 ;;
+      esac
+    done <<< "$holders"
+  fi
   # the position first: it only repeats what the next arm would compute, so a failed registry write after it changes nothing
   gen=$(wr_generation "$BOARD_FILE") || armfail "could not read the board $BOARD_FILE: not armed"
   base=$(wr_lines "$BOARD_FILE") || armfail "could not count the lines of the board $BOARD_FILE: not armed"
-  c=$(wr_cursor_get "$CUR" "$BOARD_FILE" "$AGE") || armfail "could not checksum the board $BOARD_FILE: not armed"
+  c=$(wr_cursor_get "$CUR" "$BOARD_FILE" "$AGE") || armfail "could not read the saved position of seat $SEAT ($CUR), or checksum the board $BOARD_FILE: not armed. A damaged position file named above can be removed to start again at the end of the board."
   [ "$c" = none ] || base=$c
   lastck=$(wr_prefixsum "$BOARD_FILE" "$base") || armfail "could not checksum the board $BOARD_FILE: not armed"
   wr_cursor_put "$CUR" "$gen" "$base" "$lastck" || armfail "could not save the position of seat $SEAT ($CUR): not armed. Is $W writable and not full?"
@@ -90,7 +95,7 @@ gap_closed() { [ -e "$LAST" ] || return 1; _gn=$(wr_epoch) || return 2; _gm=$(wr
 # mine: is this still the seat's waiter? 0 yes, 1 no (the registry was read and holds no such row), 2 cannot tell (the
 # registry could not be read). Only 1 ends the waiter; on 2 it keeps its place and looks again.
 mine() {
-  _mr=$(awk -F'\t' -v s="$SEAT" -v p="$$" '$2 == s && $3 == p && NF >= 4 { f = 1 } END { print f + 0 }' "$REG" 2>/dev/null) || return 2
+  _mr=$( set -o pipefail; wr_registry_read "$REG" | awk -F'\t' -v s="$SEAT" -v p="$$" '$2 == s && $3 == p && NF >= 4 { f = 1 } END { print f + 0 }' ) || return 2
   case "$_mr" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
 }
 replaced() { echo "[WAITER REPLACED] a newer waiter holds seat $SEAT; this one stops (exit 3). It is not a wake." >&2; exit 3; }
@@ -103,7 +108,7 @@ while :; do
   sleep "$POLL"
   mine; _m=$?                                    # poll check
   if [ "$_m" = 1 ]; then replaced; elif [ "$_m" != 0 ]; then echo "[WAITER] the seat registry $REG could not be read; staying up, will look again" >&2; continue; fi
-  "$HERE/pids.sh" check >/dev/null || true      # stdout dropped, stderr kept: a ledger lock failure is shown
+  bash "$HERE/pids.sh" check >/dev/null || true      # stdout dropped, stderr kept: a ledger lock or read failure is shown
   g2=$(wr_generation "$BOARD_FILE") || { echo "[WAITER] could not read the board $BOARD_FILE; nothing consumed, will look again" >&2; continue; }
   n=$(wr_lines "$BOARD_FILE") || { echo "[WAITER] could not count the lines of the board $BOARD_FILE; nothing consumed, will look again" >&2; continue; }
   # board replaced, shorter, or changed anywhere in the part already read: read it from the start. A sum that cannot be

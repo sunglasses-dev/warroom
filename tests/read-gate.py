@@ -1444,6 +1444,8 @@ class Analyzer:
                 break
             c = first.cmds[0]
             if len(it.parts) == 1:
+                if c.k == 'case' and self.files[fname][0][it.start:it.end].strip() == self.CANON_HERE_CASE:
+                    continue        # the one line that finds the script's own folder (the checked capture after it is allowed below)
                 if c.k == 'func':
                     if c.body.k != 'group' or getattr(c.body, 'redirs', None):
                         break       # a redirection on the definition: every call may be skipped
@@ -3006,7 +3008,7 @@ TREE_CASES.update({
                                                             'bin/b.sh': ENV_ENTRY + 'y=1\n',
                                                             'hooks/h.sh': ENV_HOOK + '. "$HERE/../bin/b.sh" || exit 1\n',
                                                             'bin/a.sh': ENV_ENTRY + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
-                                                1, 'ok=2 '),
+                                                1, 'ok=3 '),
     'env_control_high_descriptors': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 9>>"$WR_ROOT/x.lock"\nexec 8>&-\nexec 9>&-\n'}), 1, '!ENVELOPE E3'),
     # a file outside the envelope shares its shell with every file it sources and every file that sources it: no row there stands
     'env_shared_shell_library_fails': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 2>>"$WR_ROOT/log"\n',
@@ -3070,6 +3072,8 @@ CODE_MUTANTS = [
     # rule 4: the prelude (top-level, before the first other statement, defined once, no redirection, checked sources)
     ('code-r4-prelude-ends-at-use', 'if not self.plain_exit(rhs):\n                break', 'if not self.plain_exit(rhs):\n                pass',
      'neg_allow_use_before_definition_in_prelude_run.sh'),
+    ('code-r4-prelude-folder-line-exact', "self.files[fname][0][it.start:it.end].strip() == self.CANON_HERE_CASE:\n                    continue", "True:\n                    continue",
+     'neg_allow_helper_after_other_case.sh'),
     ('code-r4-prelude-ends-at-statement', "if name == 'trap' and args == ['', 'PIPE']:\n                    continue\n                break",
      "if name == 'trap' and args == ['', 'PIPE']:\n                    continue\n                continue", 'neg_allow_statement_before_definition.sh'),
     ('code-r4-top-level-only', 'for it in root.body.items:', "for it in [x for x in walk(root) if x.k == 'andor']:", 'neg_allow_def_in_uncalled_fn.sh'),
