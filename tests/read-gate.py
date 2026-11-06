@@ -783,7 +783,6 @@ REASONS = {
     'V': 'view-only read at the end of the script',
     'C': 'skip with continue, bound to its loop',
     'O': 'opaque program with pinned text',
-    'F': 'failure compensated in place: status tested, no output consumed',
 }
 
 
@@ -2027,7 +2026,7 @@ class Analyzer:
                 # saved in a variable and used later, or dropped, is not checked
                 res = self.consume(nd)
                 if res[0] != 'OK':
-                    return self.bad('the runner call is not checked: ' + res[1], set(res[2]) | {'F'})
+                    return self.bad('the runner call is not checked: ' + res[1], res[2])
                 return self.ok('RUN', func=res[3]) if res[1] == 'REFUSE' else res
         return self.bad('the runner is called with a target that is not a named scanned script')
 
@@ -2404,13 +2403,11 @@ class Contracts:
             return 'H needs the two-stage help pipeline'
         a = [word_lit(w) for w in pipe.cmds[0].words]
         b = [word_lit(w) for w in pipe.cmds[1].words]
-        # the "--" before the script is required: GNU sed takes an option from anywhere in its arguments, so a script run as "-dir/name"
-        # would be one (BSD sed stops at the script, and a "--" after it is a file name)
         okA = len(a) == 5 and a[0] == 'sed' and a[1] == '-n' and a[2] == '--' and re.fullmatch(r"[0-9]+,[0-9]+p", a[3] or '') \
             and word_lit(pipe.cmds[0].words[4]) is None and self.dollar0(pipe.cmds[0].words[4])
         okB = b == ['sed', 's/^# \\{0,1\\}//']
         if not (okA and okB):
-            return 'H pipeline is not sed -n -- N,Mp "$0" | sed s/^# \\{0,1\\}//'
+            return 'H pipeline is not sed -n N,Mp "$0" | sed s/^# \\{0,1\\}//'
         return None
 
     def dollar0(self, w):
@@ -2482,147 +2479,6 @@ class Contracts:
         if not self.display_stmt(o):
             return 'D value must be printed by echo or printf (no file redirect)'
         return None
-
-    def c_F(self, o, e):
-        """A runner call whose failure is compensated where it happens. All four, or the row is refused: (1) the call is the whole
-        condition of an `if` / `if !` (not inside an argument, not a status saved for later); (2) its output is not consumed: no
-        substitution anywhere in the call, its only redirections are to or from /dev/null and its standard output goes to /dev/null
-        explicitly (an inherited one reaches a caller that captures the function); (3) the failure branch exists, holds
-        no substitution and no `exit` (directly or through a function), so it falls through, continues or returns; (4) the target
-        is a scanned script (the runner call itself is judged for that)."""
-        if o.kind != 'RUNCALL' or 'F' not in o.needs:
-            return 'F is for a runner call whose failure is tested by an if but does not reach a refusal'
-        nd = o.node
-        pipe = nd.parent
-        andor = pipe.parent if pipe is not None else None
-        lst = andor.parent if andor is not None else None
-        ifn = lst.parent if lst is not None else None
-        if not (pipe.k == 'pipe' and len(pipe.cmds) == 1 and andor.k == 'andor' and len(andor.parts) == 1 and not getattr(andor, 'bg', False)
-                and lst.k == 'list' and len(lst.items) == 1 and ifn is not None and ifn.k == 'if' and len(ifn.clauses) == 1
-                and ifn.clauses[0][0] is lst):
-            return 'F needs the runner call to be the whole condition of a single if'
-        for d in walk(nd):
-            if d.k in ('cs', 'ps', 'bt'):
-                return 'F needs a call with no substitution: its output must not be consumed'
-        for r in nd.redirs:
-            t = word_lit(r.target) if r.target is not None else None
-            if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':
-                return 'F allows only redirections to or from /dev/null on the call'
-        if not any(r.op == '>' and (r.fd or '1') == '1' and word_lit(r.target) == '/dev/null' for r in nd.redirs):
-            return 'F needs the call standard output sent to /dev/null explicitly: an inherited one reaches a caller that captures'
-        if pipe.neg:
-            branch = ifn.clauses[0][1]
-        else:
-            branch = ifn.els
-        if branch is None:
-            return 'F needs a failure branch that compensates'
-        for d in walk(branch):
-            if d.k in ('cs', 'ps', 'bt'):
-                return 'F failure branch holds a substitution'
-            if d.k == 'simple' and d.words:
-                nm = cmd_name(d)
-                if nm in {'$', 'eval', 'builtin', 'command', 'exec', 'kill', 'exit'} or (nm in self.an.funcs and self.an.can_exit(nm, set())):
-                    return 'F failure branch must not exit'
-        if not self.f_writes(branch, set()):
-            return ('F failure branch holds no state write: it needs wr_replace, wr_append or a redirect to a file (not /dev/*, not an '
-                    'fd), whose status is not swallowed, outside any background, subshell or pipeline stage')
-        want = ctx_for(self.an, o, 'F')
-        if e.ctx != want:
-            return 'F the if statement changed: pin %s' % want
-        return None
-
-    @staticmethod
-    def f_vacuous(part):
-        """True for `:` or `true`: the right side of `|| :` that swallows a status."""
-        sm = part.cmds[0] if part.k == 'pipe' and len(part.cmds) == 1 else None
-        return sm is not None and sm.k == 'simple' and bool(sm.words) and cmd_name(sm) in (':', 'true') and not sm.redirs
-
-    def f_place_ok(self, d, root):
-        """A write counts only when it runs in the shell itself, in order: not in the background, a subshell, a substitution, a
-        function definition, or any pipeline stage but the last."""
-        n = d
-        while n is not root and n.parent is not None:
-            p = n.parent
-            if n.k in ('subshell', 'cs', 'ps', 'bt', 'func'):
-                return False
-            if p.k == 'pipe' and len(p.cmds) > 1 and p.cmds[-1] is not n:
-                return False
-            if p.k == 'andor' and getattr(p, 'bg', False):
-                return False
-            n = p
-        return True
-
-    def f_swallowed(self, d, root):
-        """True when the status of the write is thrown away: `|| :`, `|| true` after it (also around a group holding it), or a
-        bare `:` / `true` as the next statement."""
-        n = d
-        while n is not root and n.parent is not None:
-            p = n.parent
-            if p.k == 'andor':
-                i = next((k for k, x in enumerate(p.parts) if x is n), None)
-                if i is not None:
-                    for j in range(i, len(p.ops)):
-                        if p.ops[j] == '||' and self.f_vacuous(p.parts[j + 1]):
-                            return True
-            if p.k == 'list':
-                k = next((k for k, x in enumerate(p.items) if x is n), None)
-                if k is not None and k + 1 < len(p.items):
-                    nx = p.items[k + 1]
-                    if nx.k == 'andor' and len(nx.parts) == 1 and self.f_vacuous(nx.parts[0]):
-                        return True
-            n = p
-        return False
-
-    def f_consumed(self, d, root, tail):
-        """True when the status of the command `d` is used: it is the left side of a `||` whose right side is not `:` / `true`, or it
-        is the last command of an `if` / `while` / `until` condition. A later statement in the same list drops it. `tail` says the
-        status of the last command of ROOT is the status of ROOT (a function body: its caller consumes it)."""
-        n, c = d, d
-        while n is not root and n.parent is not None:
-            p = n.parent
-            if p.k == 'andor':
-                i = next((k for k, x in enumerate(p.parts) if x is n), None)
-                if i is not None:
-                    for j in range(i, len(p.ops)):
-                        if p.ops[j] == '||' and not self.f_vacuous(p.parts[j + 1]):
-                            return True
-            if p.k == 'list' and p.items and p.items[-1] is not n:
-                return False
-            if p.k == 'if' and any(n is cl[0] for cl in p.clauses):
-                return True
-            if p.k == 'while' and n is p.cond:
-                return True
-            c, n = n, p
-        return tail and n is root
-
-    def f_writes(self, root, seen, tail=False):
-        """True when `root` holds a state write that counts: wr_replace or wr_append, a redirect to a file (a computed target is a
-        file: the row's digest freezes it), or a script function whose own body holds one. A write counts only when its status is
-        used (see f_consumed): a dropped status is the same as a swallowed one. A function name defined more than once never
-        counts. Writes to /dev/*, duplications onto a descriptor, assignments, wr_drop / wr_unlock and `echo` to stderr are not
-        state."""
-        for d in walk(root):
-            if d.k != 'simple' or not self.f_place_ok(d, root) or self.f_swallowed(d, root):
-                continue
-            nm = cmd_name(d) if d.words else ''
-            if len(self.an.funcs.get(nm, [])) > 1:
-                continue
-            used = self.f_consumed(d, root, tail)
-            if used and nm in ('wr_replace', 'wr_append'):
-                return True
-            if used and nm in self.an.funcs and nm not in seen:
-                seen.add(nm)
-                if any(self.f_writes(fn, seen, True) for _, fn in self.an.funcs[nm]):
-                    return True
-            for r in d.redirs:
-                if r.heredoc or r.op not in ('>', '>>', '>|', '&>'):
-                    continue
-                t = word_lit(r.target) if r.target is not None else None
-                if t is not None and t.startswith('/dev/'):
-                    continue
-                if used:
-                    return True
-        return False
 
     def c_X(self, o, e):
         if o.kind != 'CS':
@@ -2805,19 +2661,13 @@ def apply_allow(an, entries):
 
 
 def ctx_for(an, o, r):
-    """The binding text a reason needs: the loop header for C, the program text for O, the whole if statement for F."""
+    """The binding text a reason needs: the loop header for C, the program text for O."""
     if r == 'C':
         lp = o.node
         while lp is not None and lp.k not in ('while', 'for'):
             lp = lp.parent
         if lp is not None:
             return digest(an.text(o.file, lp).split('\n')[0])
-    if r == 'F' and o.kind == 'RUNCALL':
-        n = o.node
-        while n is not None and n.k not in ('if', 'func', 'script'):
-            n = n.parent
-        if n is not None and n.k == 'if':
-            return digest(an.text(o.file, n))
     if r == 'O':
         sm = o.node if o.kind == 'OPQ' else (an.single_simple(o.node.body.items[0]) if o.kind == 'CS' and len(o.node.body.items) == 1 else None)
         if sm is not None and sm.k == 'simple':
@@ -2836,7 +2686,7 @@ def propose(an):
     for o in an.occs:
         if o.status != 'BAD' or o.listed:
             continue
-        for r in 'KHMDXVCPOF':
+        for r in 'KHMDXVCPO':
             ctx = ctx_for(an, o, r)
             e = Entry(o.file, o.key[1], o.key[2], r, ctx, '', 0)
             if ct.check(o, e) is None:
@@ -3157,14 +3007,6 @@ def env_tree(**changes):
     return files
 
 
-def f_tree(body, stale=False):
-    """A clean three-file tree whose entry script holds `body`; an F row is written for every runner call of it."""
-    return {'bin/_common.sh': ENV_COMMON_CHECKED + 'wr_run() { "$@" 8>&- 9>&-; }\n',
-            'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
-            'bin/a.sh': ENV_ENTRY + body,
-            'tests/read-gate.allow': '@Fstale' if stale else '@F'}
-
-
 TREE_CASES.update({
     'env_control_canonical_forms': (env_tree(), 1, '!ENVELOPE'),
     'env_out_extensionless_bin': (env_tree(**{'bin/warroom': ':\n'}), 1, 'not *.sh is never read'),
@@ -3248,53 +3090,6 @@ TREE_CASES.update({
     'runcall_checked_capture': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
                                'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
                                'bin/a.sh': ENV_ENTRY + 'x=$(wr_run "$HERE/b.sh" check) || exit 1\n'}), 1, '!the runner call is not checked'),
-    # reason F: a runner call whose failure is compensated in place (an F row is written for every runner call of the tree)
-    'f_pos_not_form': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then printf "%s\\n" restore >> "$HERE/keep" || bad=1; fi\n'), 0, '!the runner call is not checked'),
-    'f_pos_else_form': (f_tree('if wr_run "$HERE/b.sh" post x </dev/null >/dev/null; then :; else printf "%s\\n" keep >> "$HERE/keep" || bad=1; fi\n'), 0, '!the runner call is not checked'),
-    'f_neg_output_to_file': (f_tree('if ! wr_run "$HERE/b.sh" post x > out.txt; then echo restore >&2; fi\nv=$(cat out.txt) || exit 1\n'), 1,
-                             'allows only redirections to or from /dev/null'),
-    'f_neg_status_saved': (f_tree('wr_run "$HERE/b.sh" post x >/dev/null\nrc=$?\nif [ "$rc" != 0 ]; then echo restore >&2; fi\n'), 1,
-                           'whole condition of a single if'),
-    'f_neg_no_failure_branch': (f_tree('if wr_run "$HERE/b.sh" post x >/dev/null; then echo ok >&2; fi\n'), 1, 'needs a failure branch'),
-    'f_neg_branch_exits': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo restore >&2; ( exit 1 ); fi\n'), 1, 'must not exit'),
-    'f_neg_branch_substitution': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo "$(echo restore)" >&2; fi\n'), 1, 'holds a substitution'),
-    'f_neg_call_substituted': (f_tree('if ! out=$(wr_run "$HERE/b.sh" post x); then echo restore >&2; fi\n'), 1, 'whole condition of a single if'),
-    'f_neg_stdout_inherited': (f_tree('if ! wr_run "$HERE/b.sh" post x; then echo restore >&2; fi\n'), 1, 'standard output sent to /dev/null explicitly'),
-    'f_neg_stdout_inherited_stderr_nulled': (f_tree('if ! wr_run "$HERE/b.sh" post x 2>/dev/null; then echo restore >&2; fi\n'), 1,
-                                             'standard output sent to /dev/null explicitly'),
-    # reason F, the branch must write state and the row binds the whole if statement
-    'f_pos_branch_wr_replace': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || return 1; fi\n'), 0, '!holds no state write'),
-    'f_pos_branch_function_writes': (f_tree('keepit() { printf x >> "$HERE/k" || return 1; }\nif ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 0,
-                                     '!holds no state write'),
-    'f_neg_branch_colon': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then :; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_assignment_only': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then bad=1; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_drop_unlock_only': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_drop "$HERE/t"; wr_unlock "$HERE/k"; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_stderr_only': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo restore > /dev/stderr || return 1; printf x >&2; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_command_true': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then command true; fi\n'), 1, 'must not exit'),
-    'f_neg_branch_write_swallowed': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || true; printf x >> "$HERE/k" || :; fi\n'), 1,
-                                     'holds no state write'),
-    'f_neg_branch_write_swallowed_by_next': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || return 1; true; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_write_in_background': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" &\nfi\n'), 1, 'holds no state write'),
-    'f_neg_branch_write_in_subshell': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then ( wr_replace "$HERE/t" "$HERE/k" || return 1 ); fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_write_in_pipe_stage': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" | cat; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_vacuous_function': (f_tree('vac() { :; }\nif ! wr_run "$HERE/b.sh" post x >/dev/null; then vac; fi\n'), 1, 'holds no state write'),
-    # a write counts only when its status is used: by a || that is not : / true, by an if or while condition, or (a function's
-    # last command) by the caller; a name defined twice never counts
-    'f_neg_branch_write_unchecked': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k"; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_printf_unchecked': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then printf x >> "$HERE/k"; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_write_then_other': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k"; echo done >&2; fi\n'), 1, 'holds no state write'),
-    'f_neg_branch_function_call_unchecked': (f_tree('keepit() { printf x >> "$HERE/k" || return 1; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit; fi\n'), 1,
-                                             'holds no state write'),
-    'f_neg_branch_function_body_dropped': (f_tree('keepit() { printf x >> "$HERE/k"; echo y >&2; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 1,
-                                           'holds no state write'),
-    'f_neg_branch_function_defined_twice': (f_tree('keepit() { printf x >> "$HERE/k" || return 1; }\nkeepit() { echo y >&2; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 1,
-                                            'holds no state write'),
-    'f_pos_branch_function_last_write': (f_tree('keepit() { echo y >&2; printf x >> "$HERE/k"; }\n' + 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then keepit || return 1; fi\n'), 0,
-                                         '!holds no state write'),
-    'f_pos_branch_write_in_condition': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then if wr_replace "$HERE/t" "$HERE/k"; then echo y >&2; fi; fi\n'), 0, '!holds no state write'),
-    'f_neg_binding_stale': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then wr_replace "$HERE/t" "$HERE/k" || return 1; fi\n', stale=True), 1,
-                            'the if statement changed: pin'),
-    'f_neg_dup_stderr_to_stdout': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null 2>&1; then echo restore >&2; fi\n'), 1, 'allows only redirections'),
     'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
     'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
 })
@@ -3311,8 +3106,6 @@ def run_tree(me, tmpd, name):
                 files[d + '/noop.sh'] = ':\n'
     root = os.path.join(tmpd, name)
     for rel, text in files.items():
-        if text in ('@F', '@Fstale'):
-            continue
         path = os.path.join(root, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if isinstance(text, tuple):         # ('link', target): a symlink, possibly dangling
@@ -3320,22 +3113,7 @@ def run_tree(me, tmpd, name):
             continue
         with open(path, 'w', encoding='utf-8') as fh:
             fh.write(text)
-    allow = os.path.join(root, 'none')
-    if files.get('tests/read-gate.allow') in ('@F', '@Fstale'):
-        # an F row for every runner call of the tree, bound to the tree's own text (the row names the place; the contract decides)
-        an = Analyzer()
-        for rel in sorted(files):
-            if rel.endswith('.sh'):
-                an.add(rel, files[rel])
-        an.run()
-        stale = files['tests/read-gate.allow'] == '@Fstale'
-        rows = ['%s\t%s\t%d\tF\t%s\t' % (o.file, o.key[1], o.key[2], '0000-0000-0000' if stale else ctx_for(an, o, 'F'))
-                for o in an.occs if o.kind == 'RUNCALL']
-        allow = os.path.join(root, 'tests', 'read-gate.allow')
-        os.makedirs(os.path.dirname(allow), exist_ok=True)
-        with open(allow, 'w', encoding='utf-8') as fh:
-            fh.write('\n'.join(rows) + '\n')
-    cmd = [sys.executable, '-I', me, '--enforce', '--root', root, '--allow', allow]
+    cmd = [sys.executable, '-I', me, '--enforce', '--root', root, '--allow', os.path.join(root, 'none')]
     env = dict(os.environ)
     if not name.startswith('env_'):
         # the statement-level trees test the judgments themselves; the env_ trees test the file envelope in front of them
@@ -3469,28 +3247,6 @@ CODE_MUTANTS = [
      'tree:runcall_status_saved_and_unused', 'the runner call is not checked'),
     ('code-display-in-outer-capture', "sm = self.outer_simple_of(cs)       # printed inside another substitution: that capture hides the failure of this one\n                continue",
      "return True", 'neg_allow_d_inside_checked_capture.sh', 'must be printed by echo or printf'),
-    # reason F: each part of its contract is pinned by a tree that only that part rejects
-    ('code-f-binding-compare', "if e.ctx != want:", "if False:", 'tree:f_neg_binding_stale', 'the if statement changed'),
-    ('code-f-state-write-required', "if not self.f_writes(branch, set()):", "if False:", 'tree:f_neg_branch_colon', 'holds no state write'),
-    ('code-f-write-not-swallowed', " or self.f_swallowed(d, root):", ":", 'tree:f_neg_branch_write_swallowed_by_next', 'holds no state write'),
-    ('code-f-write-in-place', "not self.f_place_ok(d, root) or ", "", 'tree:f_neg_branch_write_in_subshell', 'holds no state write'),
-    ('code-f-write-status-used', "used = self.f_consumed(d, root, tail)", "used = True", 'tree:f_neg_branch_write_unchecked', 'holds no state write'),
-    ('code-f-redirect-status-used', "                if used:\n                    return True", "                return True", 'tree:f_neg_branch_printf_unchecked', 'holds no state write'),
-    ('code-f-call-site-status-used', "if used and nm in self.an.funcs and nm not in seen:", "if nm in self.an.funcs and nm not in seen:", 'tree:f_neg_branch_function_call_unchecked', 'holds no state write'),
-    ('code-f-later-statement-drops-status', "if p.k == 'list' and p.items and p.items[-1] is not n:\n                return False", "if False:\n                return False", 'tree:f_neg_branch_function_body_dropped', 'holds no state write'),
-    ('code-f-tail-status-passes-up', "return tail and n is root", "return n is root", 'tree:f_neg_branch_write_unchecked', 'holds no state write'),
-    ('code-f-name-defined-twice', "if len(self.an.funcs.get(nm, [])) > 1:", "if False:", 'tree:f_neg_branch_function_defined_twice', 'holds no state write'),
-    ('code-f-write-not-dev', "if t is not None and t.startswith('/dev/'):", "if False:", 'tree:f_neg_branch_stderr_only', 'holds no state write'),
-    ('code-f-stdout-explicit', "if not any(r.op == '>' and (r.fd or '1') == '1' and word_lit(r.target) == '/dev/null' for r in nd.redirs):",
-     "if False:", 'tree:f_neg_stdout_inherited', 'standard output sent to /dev/null explicitly'),
-    ('code-f-call-output-to-file', "if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':", "if False:",
-     'tree:f_neg_output_to_file', 'allows only redirections'),
-    ('code-f-call-output-duplicated', "if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':", "if r.heredoc or r.op not in ('>', '<', '>&'):",
-     'tree:f_neg_dup_stderr_to_stdout', 'allows only redirections'),
-    ('code-f-branch-must-not-exit', "if nm in {'$', 'eval', 'builtin', 'command', 'exec', 'kill', 'exit'} or (nm in self.an.funcs and self.an.can_exit(nm, set())):",
-     "if False:", 'tree:f_neg_branch_exits', 'must not exit'),
-    ('code-f-branch-substitution', "if d.k in ('cs', 'ps', 'bt'):\n                return 'F failure branch holds a substitution'",
-     "if False:\n                return 'F failure branch holds a substitution'", 'tree:f_neg_branch_substitution', 'holds a substitution'),
     ('code-runcall-literal-form', "m = self.RE_RUN_TARGET.match(src[nd.words[1].start:nd.words[1].end])", "m = re.match(r'^.*$', src[nd.words[1].start:nd.words[1].end])",
      'tree:env_runcall_computed_target', 'not a named scanned script'),
     ('code-e4-sibling-scanned', "if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:", "if sib:", 'tree:env_sibling_not_scanned', 'computed command word'),
@@ -3639,30 +3395,6 @@ def self_test(here):
                   'exit %d (a fixture that still fails means the check is not pinned): %s' % (pr.returncode, pr.stdout.strip()[:160]))
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)
-    # reason F binds the whole if statement: its text, not its place
-    def fbind(body):
-        files = f_tree(body)
-        an = Analyzer()
-        for rel in sorted(files):
-            if rel.endswith('.sh'):
-                an.add(rel, files[rel])
-        an.run()
-        got = [ctx_for(an, o, 'F') for o in an.occs if o.kind == 'RUNCALL']
-        return got[0] if len(got) == 1 else None
-    fb = 'if ! wr_run "$HERE/b.sh" post x >/dev/null; then printf "%s\\n" restore >> "$HERE/keep" || bad=1; fi\n'
-    base = fbind(fb)
-    check('F binding: the digest exists', base is not None and re.fullmatch(r'[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}', base) is not None, str(base))
-    check('F binding: the same text in another place keeps the digest', fbind('# moved\n:\n' + fb) == base, '')
-    check('F binding: spaces outside quotes do not change the digest', fbind(fb.replace('; then', ';    then').replace(' || ', '  ||\t')) == base, '')
-    for what, edited in (('a word of the compensation', fb.replace('restore', 'restor')), ('the file written', fb.replace('keep', 'kept')),
-                         ('a space inside quotes', fb.replace('"%s\\n"', '"%s \\n"')), ('the call', fb.replace('post x', 'post y')),
-                         ('the status handling', fb.replace('bad=1', 'bad=0')), ('the condition form', fb.replace('if !', 'if'))):
-        got = fbind(edited)
-        check('F binding: a change of %s changes the digest' % what, got is not None and got != base, '%s vs %s' % (got, base))
-    pr = subprocess.run([sys.executable, '-I', me, '--bindings'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-    check('--bindings prints a digest for every F row of the allow file', pr.returncode == 0 and all(
-        any(ln.split('\t')[:4] == r.split('\t')[:4] and ln.split('\t')[4] == r.split('\t')[4] for ln in pr.stdout.splitlines())
-        for r in open(os.path.join(here, 'read-gate.allow'), encoding='utf-8').read().splitlines() if '\tF\t' in r), 'exit %d' % pr.returncode)
     # a gate that is broken must not look like a pass: parse failure and a missing file are tool errors (exit 2)
     pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--fixture', os.path.join(fx_dir, 'does-not-exist.sh')],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
@@ -3670,6 +3402,19 @@ def self_test(here):
     pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--root', os.path.join(fx_dir, 'no-such-root')],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
     check('empty discovery is a tool error', pr.returncode == 2, 'exit %d' % pr.returncode)
+    # a row of a reason that no longer exists (the removed in-place compensation) is refused as an unknown reason, never read
+    check('no reason F in the table', 'F' not in REASONS, 'F is still a reason')
+    stale_d = tempfile.mkdtemp()
+    try:
+        stale = os.path.join(stale_d, 'stale.allow')
+        with open(stale, 'w', encoding='utf-8') as fh:
+            fh.write('bin/pids.sh\t49b3-708d-efb9\t0\tF\tb2a1-8a0f-5649\ta leftover row of a removed reason\n')
+        pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--allow', stale],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        check('a leftover F row is refused as an unknown reason', pr.returncode == 2 and 'expected file' in pr.stdout,
+              'exit %d: %s' % (pr.returncode, pr.stdout.strip()[:200]))
+    finally:
+        shutil.rmtree(stale_d, ignore_errors=True)
     print('read-gate self-test: %d checks passed, %d failed (%d fixtures, %d trees, %d mutants, %d code mutants)' % (passes, len(fails), len(names), len(TREE_CASES), len(MUTANTS), len(CODE_MUTANTS)))
     for f in fails:
         print('  FAIL: %s' % f)
@@ -3689,7 +3434,6 @@ def main(argv):
     ap.add_argument('--tsv', help='write every occurrence to this file')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--propose', action='store_true', help='print allow-file lines that a reason contract accepts')
-    ap.add_argument('--bindings', action='store_true', help='print the binding column (F: the if statement, O: the program) of every occurrence that has one')
     ap.add_argument('--no-envelope', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--fixture', help='analyze one fixture file; its "# allow:" header lines name the entries')
     a = ap.parse_args(argv)
@@ -3717,13 +3461,6 @@ def main(argv):
             print('read-gate: no scripts found under %s/%s: a whole class of scripts would go unread' % (a.root, ' or '.join(missing)))
             return 2
         an = analyze_files(a.root, files, envelope=not a.no_envelope)
-        if a.bindings:
-            for o in an.occs:
-                for r in 'FO':
-                    ctx = ctx_for(an, o, r) if (r == 'O' or o.kind == 'RUNCALL') else '-'
-                    if ctx != '-':
-                        print('%s\t%s\t%d\t%s\t%s' % (o.file, o.key[1], o.key[2], r, ctx))
-            return 0
         if a.propose:
             for ln in propose(an):
                 print(ln)

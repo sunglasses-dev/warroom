@@ -433,14 +433,12 @@ wr_append() {
 # The job ledger, the seat registry, the idle guard and the waiter hook all judge a recorded process with wr_proc.
 # wr_started PID: print the start time of PID; exit 1 (nothing printed) when it cannot be read.
 wr_started() {
-  _wr_st=$( set -o pipefail; { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; } 8>&- 9>&- ) || return 1   # no lock copy in ps; a stage that fails voids the output
+  _wr_st=$( set -o pipefail; { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; } 8>&- 9>&- ) || return 1   # no lock copy in ps; a stage that fails voids the output
   [ -n "$_wr_st" ] || return 1
-  # one start time such as "Mon Nov 2 10:00:00 2026" (the same shape wr_proc accepts); anything else is a failed read
-  case "$_wr_st" in
-    [A-Z][a-z][a-z]\ [A-Z][a-z][a-z]\ [0-9]\ [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ [0-9][0-9][0-9][0-9]) ;;
-    [A-Z][a-z][a-z]\ [A-Z][a-z][a-z]\ [0-9][0-9]\ [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ [0-9][0-9][0-9][0-9]) ;;
-    *) return 1 ;;
-  esac
+  # one start time such as "Mon Nov 2 10:00:00 2026": weekday and month names, day 1-31, hour 0-23, minute and second 0-59, a
+  # four-digit year (the same rule wr_proc applies, written once more in Python there); anything else is a failed read
+  _wr_re='^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}$'
+  [[ $_wr_st =~ $_wr_re ]] || return 1
   printf '%s\n' "$_wr_st"
 }
 # wr_rowproc PID STARTED COLS: judge a recorded row. Like wr_proc, except that a row of five or more columns whose start
@@ -478,7 +476,7 @@ except OSError: r = None
 text = r.stdout.decode("utf-8", "replace").rstrip("\n") if r is not None and r.returncode == 0 else ""
 out = " ".join(w for w in text.split(" ") if w)
 # ps prints one start time such as "Mon Nov  2 10:00:00 2026"; anything else is a failed read, not a different process
-if re.fullmatch(r"[A-Z][a-z]{2} [A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}", out): print("alive " + out); sys.exit(0)
+if re.fullmatch(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}", out): print("alive " + out); sys.exit(0)
 print("dead" if state() == "dead" else "unknown")' "$1" ${2:+x}) || return 1
   case "$_wr_pp" in
     dead|unknown|alive) echo "$_wr_pp"; return 0 ;;

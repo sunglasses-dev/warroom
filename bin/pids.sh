@@ -18,22 +18,25 @@ case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
 HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/_common.sh" || exit 1
 P="$W/pids.tsv"; wr_create "$P" || { echo "cannot write the ledger $P" >&2; exit 1; }; TAB="$(printf '\t')"
-# check_row LABEL PID OWNER START: judge one ledger row for the checker. A live job keeps its row; one that cannot be told apart
-# from a reused pid keeps it too and is said (unk); a dead one posts to its owner and keeps the row only if the post failed.
+# check_row LABEL PID OWNER START: judge one ledger row for the checker. Every row goes into the new ledger (keep) first. A
+# live job keeps its row; one that cannot be told apart from a reused pid keeps it too and is said (unk); a dead one posts to
+# its owner, and a delivered post records the row's line number in gone so that ONE filter after the loop drops it. A post
+# that fails is said and the row simply stays (return 1: the loop goes on with the next row, the next check tries again).
 # It leaves the script (exit 1, ledger unchanged) when a process cannot be judged.
 check_row() {
   [ -n "$1" ] || return 0
   st=$(wr_proc "$2" "$4") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: could not judge pid $2 (job '$1'); ledger unchanged" >&2; exit 1; }
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$keep" || bad=1
+  nrow=$((nrow + 1))
   case "$st" in
-    alive) printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$keep" || bad=1 ;;
+    alive) ;;
     unknown)          # cannot tell a live job from a reused pid: keep the row, say so, look again
-      printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$keep" || bad=1
       echo "pids.sh: cannot read the start time of pid $2 (job '$1'): ps failed, so a live job cannot be told from a reused pid; row kept" >&2; unk=1 ;;
     dead)
       if wr_run "$HERE/board.sh" post GUARD "@$3 ACTION: job '$1' (pid $2) is no longer running. Read its receipt, then continue or restart it." </dev/null >/dev/null; then
-        :                             # delivered: the row is dropped
+        gone="$gone $nrow"            # delivered: the row is dropped by the filter after the loop
       else
-        printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$keep" || bad=1     # not delivered: keep it, the next check tries again
+        echo "pids.sh: could not post the wake for job '$1' (pid $2); row kept, the next check tries again" >&2; return 1
       fi ;;
     *) wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: unexpected answer '$st' for pid $2 (job '$1'); ledger unchanged" >&2; exit 1 ;;
   esac
@@ -67,7 +70,7 @@ case "${1:-}" in
   check)
     # Every waiter runs this on every poll, so two seats can check at the same moment. The whole check runs under the
     # ledger lock: only one caller sees a dead row, posts its wake, then drops it.
-    bad=0; unk=0
+    bad=0; unk=0; nrow=0; gone=""
     wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }
     # the new ledger is built in a temp this call made (keep); without one nothing is posted or dropped
     wr_temp "$P" || { wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; }
@@ -75,7 +78,16 @@ case "${1:-}" in
     # the whole ledger is read first and judged from that copy: a read that fails, at the start or after some rows, posts nothing
     # and removes nothing
     rows=$(wr_registry_read "$P") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: the job ledger $P could not be read; nothing changed" >&2; exit 1; }
-    while IFS="$TAB" read -r l p o s; do check_row "$l" "$p" "$o" "$s"; done <<< "$rows"
+    while IFS="$TAB" read -r l p o s; do check_row "$l" "$p" "$o" "$s" || continue; done <<< "$rows"
+    # rows whose wake was delivered are dropped by ONE filter over the new ledger; a failure here keeps the old ledger (the wakes
+    # may then repeat once)
+    if [ -n "$gone" ]; then
+      wr_temp "$P" || { wr_drop "$keep"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; }
+      fil=$_WR_TMP
+      awk -v gone="$gone" 'BEGIN { n = split(gone, a, " "); for (i = 1; i <= n; i++) g[a[i]] = 1 } !(NR in g)' "$keep" > "$fil" \
+        || { wr_drop "$keep"; wr_drop "$fil"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; }
+      wr_drop "$keep"; keep=$fil
+    fi
     # a failed write to the new ledger means it is incomplete: keep the old one (a wake may then repeat) and say so
     if [ "$bad" = 0 ] && wr_replace "$keep" "$P"; then wr_unlock "$P"; [ "$unk" = 0 ] || exit 3
     else wr_drop "$keep"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; fi ;;
