@@ -16,9 +16,10 @@ wr_generation() {
   [ -n "$_gs" ] || return 1
   echo "$_gi:$_gs"
 }
-wr_sum() { ( set -o pipefail; cksum | cut -d' ' -f1 ); }                       # checksum of stdin
+# Both buffer the answer and print it only when every stage succeeded: a failed stage prints nothing, not a partial sum.
+wr_sum() { _o=$( set -o pipefail; cksum | cut -d' ' -f1 ) || return 1; [ -n "$_o" ] || return 1; printf '%s\n' "$_o"; }   # checksum of stdin
 # wr_sumstdin — "crc-bytes" of stdin (the byte length makes a collision in the crc alone not enough)
-wr_sumstdin() { ( set -o pipefail; cksum | awk '{print $1 "-" $2}' ); }
+wr_sumstdin() { _o=$( set -o pipefail; cksum | awk '{print $1 "-" $2}' ) || return 1; [ -n "$_o" ] || return 1; printf '%s\n' "$_o"; }
 # wr_prefixsum BOARD N — "crc-bytes" of lines 1 to N (N = 0: the empty prefix, 0); nothing is printed when the read fails
 wr_prefixsum() {
   case "$2" in ''|*[!0-9]*) echo 0; return 0 ;; esac

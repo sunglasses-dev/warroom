@@ -1627,6 +1627,18 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
   _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" tail BOSS 2>"$PAW/e"); _r=$?; pa_ckoff
   { [ "$_r" = 1 ] && [ -z "$_o" ] && pa_ckhit && grep -q "could not read the board" "$PAW/e" && [ ! -e "$PW/.anchor-BOSS" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="F1c: rc $_r, out '$_o', hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
 }
+fx_sm1() { # checksum helpers: a good run prints one answer and status 0; a failing cksum that already printed something leaves status 1 and NOTHING on stdout
+  pa_setup; pa_w; mkdir -p "$PAW/shim"
+  printf '#!/bin/sh\necho "99 9"\nexit 1\n' > "$PAW/shim/cksum"; chmod +x "$PAW/shim/cksum"
+  for _fn in wr_sum wr_sumstdin; do
+    _o=$(printf 'abc\n' | pa_run WARROOM_DIR="$PW" bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; "$2"' _ "$PB" "$_fn" 2>/dev/null); _r=$?
+    case "$_fn:$_o" in wr_sum:1112837078|wr_sumstdin:1112837078-4) ;; *) PA_WHY="SM1: $_fn good run -> '$_o'"; return 1 ;; esac
+    [ "$_r" = 0 ] || { PA_WHY="SM1: $_fn good run -> rc $_r"; return 1; }
+    _o=$(printf 'abc\n' | pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; "$2"' _ "$PB" "$_fn" 2>/dev/null); _r=$?
+    { [ "$_r" != 0 ] && [ -z "$_o" ]; } || { PA_WHY="SM1: $_fn with a failing cksum -> rc $_r out '$_o' (want failure and no output)"; return 1; }
+  done
+  return 0
+}
 fx_ep1() { # entry paths: every script finds its own folder by a plain expansion, from a bare name, ./name, an absolute path, a symlinked folder and a folder with a space in it
   pa_setup; pa_w; _ep="$PAW/sp ace"; mkdir -p "$_ep" || { PA_WHY="EP1: no folder"; return 1; }
   cp -R "$PB" "$_ep/bin" && cp -R "$PHK" "$_ep/hooks" && ln -s "$_ep/bin" "$PAW/lnkbin" && ln -s "$_ep/hooks" "$PAW/lnkhooks" || { PA_WHY="EP1: copy"; return 1; }
@@ -1652,6 +1664,7 @@ pa_run_fx fx_gr1 "guard reads: an absent ledger or mark is first use and posts o
 pa_run_fx fx_st1 "identity stat: an inode, a link count and a modification time are a plain decimal or nothing; a failing or odd stat is never a default, and the generation, the leaf check and the lock refuse on it"
 pa_run_fx fx_ck1 "clock: a bad or failing date is no post stamp, no arming and no delivery past the gap; the epoch reader accepts only a canonical decimal"
 pa_run_fx fx_ep1 "entry paths: every script finds its own folder by a plain expansion and one checked capture, from a bare name, ./name, an absolute path, a symlinked folder and a folder with a space in it"
+pa_run_fx fx_sm1 "checksum helpers: a good run prints one answer; a failing stage that already printed leaves status 1 and nothing on stdout"
 pa_run_fx fx_m1 "seat registry unreadable: the waiter stays up at the poll check and at the locked delivery check, delivers nothing and keeps its position, then delivers when the registry reads again"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
 pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
@@ -1849,6 +1862,8 @@ pa_mcopy stgen; pa_msed stgen bin/_cursor.sh 's/_gi=\$(wr_inode "\$1") || return
 [ "$(grep -c '_gi=\$(wr_inode "\$1"); _gs=' "$MA/stgen/bin/_cursor.sh")" = 1 ] && pa_mut stgen fx_st1 || bad "mutant stgen: the change was not applied"
 pa_mcopy epslash; pa_msed epslash bin/board.sh 's|\*) _d=\. ;; esac|*) _d=/nonexistent ;; esac|'
 [ "$(grep -c '_d=/nonexistent ;; esac' "$MA/epslash/bin/board.sh")" = 1 ] && pa_mut epslash fx_ep1 || bad "mutant epslash: the change was not applied"
+pa_mcopy smpart; pa_msed smpart bin/_cursor.sh 's/^wr_sum() {.*$/wr_sum() { ( set -o pipefail; cksum | cut -d" " -f1 ); }/'
+[ "$(grep -c '^wr_sum() { ( set -o pipefail; cksum | cut -d" " -f1 ); }$' "$MA/smpart/bin/_cursor.sh")" = 1 ] && pa_mut smpart fx_sm1 || bad "mutant smpart: the change was not applied"
 else echo "skip mutants karm and kgap (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
