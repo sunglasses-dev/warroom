@@ -38,6 +38,15 @@
 #  55. injected poll filter/checksum failures keep the waiter alive and its position unchanged until retry delivers; arm and tail checksum failures exit without advancing their saved state, and empty-board tail succeeds.
 #  59. selected fixtures fail on deliberately mutated copies of bin/ and hooks/ and pass on the pristine copy; the failing assertion is printed.
 #      touchlast, legacytemp, mvreplace, oldrollback, restorerm and nofiltercheck are the six B write/filter mutants.
+# Some hosts (a Node-based CI runner, for one) start every child with SIGPIPE ignored, and bash cannot restore a signal that was
+# ignored when it started, so `trap '' PIPE` changes nothing there and the closed-pipe tests mean something else. Seats run in
+# terminals, where SIGPIPE is at its default. When the probe sees otherwise, the suite restarts itself once through python3,
+# which can put the default back.
+if [ -z "${SMOKE_SIGPIPE_RESET:-}" ] && command -v python3 >/dev/null 2>&1 && [ "$(bash -c 'yes 2>/dev/null|head -c1>/dev/null; echo ${PIPESTATUS[0]}')" != 141 ]; then
+  echo "smoke: the host ignores SIGPIPE; restarting with the default"
+  export SMOKE_SIGPIPE_RESET=1
+  exec python3 -I -c 'import os,signal,sys; signal.signal(signal.SIGPIPE,signal.SIG_DFL); os.execv(sys.argv[1],sys.argv[1:])' /usr/bin/env bash "$0" "$@"
+fi
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
@@ -45,6 +54,8 @@ B="$ROOT/bin"; fail=0
 ok()  { echo "ok   $1"; }
 bad() { echo "FAIL $1"; fail=1; }
 wait_exit() { for _ in $(seq 1 "$2"); do kill -0 "$1" 2>/dev/null || return 0; sleep 1; done; return 1; }
+# the tests below that close a pipe early only mean something when SIGPIPE is at its default (see the restart at the top)
+[ "$(bash -c 'yes 2>/dev/null|head -c1>/dev/null; echo ${PIPESTATUS[0]}')" = 141 ] && ok "SIGPIPE is at its default" || bad "SIGPIPE is not at its default; the PIPE tests would be meaningless"
 
 # 1. wake grammar
 "$B/waiter.sh" W1 sid-w1 > "$T/w1.out" 2>/dev/null & WP=$!; sleep 2
