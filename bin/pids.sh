@@ -14,8 +14,8 @@
 # reused pid); a row without a recorded start time (an old ledger) is judged by pid alone. When the pid exists but its
 # start time cannot be read (ps failed), the job is neither: its row is kept, the check says so on stderr and exits 3,
 # and the next check looks again. Start times have a resolution of one second. Limit: one machine.
-case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
-HERE=$(cd -P "$_d" && pwd) || exit 1
+case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
+HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/_common.sh" || exit 1
 P="$W/pids.tsv"; wr_create "$P" || { echo "cannot write the ledger $P" >&2; exit 1; }; TAB="$(printf '\t')"
 # check_row LABEL PID OWNER START: judge one ledger row for the checker. A live job keeps its row; one that cannot be told apart

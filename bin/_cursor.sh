@@ -70,6 +70,9 @@ wr_cursor_parse() {
   # the file is read once, checked, and then split as text: a failed read is told apart from the end of the file
   _pc=$( cat -- "$1" 2>/dev/null && printf x ) || { echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1; }
   _pc=${_pc%x}
+  # $( ) drops NUL bytes without a word, so a record that held one would read as a clean one: count them on their own
+  _pz=$( set -o pipefail; LC_ALL=C tr -d '\001-\377' < "$1" | wc -c ) || { echo "cursor $1 could not be checked for NUL bytes" >&2; return 1; }
+  [ "${_pz//[!0-9]/}" = 0 ] || { echo "cursor $1 holds a NUL byte" >&2; return 1; }
   case "$_pc" in *$'\n'*) ;; *) echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1 ;; esac
   case "$_pc" in *$'\n') _pc=${_pc%$'\n'} ;; *) echo "cursor $1 is not exactly one line" >&2; return 1 ;; esac
   case "$_pc" in *$'\n'*) echo "cursor $1 is not exactly one line" >&2; return 1 ;; esac
@@ -133,6 +136,7 @@ wr_cursor_put() {
   _cp=$(wr_epoch) || { echo "could not read the clock: the cursor $1 was not written" >&2; return 1; }
   wr_temp "$1" || { echo "could not create a temporary file next to $1" >&2; return 1; }
   _cur_t=$_WR_TMP
-  if printf '%s %s %s %s\n' "$2" "$3" "$_cp" "${4:-0}" > "$_cur_t"; then wr_replace "$_cur_t" "$1" || return 1; return 0; fi
-  wr_drop "$_cur_t"; return 1
+  # the group keeps bash's own redirect error (it names our temporary file) off stderr; this helper says it in its own words
+  if { printf '%s %s %s %s\n' "$2" "$3" "$_cp" "${4:-0}" > "$_cur_t"; } 2>/dev/null; then wr_replace "$_cur_t" "$1" || return 1; return 0; fi
+  wr_drop "$_cur_t"; echo "could not write the cursor $1 (its temporary file could not be written)" >&2; return 1
 }

@@ -3,7 +3,7 @@
 # Reads warroom.env as data (bin/_config.sh: one file, a strict KEY=VALUE grammar, never sourced), then sets SEATS,
 # WARROOM_DIR, BOARD (full path in $BOARD_FILE) and a few helpers. A bad config stops the script with the reason.
 export LC_ALL=C
-WR_ROOT=$(cd -P "${BASH_SOURCE[0]%/*}/.." && pwd) || exit 1
+WR_ROOT=$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd) || exit 1
 # shellcheck source=bin/_config.sh
 . "$WR_ROOT/bin/_config.sh" || exit 1
 # Exit code for a bad config: 2 in bin/ scripts. Hooks set WR_CONFIG_EXIT=1 before sourcing this file, because Claude
@@ -275,7 +275,17 @@ wr_startup() {
   # shellcheck disable=SC2034  # WR_ENV_FILE and BOSS_SEAT are read by the scripts that source this file
   WR_ENV_FILE=$WR_C_SEL
   _ke=$(wr_kind "$WR_ENV_FILE" follow) || { echo "cannot examine the config file '$WR_ENV_FILE'" >&2; return 2; }
-  if [ "$_ke" = file ]; then wr_load_config "$WR_ENV_FILE" || return 2; else WR_ENV_FILE=""; fi
+  # only a name that leads nowhere at all means "no config, use the defaults": a link that leads nowhere, a folder or
+  # anything else that is not a regular file is a mistake in the setup and is said
+  if [ "$_ke" = absent ]; then
+    _kl=$(wr_kind "$WR_ENV_FILE") || { echo "cannot examine the config file '$WR_ENV_FILE'" >&2; return 2; }
+    [ "$_kl" != link ] || { echo "the config file '$WR_ENV_FILE' is a link that leads nowhere; point it at a file or remove it" >&2; return 2; }
+  fi
+  case "$_ke" in
+    file) wr_load_config "$WR_ENV_FILE" || return 2 ;;
+    absent) WR_ENV_FILE="" ;;
+    *) echo "the config file '$WR_ENV_FILE' is not a regular file (it is a $_ke)" >&2; return 2 ;;
+  esac
   SEATS=${SEATS:-"BOSS MANAGER W1 W2"}
   wr_seats_ok "$SEATS" || { echo "SEATS='$SEATS': names are [A-Z][A-Z0-9_]{0,15}, no repeats; ALL, NONE and GUARD are reserved" >&2; return 2; }
   if [ -z "${WARROOM_DIR:-}" ]; then
@@ -347,6 +357,9 @@ _WR_SLOT8=""; _WR_SLOT9=""; _WR_ARG8=""; _WR_ARG9=""
 _wr_path() { # FILE -> _WR_KEY = physical parent folder + base name (no checks)
   case "$1" in */*) _wr_dn=${1%/*}; [ -n "$_wr_dn" ] || _wr_dn=/ ;; *) _wr_dn=. ;; esac
   _wr_d=$(cd -P -- "$_wr_dn" 2>/dev/null && pwd -P) || return 1
+  # Bash 3.2 puts text left over from an earlier failed builtin write in front of what a $( ) prints: the folder is the last line
+  _wr_d=${_wr_d##*$'\n'}
+  [ -d "$_wr_d" ] || return 1
   _WR_KEY="$_wr_d/${1##*/}"
 }
 _wr_sub_ok() { # every lock function refuses inside a subshell, before it touches anything
@@ -422,6 +435,12 @@ wr_append() {
 wr_started() {
   _wr_st=$( set -o pipefail; { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; } 8>&- 9>&- ) || return 1   # no lock copy in ps; a stage that fails voids the output
   [ -n "$_wr_st" ] || return 1
+  # one start time such as "Mon Nov 2 10:00:00 2026" (the same shape wr_proc accepts); anything else is a failed read
+  case "$_wr_st" in
+    [A-Z][a-z][a-z]\ [A-Z][a-z][a-z]\ [0-9]\ [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ [0-9][0-9][0-9][0-9]) ;;
+    [A-Z][a-z][a-z]\ [A-Z][a-z][a-z]\ [0-9][0-9]\ [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\ [0-9][0-9][0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
   printf '%s\n' "$_wr_st"
 }
 # wr_rowproc PID STARTED COLS: judge a recorded row. Like wr_proc, except that a row of five or more columns whose start
@@ -437,13 +456,15 @@ wr_rowproc() {
 #   dead     the kernel says no such process (ESRCH), or (when STARTED is given) the pid now belongs to a process that
 #            started at another time
 #   alive    the process exists and, when STARTED is given, started at that time; with no STARTED the pid alone decides
-#   unknown  the process exists but its start time cannot be read (ps failed), or kill -0 was refused for any reason other
-#            than "no such process" (a process of another owner): it is neither alive nor dead. Callers
+#   unknown  the process exists but its start time cannot be read (ps failed or printed something that is not a start time),
+#            kill -0 was refused for any reason other than "no such process" (a process of another owner), or PID is not a
+#            plain positive number: it is neither alive nor dead. Callers
 #            keep what they hold and say so; they never treat unknown as dead.
 wr_proc() {
-  case "$1" in ''|*[!0-9]*|?????????????*) echo dead; return 0 ;; esac
-  [ "$((10#$1))" -gt 0 ] || { echo dead; return 0; }          # pid 0 would mean the whole process group
-  _wr_pp=$(LC_ALL=C python3 -I -S -c 'import os, subprocess, sys
+  # a pid that is not a plain positive number is not a process that was seen to be gone: unknown, never dead
+  case "$1" in ''|*[!0-9]*|?????????????*) echo unknown; return 0 ;; esac
+  [ "$((10#$1))" -gt 0 ] || { echo unknown; return 0; }       # pid 0 would mean the whole process group
+  _wr_pp=$(LC_ALL=C python3 -I -S -c 'import os, re, subprocess, sys
 pid = int(sys.argv[1])
 def state():
     try: os.kill(pid, 0)
@@ -456,7 +477,8 @@ try: r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], stdout=subproce
 except OSError: r = None
 text = r.stdout.decode("utf-8", "replace").rstrip("\n") if r is not None and r.returncode == 0 else ""
 out = " ".join(w for w in text.split(" ") if w)
-if out: print("alive " + out); sys.exit(0)
+# ps prints one start time such as "Mon Nov  2 10:00:00 2026"; anything else is a failed read, not a different process
+if re.fullmatch(r"[A-Z][a-z]{2} [A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}", out): print("alive " + out); sys.exit(0)
 print("dead" if state() == "dead" else "unknown")' "$1" ${2:+x}) || return 1
   case "$_wr_pp" in
     dead|unknown|alive) echo "$_wr_pp"; return 0 ;;

@@ -882,11 +882,11 @@ fx_n6c() { # the same file under another name: a hard link to a state entry or t
   rm -f "${W:?}/.anchor-W1"; ln -s "$W/.anchor-W1" "$PAW/dangling.env"
   pa_want 'name this tool writes' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$W" "$PB/board.sh" path
 }
-fx_n6d() { # a config path whose links loop is refused; a dangling link elsewhere stays allowed
+fx_n6d() { # a config path whose links loop is refused, and so is a link that leads nowhere
   pa_setup; ln -s "$PAW/loop2" "$PAW/loop1"; ln -s "$PAW/loop1" "$PAW/loop2"
   pa_want 'config path loops' 2 WARROOM_ENV="$PAW/loop1" WARROOM_DIR="$PAW/n6d" "$PB/board.sh" path || return 1
-  ln -s "$PAW/nowhere.env" "$PAW/dangling-ok.env"
-  pa_pass WARROOM_ENV="$PAW/dangling-ok.env" WARROOM_DIR="$PAW/n6d" "$PB/board.sh" path
+  ln -s "$PAW/nowhere.env" "$PAW/dangling.env"
+  pa_want 'link that leads nowhere' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$PAW/n6d" "$PB/board.sh" path
 }
 
 # 49. seat arguments that become paths (S1, S2)
@@ -975,7 +975,7 @@ pa_run_fx fx_n5 "limit: a fullwidth lookalike of settings.json is not folded (ac
 pa_run_fx fx_n6a "config at a state slot: absent or existing at each slot of the run folder is refused before bootstrap, bytes and mtime unchanged"
 pa_run_fx fx_n6b "config at a state slot: under a nested reserved component is refused; warroom.env at a plain name works"
 pa_run_fx fx_n6c "config at a state slot: a hard link to a state entry or the board's lock file, or a dangling link to a slot, is refused"
-pa_run_fx fx_n6d "config at a state slot: a looping config link is refused; a dangling link elsewhere is allowed"
+pa_run_fx fx_n6d "config at a state slot: a looping config link is refused; so is a link that leads nowhere"
 pa_run_fx fx_s1 "seat arguments: board.sh tail with ../x, W1/x, empty, omitted, w1, ZZ and NONE exits 2 and creates no per-seat file; so does waiter.sh ../x"
 pa_run_fx fx_s2 "seat arguments: a registry row with a seat outside SEATS is not trusted by waiter-check (says so, exit 0) or board-tail (silent, exit 0)"
 pa_run_fx fx_p1 "python3: missing or broken, every bin/ script exits 2 and every hook exits 1 with 'python3 is required' before anything is created"
@@ -1420,6 +1420,12 @@ SHIM
     _gwant "G2 mark '$_mk'" "is not a mark" 0 || return 1
     [ "$(cksum < "$PW/.guard-W1")" = "$_m0" ] || { PA_WHY="G2: the refused mark changed"; return 1; }
   done
+  # every byte of the mark counts: a blank second line, a NUL byte or a missing final newline is no mark, however the text reads
+  for _mk in '1:2 3 4\n\n' '1:2 3 4\0\n' '1:2 3 4' '1:2 3 4\n\0'; do
+    _gw 2; printf "$_mk" > "$PW/.guard-W1"; _m0=$(cksum < "$PW/.guard-W1")
+    _gwant "G2 bytes '$_mk'" "is not a mark" 0 || return 1
+    [ "$(cksum < "$PW/.guard-W1")" = "$_m0" ] || { PA_WHY="G2: the refused mark '$_mk' changed"; return 1; }
+  done
   # the "-" sentinel is a valid mark and the post goes out
   _gw 3; printf -- '-\n' > "$PW/.guard-W1"; _gwant "G2 sentinel" "" 1 || return 1
   # a job ledger that is there and cannot be read is no judgement: no post, no mark, one line saying so
@@ -1780,12 +1786,72 @@ fx_ep1() { # entry paths: every script finds its own folder by a plain expansion
   done
   return 0
 }
+fx_cf1() { # config and cursor bytes: a config that is a folder or a link that leads nowhere is refused (never the defaults); a cursor with a NUL byte is refused
+  pa_setup; mkdir "$PAW/cfgdir"; ln -s "$PAW/nowhere.env" "$PAW/dangling.env"
+  pa_want 'not a regular file' 2 WARROOM_ENV="$PAW/cfgdir" WARROOM_DIR="$PAW/cf1" "$PB/board.sh" path || return 1
+  pa_want 'link that leads nowhere' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$PAW/cf1" "$PB/board.sh" path || return 1
+  PA_IN='{}' pa_want 'not a regular file' 1 WARROOM_ENV="$PAW/cfgdir" WARROOM_DIR="$PAW/cf1" "$PHK/board-guard.sh" || return 1
+  pa_pass WARROOM_ENV="$PAW/absent.env" WARROOM_DIR="$PAW/cf1" "$PB/board.sh" path || { PA_WHY="CF1: an absent config is the defaults: $PA_WHY"; return 1; }
+  for _rec in '1:2 0 1 0\0\n' '1:2 0 1 0\1\n' '1:2 0 1\0 0\n'; do
+    printf "$_rec" > "$PAW/cur"
+    pa_exec WARROOM_DIR="$PAW/cf1" bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_parse "$2"; echo "rc=$?"' _ "$PB" "$PAW/cur"
+    case "$PA_OUT" in *"rc=1"*) ;; *) PA_WHY="CF1: the cursor '$_rec' was accepted: $PA_OUT"; return 1 ;; esac
+    case "$PA_OUT" in *NUL*|*"is not"*) ;; *) PA_WHY="CF1: the cursor '$_rec' was refused without a reason: $PA_OUT"; return 1 ;; esac
+  done
+  printf '1:2 0 1 0\n' > "$PAW/cur"
+  pa_exec WARROOM_DIR="$PAW/cf1" bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_parse "$2"; echo "rc=$?"' _ "$PB" "$PAW/cur"
+  case "$PA_OUT" in *"rc=0"*) ;; *) PA_WHY="CF1: a clean record was refused: $PA_OUT"; return 1 ;; esac
+}
+fx_pr1() { # process words: a pid that is not a plain positive number and a start time that is not a time are unknown, never dead
+  pa_setup; mkdir -p "$PAW/shim"
+  _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md bash -c '. "$1/_common.sh"; echo "a:$(wr_proc invalid) b:$(wr_proc "") c:$(wr_proc 0) d:$(wr_proc 12abc "x") e:$(wr_proc 12345678901234 "x") f:$(wr_proc -5)"' _ "$PB" 2>&1)
+  [ "$_t1" = "a:unknown b:unknown c:unknown d:unknown e:unknown f:unknown" ] || { PA_WHY="PR1: odd pids: '$_t1'"; return 1; }
+  for _ps in 'garbage' 'Mon Nov  2 10:00:00 2026 extra' 'Mon Nov  2 10:00:00' 'Mon Nov  2 10:00:00 2026\nMon Nov  2 10:00:00 2026'; do
+    printf '#!/bin/sh\nprintf "%s\\n"\nexit 0\n' "$_ps" > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
+    _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; echo "proc:$(wr_proc $$ "Mon Nov  2 10:00:00 2026")"; o=$(wr_started $$); echo "started rc=$?"' _ "$PB" 2>&1)
+    case "$_t1" in *"proc:unknown"*"started rc=1"*) ;; *) PA_WHY="PR1: a ps that prints '$_ps' and succeeds: '$_t1' (want unknown, and no start time)"; return 1 ;; esac
+  done
+  printf '#!/bin/sh\nprintf "Mon Nov  2 10:00:00 2026\\n"\nexit 0\n' > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
+  _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; echo "same:$(wr_proc $$ "Mon Nov 2 10:00:00 2026") other:$(wr_proc $$ "Tue Nov 3 10:00:00 2026")"' _ "$PB" 2>&1)
+  [ "$_t1" = "same:alive other:dead" ] || { PA_WHY="PR1: a well formed start time is compared: '$_t1'"; return 1; }
+}
+fx_ul1() { # a lock taken by its full path is released by a short spelling even after a failed builtin write (Bash 3.2 leaves text in front of a $( ) result)
+  pa_setup
+  _t1=$(pa_run WARROOM_DIR="$PAW" bash -c '. "$1/_common.sh"; touch "$PWD/target"; wr_lock "$PWD/target" || exit 9; echo buffered >&- 2>/dev/null; wr_unlock target; echo "unlock rc=$? slot=[$_WR_SLOT8]"; wr_lock "$PWD/target"; echo "relock rc=$?"; wr_unlock "$PWD/target"; echo "end slot=[$_WR_SLOT8]"' _ "$PB" 2>&1)
+  case "$_t1" in *"unlock rc=0 slot=[]"*"relock rc=0"*"end slot=[]"*) ;; *) PA_WHY="UL1: the slot stayed held: '$_t1'"; return 1 ;; esac
+}
+fx_ro1() { # entry scripts: a $0 that is "/name" looks in "/", not in the current folder; a folder whose name starts with "-" works
+  pa_setup; pa_w; _ep="$PAW/cwd/-dash"; mkdir -p "$_ep" || { PA_WHY="RO1: no folder"; return 1; }
+  cp -R "$PB" "$_ep/bin" && cp -R "$PHK" "$_ep/hooks" || { PA_WHY="RO1: copy"; return 1; }
+  for _s in bin/board.sh bin/pids.sh bin/waiter.sh hooks/board-tail.sh hooks/waiter-check.sh hooks/board-guard.sh; do
+    _d=${_s%/*}; _b=${_s##*/}
+    # run from inside its own folder with $0 = "/name": HERE is "/", where _common.sh is not, so the script stops at its first source line
+    _o=$(cd "$_ep/$_d" && printf '%s' '{}' | env WARROOM_DIR="$PW" bash -c '. "$1"' "/$_b" "./$_b" 2>&1); _r=$?
+    { [ "$_r" != 0 ] && printf '%s\n' "$_o" | grep -q '//[^ ]*_common.sh: No such file'; } || { PA_WHY="RO1: $_s with \$0=/$_b -> rc $_r '$_o' (want the source of //...common.sh to fail)"; return 1; }
+    PA_IN='{"session_id": "sid-pa"}' pa_exec WARROOM_DIR="$PW" bash "$_ep/$_s"; _r0=$PA_RC; _o0=$PA_OUT
+    _o=$(printf '%s' '{"session_id": "sid-pa"}' | pa_run WARROOM_DIR="$PW" bash -- "-dash/$_s" 2>&1); _r=$?
+    { [ "$_r" = "$_r0" ] && [ "$_o" = "$_o0" ]; } || { PA_WHY="RO1: $_s from a folder named -dash -> rc $_r '$_o' (absolute: rc $_r0 '$_o0')"; return 1; }
+  done
+  return 0
+}
+fx_rd1() { # the README gives one quoted command that clears a damaged saved position, and it removes exactly that file
+  pa_setup; _cmd=$(grep -o 'rm -- "[^"]*cursor-[A-Z0-9_]*"' "$ROOT/README.md" | head -1)
+  [ -n "$_cmd" ] || { PA_WHY="RD1: no quoted rm -- command for a cursor file in the README"; return 1; }
+  mkdir -p "$PAH/warroom-run"; : > "$PAH/warroom-run/.cursor-W1"; : > "$PAH/warroom-run/.cursor-W2"
+  pa_exec bash -c "$_cmd"
+  [ "$PA_RC" = 0 ] && [ ! -e "$PAH/warroom-run/.cursor-W1" ] && [ -e "$PAH/warroom-run/.cursor-W2" ] || { PA_WHY="RD1: '$_cmd' -> rc $PA_RC '$PA_OUT'; the file is $( [ -e "$PAH/warroom-run/.cursor-W1" ] && echo still there || echo gone), the other seat's is $( [ -e "$PAH/warroom-run/.cursor-W2" ] && echo kept || echo gone)"; return 1; }
+}
 pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
 pa_run_fx fx_t1 "process judgement: a gone pid or another start time is dead; a live process of another owner and a ps that fails after printing part of a time are unknown, never dead"
 pa_run_fx fx_gr1 "guard reads: an absent ledger or mark is first use and posts once; an unreadable ledger or board, an odd mark, stamp or clock posts nothing and says why"
 pa_run_fx fx_st1 "identity stat: an inode, a link count and a modification time are a plain decimal or nothing; a failing or odd stat is never a default, and the generation, the leaf check and the lock refuse on it"
 pa_run_fx fx_ck1 "clock: a bad or failing date is no post stamp, no arming and no delivery past the gap; the epoch reader accepts only a canonical decimal"
 pa_run_fx fx_ep1 "entry paths: every script finds its own folder by a plain expansion and one checked capture, from a bare name, ./name, an absolute path, a symlinked folder and a folder with a space in it"
+pa_run_fx fx_cf1 "config and cursor bytes: a config that is a folder or a link that leads nowhere is refused, an absent one is the defaults; a cursor holding a NUL byte is refused"
+pa_run_fx fx_pr1 "process words: an odd pid and a ps that prints something that is not a start time are unknown, never dead; a good start time is still compared"
+pa_run_fx fx_ul1 "lock release: a lock taken by its full path is released by a short spelling after a failed builtin write, and can be taken again"
+pa_run_fx fx_ro1 "entry scripts: \$0 = /name looks in /, a folder named -dash works"
+pa_run_fx fx_rd1 "README recovery: one quoted rm -- command for a cursor file that removes exactly that file"
 pa_run_fx fx_rg1 "seat registry in the hooks: an unreadable registry is said so with exit 1 and never shows a stale row or not armed; an absent one is empty"
 pa_run_fx fx_lg1 "job ledger: a ledger that cannot be read posts nothing and removes nothing; a readable one posts for a dead job and drops its row"
 pa_run_fx fx_sm1 "checksum helpers: a good run prints one answer; a failing stage that already printed leaves status 1 and nothing on stdout"

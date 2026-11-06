@@ -4,8 +4,8 @@
 # a bad warroom.env must not block the prompt (exit 2 would): see WR_CONFIG_EXIT in bin/_common.sh
 # shellcheck disable=SC2034
 WR_CONFIG_EXIT=1
-case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
-HERE=$(cd -P "$_d" && pwd) || exit 1
+case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
+HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/../bin/_common.sh" || exit 1
 . "$HERE/../bin/_cursor.sh" || exit 1
 case "${1:-}" in -h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac

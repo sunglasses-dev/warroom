@@ -10,8 +10,8 @@
 # a bad warroom.env must not block the prompt (exit 2 would): see WR_CONFIG_EXIT in bin/_common.sh
 # shellcheck disable=SC2034
 WR_CONFIG_EXIT=1
-case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
-HERE=$(cd -P "$_d" && pwd) || exit 1
+case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
+HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/../bin/_common.sh" || exit 1
 . "$HERE/../bin/_cursor.sh" || exit 1
 case "${1:-}" in -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
@@ -81,9 +81,17 @@ guard_seat() {
   mabs=$(wr_absent "$mark") || { wr_unlock "$mark"; echo "board-guard: skipped $seat (cannot tell whether the mark $mark exists), will retry on the next prompt" >&2; return 1; }
   if [ "$mabs" = yes ]; then prev="-"
   else
-    prev=$(cat "$mark") || { wr_unlock "$mark"; echo "board-guard: skipped $seat (cannot read the mark $mark), will retry on the next prompt" >&2; return 1; }
+    # every byte counts: $( ) drops NUL bytes and trailing newlines, so the file is read with a marker byte after it, and
+    # the NUL bytes are counted on their own. A mark is exactly one line and its newline.
+    prev=$( cat -- "$mark" && printf x ) || { wr_unlock "$mark"; echo "board-guard: skipped $seat (cannot read the mark $mark), will retry on the next prompt" >&2; return 1; }
+    prev=${prev%x}
+    mnul=$( set -o pipefail; LC_ALL=C tr -d '\001-\377' < "$mark" | wc -c ) || { wr_unlock "$mark"; echo "board-guard: skipped $seat (cannot read the mark $mark), will retry on the next prompt" >&2; return 1; }
     mre='^[0-9]+:[0-9]+ [0-9]+ [0-9]+$'
-    if [ "$prev" != "-" ] && ! [[ $prev =~ $mre ]]; then
+    mexact=yes
+    case "$prev" in *$'\n') prev=${prev%$'\n'} ;; *) mexact=no ;; esac
+    case "$prev" in *$'\n'*) mexact=no ;; esac
+    [ "${mnul//[!0-9]/}" = 0 ] || mexact=no
+    if [ "$mexact" = no ] || { [ "$prev" != "-" ] && ! [[ $prev =~ $mre ]]; }; then
       wr_unlock "$mark"; echo "board-guard: skipped $seat (the mark $mark is not a mark; delete that one file to start a new silence)" >&2; return 1
     fi
   fi

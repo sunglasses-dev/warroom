@@ -6,15 +6,15 @@
 # a bad warroom.env must not block the prompt (exit 2 would): see WR_CONFIG_EXIT in bin/_common.sh
 # shellcheck disable=SC2034
 WR_CONFIG_EXIT=1
-case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
-HERE=$(cd -P "$_d" && pwd) || exit 1
+case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac
+HERE=$(cd -P -- "$_d" && pwd) || exit 1
 . "$HERE/../bin/_common.sh" || exit 1
 rowfail() { echo "waiter-check: could not read this session's row in the seat registry" >&2; exit 1; }
 case "${1:-}" in -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 IN=$(cat) || { echo "waiter-check: could not read the hook input" >&2; exit 1; }
 SID=$(printf '%s' "$IN" | python3 -I -S -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "waiter-check: python3 could not read the hook input as JSON" >&2; exit 1; }
 [ -n "$SID" ] || exit 0
-BIN=$(cd -P "$HERE/../bin" && pwd) || exit 1
+BIN=$(cd -P -- "$HERE/../bin" && pwd) || exit 1
 WAIT=$(printf '%q' "$BIN/waiter.sh") || { echo "waiter-check: cannot quote the path of the waiter" >&2; exit 1; }      # printed commands are shell-quoted: a path may hold spaces
 REG="$W/seats.tsv"; wr_create "$REG" || { echo "waiter-check: cannot create the seat registry $REG" >&2; exit 1; }
 # the registry is read whole before anything is judged: a failed read is said so and never turned into "not armed" or a stale row
