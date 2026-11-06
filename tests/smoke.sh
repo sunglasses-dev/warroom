@@ -1302,6 +1302,8 @@ TBL
   printf '%s 2 %s %s\n' "$_c1g" "$_c1n" "$_c1p" > "$PAW/curunr"; chmod 000 "$PAW/curunr"
   pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2" "$BOARD_FILE" 99999 2>/dev/null' _ "$PB" "$PAW/curunr"; _r=$PA_RC; _o=$PA_OUT; chmod 600 "$PAW/curunr"
   if [ "$(id -u)" != 0 ]; then { [ "$_r" = 1 ] && [ -z "$_o" ]; } || { PA_WHY="C1 unreadable: rc $_r out '$_o' (want rc 1, nothing)"; return 1; }; fi
+  pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2/c" "$BOARD_FILE" 99999 2>/dev/null' _ "$PB" "$PAW/cb.md"
+  { [ "$PA_RC" = 1 ] && [ -z "$PA_OUT" ]; } || { PA_WHY="C1 folder is a file: rc $PA_RC out '$PA_OUT' (want rc 1, nothing: absence is not proven)"; return 1; }
   mkdir "$PAW/nosearch"; chmod 000 "$PAW/nosearch"
   pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2/c" "$BOARD_FILE" 99999 2>/dev/null' _ "$PB" "$PAW/nosearch"; _r=$PA_RC; _o=$PA_OUT; chmod 700 "$PAW/nosearch"
   if [ "$(id -u)" != 0 ]; then { [ "$_r" = 1 ] && [ -z "$_o" ]; } || { PA_WHY="C1 unsearchable folder: rc $_r out '$_o' (want rc 1, nothing: absence is not proven)"; return 1; }; fi
@@ -1582,8 +1584,8 @@ pa_mcopy c1len; pa_msed c1len bin/_cursor.sh 's/^  \[ "\${#1}" -le 15 \]$/  true
 [ "$(grep -c '^  true$' "$MA/c1len/bin/_cursor.sh")" = 1 ] && pa_mut c1len fx_c1 || bad "mutant c1len: the change was not applied"
 pa_mcopy c1fut; pa_msed c1fut bin/_cursor.sh '/more than a day ahead of the clock" >&2; return 1; }$/d'
 [ "$(grep -c 'more than a day ahead of the clock" >&2' "$MA/c1fut/bin/_cursor.sh")" = 0 ] && pa_mut c1fut fx_c1 || bad "mutant c1fut: the change was not applied"
-pa_mcopy c1abs; pa_msed c1abs bin/_cursor.sh 's/^    \[ -x "\$_cd" \] || { echo "cursor \$1: its folder cannot be searched" >&2; return 1; }$/    :/'
-[ "$(grep -c 'its folder cannot be searched' "$MA/c1abs/bin/_cursor.sh")" = 0 ] && pa_mut c1abs fx_c1 || bad "mutant c1abs: the change was not applied"
+pa_mcopy c1abs; pa_msed c1abs bin/_common.sh 's/^  \[ -d "\$_wr_ad" \] && \[ -x "\$_wr_ad" \]$/  true/'
+[ "$(grep -c '^  \[ -d "\$_wr_ad" \] && \[ -x "\$_wr_ad" \]$' "$MA/c1abs/bin/_common.sh")" = 0 ] && pa_mut c1abs fx_c1 || bad "mutant c1abs: the change was not applied"
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9tail/bin/board.sh")" = 1 ] && pa_mut f9tail fx_f9a || bad "mutant f9tail: the change was not applied"

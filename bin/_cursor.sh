@@ -91,12 +91,9 @@ wr_cursor_parse() {
 #   more than a day ahead of the clock is corrupt, never "none": nothing is printed and the status is 1, and the caller
 #   consumes nothing. A checksum that cannot be computed is not "the board changed": same, status 1.
 wr_cursor_get() {
-  _cg=""; _cs=""; _cd=""; _cn=""
-  case "$1" in */*) _cd=${1%/*} ;; *) _cd=. ;; esac
-  if [ ! -e "$1" ] && [ ! -L "$1" ]; then
-    [ -x "$_cd" ] || { echo "cursor $1: its folder cannot be searched" >&2; return 1; }
-    echo none; return 0                                     # a missing cursor is normal on the first arm: say nothing
-  fi
+  _cg=""; _cs=""; _cn=""
+  if wr_absent "$1"; then echo none; return 0; fi          # a missing cursor is normal on the first arm: say nothing
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; fi
   wr_cursor_parse "$1" || return 1
   _cn=$(date +%s) || return 1
   wr_canon "$_cn" || return 1

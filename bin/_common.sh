@@ -131,6 +131,14 @@ _wr_links() { # FILE -> its link count, "" if unreadable (GNU stat first, see wr
   _wr_n=$(stat -c %h "$1" 2>/dev/null) || _wr_n=$(stat -f %l "$1" 2>/dev/null) || _wr_n=""
   case "$_wr_n" in ''|*[!0-9]*) echo "" ;; *) echo "$_wr_n" ;; esac
 }
+# wr_absent FILE: 0 only when FILE is genuinely absent: it is not there, it is not a (dangling) link, and the folder that would
+# hold it is a folder this process can search. "-e says no" alone is also what a folder we cannot search, a parent that is a
+# file and a link loop look like, so those are status 1 (cannot tell), never "absent".
+wr_absent() {
+  [ ! -e "$1" ] && [ ! -L "$1" ] || return 1
+  case "$1" in */*) _wr_ad=${1%/*}; [ -n "$_wr_ad" ] || _wr_ad=/ ;; *) _wr_ad=. ;; esac
+  [ -d "$_wr_ad" ] && [ -x "$_wr_ad" ]
+}
 # wr_leaf_ok FILE: 0 when FILE is a regular file with one name and is not a link
 wr_leaf_ok() { [ ! -L "$1" ] && [ -f "$1" ] && [ "$(_wr_links "$1")" = 1 ]; }
 # wr_create FILE: make an empty FILE with a noclobber create (it never truncates a regular file, and it fails on an existing
