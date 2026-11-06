@@ -379,7 +379,7 @@ n=$(awk -F'\t' '$2=="NONE"' "$WARROOM_DIR/seats.tsv" | wc -l | tr -d ' ')
 sec "28. a waiter replaced by a newer arm of the same session never d"
 BF="$("$B/board.sh" path)"; dup=0
 for i in 1 2 3 4 5 6; do
-  : > "$BF"; rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/seats.tsv"
+  : > "$BF"; rm -f "$WARROOM_DIR"/.cursor-* "$WARROOM_DIR"/.lastwake-* "$WARROOM_DIR/seats.tsv"; : > "$T/d_a.out"; : > "$T/d_a.err"; : > "$T/d_b.out"
   "$B/waiter.sh" W1 "sid-d$i" > "$T/d_a.out" 2> "$T/d_a.err" & pa=$!; wait_text "$T/d_a.err" '^armed ' 20
   "$B/board.sh" post BOSS "@W1 ACTION: round $i"
   sleep 0.$((i * 2))                                   # a different distance from the wake each round
@@ -991,7 +991,8 @@ PS_OK=1; [ -n "$(ps -o lstart= -p $$ 2>/dev/null)" ] || PS_OK=0   # sections 51-
 sec "51. links and hard links at state leaves (PR B). A protected sta"
 #     link target is never created or written, and the temp that was made is removed. Cleanup success and failure are separate cases.
 L51="$T/l51"; mkdir -p "$L51/tgt"
-l51_base() { rm -rf "$L51/w" "$L51/tgt"; mkdir -p "$L51/w" "$L51/tgt"; printf '[00:00 · BOSS] one\n' > "$L51/w/board.md"; }
+l51_base() { rm -rf "$L51/w" "$L51/tgt"; : > "$L51/o"; : > "$L51/e"; mkdir -p "$L51/w" "$L51/tgt";   # o and e are emptied by us: a background job truncates its own redirect late, and wait_text must not see the last run's 'armed'
+  printf '[00:00 · BOSS] one\n' > "$L51/w/board.md"; }
 l51_clean() { [ ! -e "$L51/tgt/$1" ] && [ -L "$L51/w/$1" ] && [ -z "$(find "$L51/w" -name '.wrtmp.*')" ]; }
 # L1: a dangling link at each protected file; the arm / add / guard is refused, the link still points at nothing, no temp is left
 if [ "$PS_OK" = 1 ]; then
@@ -1057,7 +1058,7 @@ for tool in mktemp awk cksum rm; do
 done
 fault_set() { rm -f "$FAULT55/$1" "$FAULT55/$1.cnt"; printf '%s\n' "$2" > "$FAULT55/$1"; }
 fault_clear() { rm -f "$FAULT55"/*; }
-l52_base() { rm -rf "$L51/w"; mkdir -p "$L51/w"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] two\n' > "$L51/w/board.md"; printf 'other-sid\tBOSS\t1\t00:00\n' > "$L51/w/seats.tsv"; }
+l52_base() { rm -rf "$L51/w"; : > "$L51/o"; : > "$L51/e"; mkdir -p "$L51/w"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] two\n' > "$L51/w/board.md"; printf 'other-sid\tBOSS\t1\t00:00\n' > "$L51/w/seats.tsv"; }
 l52_dir() { ls -A "$L51/w" | tr '\n' ' '; }
 if [ "$PS_OK" = 1 ]; then
 # L4: legacy same-PID temp names are planted (links and a hard link) and the waiter is exec'd in the SAME pid: nothing planted is written through or removed
@@ -1195,7 +1196,7 @@ chmod +x "$SHRO/mktemp"
 ro_set() { rm -f "$FRO.cnt" "$FRO.hit"; printf '%s\n' "$1" > "$FRO"; }
 ro_clear() { rm -f "$FRO" "$FRO.cnt"; }
 ro_hit() { [ -s "$FRO.hit" ]; }
-f2_base() { rm -rf "$L51/w"; mkdir -p "$L51/w"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] three words here\n' > "$L51/w/board.md"; }
+f2_base() { rm -rf "$L51/w"; : > "$L51/o"; : > "$L51/e"; mkdir -p "$L51/w"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] three words here\n' > "$L51/w/board.md"; }
 f2_tail() { WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/board.sh" tail BOSS 2>"$L51/e"; }
 if [ "$(id -u)" != 0 ]; then
 for st in "snapshot 1 scratch" "chunk 2 scratch" "anchor 3 position"; do
@@ -1231,14 +1232,16 @@ WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-w2 >/dev/null 2>&1 & WP=$!; sleep 2; 
 # waiter poll: the snapshot (call 1) and the chunk (call 2) cannot be written: the waiter stays up, the position is kept, it says so, the line comes on the next good poll
 for st in "snapshot 1" "chunk 2"; do
   set -- $st; name=$1; nth=$2
-  f2_base; rm -f "$L51/w/seats.tsv"; WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-p$name > "$L51/o" 2>"$L51/e" & WP=$!; wait_text "$L51/e" '^armed ' 20
+  f2_base; rm -f "$L51/w/seats.tsv"; : > "$L51/o"; : > "$L51/e"   # emptied here: the background job's own redirect may run after wait_text starts, and the last pass left 'armed' in e
+  WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-p$name > "$L51/o" 2>"$L51/e" & WP=$!; wait_text "$L51/e" '^armed ' 20
   ro_set "$nth waiter.sh"; WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: wf $name line" >/dev/null
   wait_exit $WP 10 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; ro_clear; said=$(grep -c "nothing consumed" "$L51/e")
   [ "$said" -ge 1 ] && grep -q "wf $name line" "$L51/o" && ro_hit \
     && ok "write fault: an unwritable $name in the waiter poll consumes nothing (said so, fault reached) and the same line is delivered by the next poll" || bad "write fault waiter $name: said $said, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")'"
 done
 # waiter delivery: the position write (call 3 of the run: snapshot, chunk, cursor) fails: exit 1 'printed but not marked', header and lines printed, position kept, re-arm gets them again
-f2_base; rm -f "$L51/w/seats.tsv"; WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-pd > "$L51/o" 2>"$L51/e" & WP=$!; wait_text "$L51/e" '^armed ' 20
+f2_base; rm -f "$L51/w/seats.tsv"; : > "$L51/o"; : > "$L51/e"
+WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-pd > "$L51/o" 2>"$L51/e" & WP=$!; wait_text "$L51/e" '^armed ' 20
 ro_set "3 waiter.sh"; WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: wf deliver line" >/dev/null; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?; ro_clear
 WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-pd2 > "$L51/o2" 2>/dev/null & WP=$!; wait_text "$L51/o2" "wf deliver line" 20; kill $WP 2>/dev/null; wait $WP 2>/dev/null
 [ $r = 1 ] && ro_hit && grep -q "printed but not marked" "$L51/e" && grep -q "^\[WAKE" "$L51/o" && grep -q "wf deliver line" "$L51/o" && grep -q "wf deliver line" "$L51/o2" \
