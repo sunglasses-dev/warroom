@@ -2484,7 +2484,8 @@ class Contracts:
     def c_F(self, o, e):
         """A runner call whose failure is compensated where it happens. All four, or the row is refused: (1) the call is the whole
         condition of an `if` / `if !` (not inside an argument, not a status saved for later); (2) its output is not consumed: no
-        substitution anywhere in the call, and its only redirections are to or from /dev/null; (3) the failure branch exists, holds
+        substitution anywhere in the call, its only redirections are to or from /dev/null and its standard output goes to /dev/null
+        explicitly (an inherited one reaches a caller that captures the function); (3) the failure branch exists, holds
         no substitution and no `exit` (directly or through a function), so it falls through, continues or returns; (4) the target
         is a scanned script (the runner call itself is judged for that)."""
         if o.kind != 'RUNCALL' or 'F' not in o.needs:
@@ -2505,6 +2506,8 @@ class Contracts:
             t = word_lit(r.target) if r.target is not None else None
             if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':
                 return 'F allows only redirections to or from /dev/null on the call'
+        if not any(r.op == '>' and (r.fd or '1') == '1' and word_lit(r.target) == '/dev/null' for r in nd.redirs):
+            return 'F needs the call standard output sent to /dev/null explicitly: an inherited one reaches a caller that captures'
         if pipe.neg:
             branch = ifn.clauses[0][1]
         else:
@@ -3148,6 +3151,9 @@ TREE_CASES.update({
     'f_neg_branch_exits': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo restore >&2; ( exit 1 ); fi\n'), 1, 'must not exit'),
     'f_neg_branch_substitution': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo "$(echo restore)" >&2; fi\n'), 1, 'holds a substitution'),
     'f_neg_call_substituted': (f_tree('if ! out=$(wr_run "$HERE/b.sh" post x); then echo restore >&2; fi\n'), 1, 'whole condition of a single if'),
+    'f_neg_stdout_inherited': (f_tree('if ! wr_run "$HERE/b.sh" post x; then echo restore >&2; fi\n'), 1, 'standard output sent to /dev/null explicitly'),
+    'f_neg_stdout_inherited_stderr_nulled': (f_tree('if ! wr_run "$HERE/b.sh" post x 2>/dev/null; then echo restore >&2; fi\n'), 1,
+                                             'standard output sent to /dev/null explicitly'),
     'f_neg_dup_stderr_to_stdout': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null 2>&1; then echo restore >&2; fi\n'), 1, 'allows only redirections'),
     'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
     'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
@@ -3322,6 +3328,8 @@ CODE_MUTANTS = [
     ('code-display-in-outer-capture', "sm = self.outer_simple_of(cs)       # printed inside another substitution: that capture hides the failure of this one\n                continue",
      "return True", 'neg_allow_d_inside_checked_capture.sh', 'must be printed by echo or printf'),
     # reason F: each part of its contract is pinned by a tree that only that part rejects
+    ('code-f-stdout-explicit', "if not any(r.op == '>' and (r.fd or '1') == '1' and word_lit(r.target) == '/dev/null' for r in nd.redirs):",
+     "if False:", 'tree:f_neg_stdout_inherited', 'standard output sent to /dev/null explicitly'),
     ('code-f-call-output-to-file', "if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':", "if False:",
      'tree:f_neg_output_to_file', 'allows only redirections'),
     ('code-f-call-output-duplicated', "if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':", "if r.heredoc or r.op not in ('>', '<', '>&'):",
