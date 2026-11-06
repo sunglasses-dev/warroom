@@ -1311,6 +1311,18 @@ TBL
   pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2" "$BOARD_FILE" 99999' _ "$PB" "$PAW/curfix"
   { [ "$PA_RC" = 0 ] && [ "$PA_OUT" = 2 ]; } || { PA_WHY="C1 repaired record: rc $PA_RC out '$PA_OUT' (want rc 0, 2)"; return 1; }
 }
+fx_t1() { # process judgement: dead only on "no such process" or another start time; a refused kill and a failed or partial ps are unknown
+  pa_setup; mkdir -p "$PAW/shim"
+  _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md bash -c '. "$1/_common.sh"; sleep 30 & p=$!; me=$(wr_started "$p") || exit 9; echo "a:$(wr_proc "$p") b:$(wr_proc "$p" "$me") c:$(wr_proc "$p" "not the start") d:$(wr_proc 99999) e:$(wr_proc "$p" "$me" | head -c 0)"; kill "$p"; wait "$p" 2>/dev/null; echo "f:$(wr_proc "$p" "$me")"' _ "$PB" 2>&1)
+  case "$_t1" in *"a:alive b:alive c:dead d:dead"*"f:dead"*) ;; *) PA_WHY="proc plain states: '$_t1'"; return 1 ;; esac
+  if [ "$(id -u)" != 0 ]; then
+    _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md bash -c '. "$1/_common.sh"; echo "pid1:$(wr_proc 1) pid1s:$(wr_proc 1 "anything")"' _ "$PB" 2>&1)
+    [ "$_t1" = "pid1:unknown pid1s:unknown" ] || { PA_WHY="proc a live process of another owner (pid 1): '$_t1' (want unknown, never dead)"; return 1; }
+  fi
+  printf '#!/bin/sh\nprintf "Thu Nov"\nexit 1\n' > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
+  _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; o=$(wr_started $$); echo "rc=$? out=[$o]"; echo "proc:$(wr_proc $$ "Thu Nov")"' _ "$PB" 2>&1)
+  case "$_t1" in *"rc=1 out=[]"*"proc:unknown"*) ;; *) PA_WHY="proc a ps that prints part of a time and fails: '$_t1' (want rc 1 with nothing, and unknown)"; return 1 ;; esac
+}
 fx_g2() { # the restore fails: the new mark stays and the hook says so (kills a failed-restore-only "rm")
   pa_setup; pa_w; printf '[00:00 · W1] working\n' > "$PW/board.md"; mkdir -p "$PAW/shim"; _py=$(command -v python3)
   printf '#!/bin/sh\ncase "$*" in *os.replace*.guard-W1) c=$(cat "%s" 2>/dev/null || echo 0); c=$((c+1)); echo $c > "%s"; [ $c = 2 ] && { echo "shim: replace refused" >&2; exit 1; } ;; esac\nexec %s "$@"\n' "$PAW/cnt" "$PAW/cnt" "$_py" > "$PAW/shim/python3"; chmod +x "$PAW/shim/python3"
@@ -1427,6 +1439,7 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
   { [ "$_r" = 1 ] && [ -z "$_o" ] && pa_ckhit && grep -q "could not read the board" "$PAW/e" && [ ! -e "$PW/.anchor-BOSS" ] && [ -z "$(find "$PW" -name '.wrtmp.*')" ]; } || { PA_WHY="F1c: rc $_r, out '$_o', hit $(pa_ckhit && echo y || echo n), err '$(cat "$PAW/e")'"; return 1; }
 }
 pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
+pa_run_fx fx_t1 "process judgement: a gone pid or another start time is dead; a live process of another owner and a ps that fails after printing part of a time are unknown, never dead"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
 pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
 pa_run_fx fx_f9c "F9: a failed generation or prefix checksum in the prompt hook shows no count and says why"
@@ -1586,6 +1599,10 @@ pa_mcopy c1fut; pa_msed c1fut bin/_cursor.sh '/more than a day ahead of the cloc
 [ "$(grep -c 'more than a day ahead of the clock" >&2' "$MA/c1fut/bin/_cursor.sh")" = 0 ] && pa_mut c1fut fx_c1 || bad "mutant c1fut: the change was not applied"
 pa_mcopy c1abs; pa_msed c1abs bin/_common.sh 's/^  \[ -d "\$_wr_ad" \] && \[ -x "\$_wr_ad" \]$/  true/'
 [ "$(grep -c '^  \[ -d "\$_wr_ad" \] && \[ -x "\$_wr_ad" \]$' "$MA/c1abs/bin/_common.sh")" = 0 ] && pa_mut c1abs fx_c1 || bad "mutant c1abs: the change was not applied"
+pa_mcopy t1kill; pa_msed t1kill bin/_common.sh 's/^    \*) echo unknown; return 0 ;;   .*$/    *) echo dead; return 0 ;;/'
+[ "$(grep -c '^    \*) echo dead; return 0 ;;$' "$MA/t1kill/bin/_common.sh")" = 1 ] && pa_mut t1kill fx_t1 || bad "mutant t1kill: the change was not applied"
+pa_mcopy t1pipe; pa_msed t1pipe bin/_common.sh 's/^  _wr_st=\$( set -o pipefail; /  _wr_st=$( /'
+[ "$(grep -c 'set -o pipefail; { ps -o lstart=' "$MA/t1pipe/bin/_common.sh")" = 0 ] && pa_mut t1pipe fx_t1 || bad "mutant t1pipe: the change was not applied"
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9tail/bin/board.sh")" = 1 ] && pa_mut f9tail fx_f9a || bad "mutant f9tail: the change was not applied"
