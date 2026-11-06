@@ -783,6 +783,7 @@ REASONS = {
     'V': 'view-only read at the end of the script',
     'C': 'skip with continue, bound to its loop',
     'O': 'opaque program with pinned text',
+    'F': 'failure compensated in place: status tested, no output consumed',
 }
 
 
@@ -2026,7 +2027,7 @@ class Analyzer:
                 # saved in a variable and used later, or dropped, is not checked
                 res = self.consume(nd)
                 if res[0] != 'OK':
-                    return self.bad('the runner call is not checked: ' + res[1], res[2])
+                    return self.bad('the runner call is not checked: ' + res[1], set(res[2]) | {'F'})
                 return self.ok('RUN', func=res[3]) if res[1] == 'REFUSE' else res
         return self.bad('the runner is called with a target that is not a named scanned script')
 
@@ -2480,6 +2481,45 @@ class Contracts:
             return 'D value must be printed by echo or printf (no file redirect)'
         return None
 
+    def c_F(self, o, e):
+        """A runner call whose failure is compensated where it happens. All four, or the row is refused: (1) the call is the whole
+        condition of an `if` / `if !` (not inside an argument, not a status saved for later); (2) its output is not consumed: no
+        substitution anywhere in the call, and its only redirections are to or from /dev/null; (3) the failure branch exists, holds
+        no substitution and no `exit` (directly or through a function), so it falls through, continues or returns; (4) the target
+        is a scanned script (the runner call itself is judged for that)."""
+        if o.kind != 'RUNCALL' or 'F' not in o.needs:
+            return 'F is for a runner call whose failure is tested by an if but does not reach a refusal'
+        nd = o.node
+        pipe = nd.parent
+        andor = pipe.parent if pipe is not None else None
+        lst = andor.parent if andor is not None else None
+        ifn = lst.parent if lst is not None else None
+        if not (pipe.k == 'pipe' and len(pipe.cmds) == 1 and andor.k == 'andor' and len(andor.parts) == 1 and not getattr(andor, 'bg', False)
+                and lst.k == 'list' and len(lst.items) == 1 and ifn is not None and ifn.k == 'if' and len(ifn.clauses) == 1
+                and ifn.clauses[0][0] is lst):
+            return 'F needs the runner call to be the whole condition of a single if'
+        for d in walk(nd):
+            if d.k in ('cs', 'ps', 'bt'):
+                return 'F needs a call with no substitution: its output must not be consumed'
+        for r in nd.redirs:
+            t = word_lit(r.target) if r.target is not None else None
+            if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':
+                return 'F allows only redirections to or from /dev/null on the call'
+        if pipe.neg:
+            branch = ifn.clauses[0][1]
+        else:
+            branch = ifn.els
+        if branch is None:
+            return 'F needs a failure branch that compensates'
+        for d in walk(branch):
+            if d.k in ('cs', 'ps', 'bt'):
+                return 'F failure branch holds a substitution'
+            if d.k == 'simple' and d.words:
+                nm = cmd_name(d)
+                if nm in {'$', 'eval', 'builtin', 'command', 'exec', 'kill', 'exit'} or (nm in self.an.funcs and self.an.can_exit(nm, set())):
+                    return 'F failure branch must not exit'
+        return None
+
     def c_X(self, o, e):
         if o.kind != 'CS':
             return 'X is for a command substitution'
@@ -2686,7 +2726,7 @@ def propose(an):
     for o in an.occs:
         if o.status != 'BAD' or o.listed:
             continue
-        for r in 'KHMDXVCPO':
+        for r in 'KHMDXVCPOF':
             ctx = ctx_for(an, o, r)
             e = Entry(o.file, o.key[1], o.key[2], r, ctx, '', 0)
             if ct.check(o, e) is None:
@@ -3006,6 +3046,14 @@ def env_tree(**changes):
     return files
 
 
+def f_tree(body):
+    """A clean three-file tree whose entry script holds `body`; an F row is written for every runner call of it."""
+    return {'bin/_common.sh': ENV_COMMON_CHECKED + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+            'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+            'bin/a.sh': ENV_ENTRY + body,
+            'tests/read-gate.allow': '@F'}
+
+
 TREE_CASES.update({
     'env_control_canonical_forms': (env_tree(), 1, '!ENVELOPE'),
     'env_out_extensionless_bin': (env_tree(**{'bin/warroom': ':\n'}), 1, 'not *.sh is never read'),
@@ -3089,6 +3137,18 @@ TREE_CASES.update({
     'runcall_checked_capture': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
                                'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
                                'bin/a.sh': ENV_ENTRY + 'x=$(wr_run "$HERE/b.sh" check) || exit 1\n'}), 1, '!the runner call is not checked'),
+    # reason F: a runner call whose failure is compensated in place (an F row is written for every runner call of the tree)
+    'f_pos_not_form': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo restore >&2; fi\n'), 0, '!the runner call is not checked'),
+    'f_pos_else_form': (f_tree('if wr_run "$HERE/b.sh" post x </dev/null >/dev/null; then :; else echo keep >&2; fi\n'), 0, '!the runner call is not checked'),
+    'f_neg_output_to_file': (f_tree('if ! wr_run "$HERE/b.sh" post x > out.txt; then echo restore >&2; fi\nv=$(cat out.txt) || exit 1\n'), 1,
+                             'allows only redirections to or from /dev/null'),
+    'f_neg_status_saved': (f_tree('wr_run "$HERE/b.sh" post x >/dev/null\nrc=$?\nif [ "$rc" != 0 ]; then echo restore >&2; fi\n'), 1,
+                           'whole condition of a single if'),
+    'f_neg_no_failure_branch': (f_tree('if wr_run "$HERE/b.sh" post x >/dev/null; then echo ok >&2; fi\n'), 1, 'needs a failure branch'),
+    'f_neg_branch_exits': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo restore >&2; ( exit 1 ); fi\n'), 1, 'must not exit'),
+    'f_neg_branch_substitution': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null; then echo "$(echo restore)" >&2; fi\n'), 1, 'holds a substitution'),
+    'f_neg_call_substituted': (f_tree('if ! out=$(wr_run "$HERE/b.sh" post x); then echo restore >&2; fi\n'), 1, 'whole condition of a single if'),
+    'f_neg_dup_stderr_to_stdout': (f_tree('if ! wr_run "$HERE/b.sh" post x >/dev/null 2>&1; then echo restore >&2; fi\n'), 1, 'allows only redirections'),
     'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
     'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
 })
@@ -3105,6 +3165,8 @@ def run_tree(me, tmpd, name):
                 files[d + '/noop.sh'] = ':\n'
     root = os.path.join(tmpd, name)
     for rel, text in files.items():
+        if text == '@F':
+            continue
         path = os.path.join(root, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if isinstance(text, tuple):         # ('link', target): a symlink, possibly dangling
@@ -3112,7 +3174,20 @@ def run_tree(me, tmpd, name):
             continue
         with open(path, 'w', encoding='utf-8') as fh:
             fh.write(text)
-    cmd = [sys.executable, '-I', me, '--enforce', '--root', root, '--allow', os.path.join(root, 'none')]
+    allow = os.path.join(root, 'none')
+    if files.get('tests/read-gate.allow') == '@F':
+        # an F row for every runner call of the tree, bound to the tree's own text (the row names the place; the contract decides)
+        an = Analyzer()
+        for rel in sorted(files):
+            if rel.endswith('.sh'):
+                an.add(rel, files[rel])
+        an.run()
+        rows = ['%s\t%s\t%d\tF\t-\t' % (o.file, o.key[1], o.key[2]) for o in an.occs if o.kind == 'RUNCALL']
+        allow = os.path.join(root, 'tests', 'read-gate.allow')
+        os.makedirs(os.path.dirname(allow), exist_ok=True)
+        with open(allow, 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(rows) + '\n')
+    cmd = [sys.executable, '-I', me, '--enforce', '--root', root, '--allow', allow]
     env = dict(os.environ)
     if not name.startswith('env_'):
         # the statement-level trees test the judgments themselves; the env_ trees test the file envelope in front of them
@@ -3246,6 +3321,15 @@ CODE_MUTANTS = [
      'tree:runcall_status_saved_and_unused', 'the runner call is not checked'),
     ('code-display-in-outer-capture', "sm = self.outer_simple_of(cs)       # printed inside another substitution: that capture hides the failure of this one\n                continue",
      "return True", 'neg_allow_d_inside_checked_capture.sh', 'must be printed by echo or printf'),
+    # reason F: each part of its contract is pinned by a tree that only that part rejects
+    ('code-f-call-output-to-file', "if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':", "if False:",
+     'tree:f_neg_output_to_file', 'allows only redirections'),
+    ('code-f-call-output-duplicated', "if r.heredoc or r.op not in ('>', '<') or t != '/dev/null':", "if r.heredoc or r.op not in ('>', '<', '>&'):",
+     'tree:f_neg_dup_stderr_to_stdout', 'allows only redirections'),
+    ('code-f-branch-must-not-exit', "if nm in {'$', 'eval', 'builtin', 'command', 'exec', 'kill', 'exit'} or (nm in self.an.funcs and self.an.can_exit(nm, set())):",
+     "if False:", 'tree:f_neg_branch_exits', 'must not exit'),
+    ('code-f-branch-substitution', "if d.k in ('cs', 'ps', 'bt'):\n                return 'F failure branch holds a substitution'",
+     "if False:\n                return 'F failure branch holds a substitution'", 'tree:f_neg_branch_substitution', 'holds a substitution'),
     ('code-runcall-literal-form', "m = self.RE_RUN_TARGET.match(src[nd.words[1].start:nd.words[1].end])", "m = re.match(r'^.*$', src[nd.words[1].start:nd.words[1].end])",
      'tree:env_runcall_computed_target', 'not a named scanned script'),
     ('code-e4-sibling-scanned', "if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:", "if sib:", 'tree:env_sibling_not_scanned', 'computed command word'),
