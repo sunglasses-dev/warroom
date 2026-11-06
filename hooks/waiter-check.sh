@@ -32,11 +32,12 @@ if [ -n "$row" ]; then
   st=$(wr_rowproc "$pid" "$started" "$cols") || { echo "waiter-check: could not judge the waiter process (pid $pid)" >&2; exit 1; }
   case "$st" in
     alive) exit 0 ;;
-    unknown) echo "[WAITER UNCHECKED] the start time of your $seat waiter (pid $pid) is not recorded or cannot be read (ps failed), so this hook cannot tell whether it still runs. If no waiter job is running in this session, re-arm it as a background job: bash $WAIT $seat $(printf '%q' "$SID")"; exit 0 ;;
+    unknown) echo "[WAITER UNCHECKED] the start time of your $seat waiter (pid $pid) is not recorded or cannot be read (ps failed), so this hook cannot tell whether it still runs. If no waiter job is running in this session, re-arm it as a background job: bash $WAIT $seat $(printf '%q' "$SID")" || exit 1; exit 0 ;;
     dead) ;;
     *) echo "waiter-check: unexpected answer '$st' for the waiter process (pid $pid)" >&2; exit 1 ;;
   esac
-  echo "[WAITER ENDED] your $seat waiter (pid $pid) fired or died. Act on any '@$seat ACTION' line on the board, then re-arm it now as a background job: bash $WAIT $seat $(printf '%q' "$SID")"
+  echo "[WAITER ENDED] your $seat waiter (pid $pid) fired or died. Act on any '@$seat ACTION' line on the board, then re-arm it now as a background job: bash $WAIT $seat $(printf '%q' "$SID")" || exit 1
   exit 0
 fi
-echo "[WAITER NOT ARMED] this session has no board trigger, so nothing wakes it when a line says '@<seat> ACTION'. First action, before other work, as a background job: bash $WAIT <one of: $SEATS> $(printf '%q' "$SID")   (or: waiter.sh NONE $(printf '%q' "$SID") to opt out)"
+echo "[WAITER NOT ARMED] this session has no board trigger, so nothing wakes it when a line says '@<seat> ACTION'. First action, before other work, as a background job: bash $WAIT <one of: $SEATS> $(printf '%q' "$SID")   (or: waiter.sh NONE $(printf '%q' "$SID") to opt out)" || exit 1
+exit 0

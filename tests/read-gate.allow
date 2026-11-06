@@ -15,9 +15,8 @@ bin/_common.sh	47a0-1de1-9d1d	0	O	9243-1e66-5421	$(python3 -I -S -c ' import err
 bin/board.sh	eaa3-fb43-ecaa	0	V	-	tail -n "$n" "$BOARD_FILE"
 bin/board.sh	d04e-1790-4919	0	H	-	sed -n -- '2,9p' "$0"
 bin/board.sh	d04e-1790-4919	1	H	-	sed 's/^# \{0,1\}//'
-bin/pids.sh	4733-ce47-337d	0	K	-	$(printf '\t')
 bin/pids.sh	79a4-26b6-ec47	0	V	-	cat "$P"
-bin/pids.sh	6529-3ed0-02f9	0	C	2dd2-f7e1-0479	check_row "$l" "$p" "$o" "$s"
+bin/pids.sh	7d6b-f404-7062	0	C	383b-a836-6c93	check_row "$row"
 bin/pids.sh	7d2c-7cd4-3c67	0	H	-	sed -n -- '2,16p' "$0"
 bin/pids.sh	7d2c-7cd4-3c67	1	H	-	sed 's/^# \{0,1\}//'
 bin/waiter.sh	b3e3-f3ec-4b53	0	H	-	sed -n -- '2,15p' "$0"
@@ -34,15 +33,11 @@ hooks/board-tail.sh	20ba-b462-056e	0	D	-	$(printf '%q' "$(cd "$HERE/../bin" && p
 hooks/board-tail.sh	0933-3c0a-906b	0	D	-	$(cd "$HERE/../bin" && pwd)
 hooks/waiter-check.sh	219d-0d3d-ccbc	0	H	-	sed -n -- '2,6p' "$0"
 hooks/waiter-check.sh	219d-0d3d-ccbc	1	H	-	sed 's/^# \{0,1\}//'
-hooks/waiter-check.sh	509c-0826-5031	0	D	-	$(printf '%q' "$SID")
-hooks/waiter-check.sh	fa30-0e5d-0dd6	0	D	-	$(printf '%q' "$SID")
-hooks/waiter-check.sh	abf5-7714-0a56	0	D	-	$(printf '%q' "$SID")
-hooks/waiter-check.sh	abf5-7714-0a56	1	D	-	$(printf '%q' "$SID")
+hooks/waiter-check.sh	ac25-b7ae-10cf	0	D	-	$(printf '%q' "$SID")
+hooks/waiter-check.sh	14c1-bf64-5979	0	D	-	$(printf '%q' "$SID")
+hooks/waiter-check.sh	98ab-d499-b22f	0	D	-	$(printf '%q' "$SID")
+hooks/waiter-check.sh	98ab-d499-b22f	1	D	-	$(printf '%q' "$SID")
 bin/_common.sh	7dcf-bcfd-18ac	0	O	0b4a-2942-bfce	$(python3 -I -S -c 'import errno, os, sys try: os.stat(sys.argv[1]) ex
 bin/waiter.sh	573d-b678-8fc7	0	C	3ec4-14be-8e6a	observe
 bin/waiter.sh	c3ae-6dd9-260c	0	C	3ec4-14be-8e6a	deliver
 hooks/board-guard.sh	b6ae-5eea-9e5e	0	C	5583-f7d3-0a4e	guard_seat "$seat"
-hooks/board-tail.sh	7dda-4c35-a762	0	V	-	sed -n "$((last+1)),${n}p" "$BOARD_FILE"
-hooks/board-tail.sh	7dda-4c35-a762	1	V	-	awk -v a="@${seat} " 'index($0, a) || index($0, "@ALL ")'
-hooks/board-tail.sh	7dda-4c35-a762	2	V	-	tail -3
-hooks/board-tail.sh	7dda-4c35-a762	3	V	-	cut -c1-300

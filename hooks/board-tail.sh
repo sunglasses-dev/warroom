@@ -24,4 +24,5 @@ echo "[BOARD] $new new line(s) since your last read. Read them with: bash $(prin
 # the lines that name this seat: a view of the board, last in the script and followed by nothing that is written. A board with
 # no such line is not an error (awk, unlike grep, exits 0 on no match), so a failing stage here is a real read error.
 set -o pipefail
-sed -n "$((last+1)),${n}p" "$BOARD_FILE" | awk -v a="@${seat} " 'index($0, a) || index($0, "@ALL ")' | tail -3 | cut -c1-300
+sed -n "$((last+1)),${n}p" "$BOARD_FILE" | awk -v a="@${seat} " 'index($0, a) || index($0, "@ALL ")' | tail -3 | cut -c1-300 || { echo "board-tail: could not show the lines that name $seat" >&2; exit 1; }
+exit 0

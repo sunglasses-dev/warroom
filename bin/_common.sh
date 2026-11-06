@@ -431,14 +431,29 @@ wr_append() {
 }
 # Process identity = a pid plus the time its process started (ps lstart, C locale, blanks squeezed; resolution one second).
 # The job ledger, the seat registry, the idle guard and the waiter hook all judge a recorded process with wr_proc.
+# ONE implementation of "what ps says about when a process started", used by wr_started and by wr_proc (the same source text is
+# handed to Python in both): ps is read as bytes and decoded strictly as ASCII, so a NUL or any other non-ASCII byte is refused
+# (bash $( ) would drop a NUL without a word); blanks are squeezed to single spaces; the result must be one start time such as
+# "Mon Nov 2 10:00:00 2026" (weekday and month names, day 1-31, hour 0-23, minute and second 0-59, a four-digit year).
+# start_of(pid) returns that text, or None when ps failed or printed anything else.
+_WR_PYSTART='import re, subprocess
+_RE = re.compile(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}")
+def start_of(pid):
+    try: r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError: return None
+    if r.returncode != 0: return None
+    try: text = r.stdout.decode("ascii").rstrip("\n")
+    except UnicodeDecodeError: return None
+    out = " ".join(w for w in text.split(" ") if w)
+    return out if _RE.fullmatch(out) else None'
 # wr_started PID: print the start time of PID; exit 1 (nothing printed) when it cannot be read.
 wr_started() {
-  _wr_st=$( set -o pipefail; { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; } 8>&- 9>&- ) || return 1   # no lock copy in ps; a stage that fails voids the output
+  _wr_st=$(LC_ALL=C python3 -I -S -c "$_WR_PYSTART"$'\n''import sys
+try: s = start_of(int(sys.argv[1]))
+except ValueError: s = None
+if s is None: sys.exit(1)
+print(s)' "$1" 2>/dev/null 8>&- 9>&-) || return 1     # no lock copy in the helper; a failed read prints nothing
   [ -n "$_wr_st" ] || return 1
-  # one start time such as "Mon Nov 2 10:00:00 2026": weekday and month names, day 1-31, hour 0-23, minute and second 0-59, a
-  # four-digit year (the same rule wr_proc applies, written once more in Python there); anything else is a failed read
-  _wr_re='^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}$'
-  [[ $_wr_st =~ $_wr_re ]] || return 1
   printf '%s\n' "$_wr_st"
 }
 # wr_rowproc PID STARTED COLS: judge a recorded row. Like wr_proc, except that a row of five or more columns whose start
@@ -462,7 +477,7 @@ wr_proc() {
   # a pid that is not a plain positive number is not a process that was seen to be gone: unknown, never dead
   case "$1" in ''|*[!0-9]*|?????????????*) echo unknown; return 0 ;; esac
   [ "$((10#$1))" -gt 0 ] || { echo unknown; return 0; }       # pid 0 would mean the whole process group
-  _wr_pp=$(LC_ALL=C python3 -I -S -c 'import os, re, subprocess, sys
+  _wr_pp=$(LC_ALL=C python3 -I -S -c "$_WR_PYSTART"$'\n''import os, sys
 pid = int(sys.argv[1])
 def state():
     try: os.kill(pid, 0)
@@ -471,12 +486,8 @@ def state():
     return "alive"
 a = state()
 if a != "alive" or len(sys.argv) < 3: print(a); sys.exit(0)
-try: r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-except OSError: r = None
-text = r.stdout.decode("utf-8", "replace").rstrip("\n") if r is not None and r.returncode == 0 else ""
-out = " ".join(w for w in text.split(" ") if w)
-# ps prints one start time such as "Mon Nov  2 10:00:00 2026"; anything else is a failed read, not a different process
-if re.fullmatch(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}", out): print("alive " + out); sys.exit(0)
+out = start_of(pid)
+if out is not None: print("alive " + out); sys.exit(0)
 print("dead" if state() == "dead" else "unknown")' "$1" ${2:+x}) || return 1
   case "$_wr_pp" in
     dead|unknown|alive) echo "$_wr_pp"; return 0 ;;

@@ -1822,17 +1822,18 @@ fx_pr1() { # process words: a pid that is not a plain positive number and a star
   pa_setup; mkdir -p "$PAW/shim"
   _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md bash -c '. "$1/_common.sh"; echo "a:$(wr_proc invalid) b:$(wr_proc "") c:$(wr_proc 0) d:$(wr_proc 12abc "x") e:$(wr_proc 12345678901234 "x") f:$(wr_proc -5)"' _ "$PB" 2>&1)
   [ "$_t1" = "a:unknown b:unknown c:unknown d:unknown e:unknown f:unknown" ] || { PA_WHY="PR1: odd pids: '$_t1'"; return 1; }
-  # ONE table of start times that are not a start time, fed through wr_proc and wr_started alike (the rule is written twice, in bash
-  # and in Python); then the edges of the good ones, which both accept
+  # ONE table of start times that are not a start time, fed through wr_proc and wr_started alike (both hand the same Python source
+  # to the interpreter: one reader); a NUL or a non-ASCII byte in what ps prints is refused too (bash $( ) would drop the NUL and
+  # accept the rest); then the edges of the good ones, which both accept, in the form recorded long ago (blanks squeezed)
   for _ps in 'garbage' 'Mon Nov  2 10:00:00 2026 extra' 'Mon Nov  2 10:00:00' 'Mon Nov  2 10:00:00 2026\nMon Nov  2 10:00:00 2026' \
              'Mon Nov  2 24:00:00 2026' 'Mon Nov  2 25:00:00 2026' 'Mon Nov  2 10:60:00 2026' 'Mon Nov  2 10:00:60 2026' \
              'Mon Nov  0 10:00:00 2026' 'Mon Nov 32 10:00:00 2026' 'Mon Nov 99 10:00:00 2026' 'Mon Foo  2 10:00:00 2026' \
-             'Xyz Nov  2 10:00:00 2026' 'Mon Nov  2 10:00:00 26'; do
+             'Xyz Nov  2 10:00:00 2026' 'Mon Nov  2 10:00:00 26' 'Mon Nov  2 10:00:00 2026\000' 'Mon Nov  2 10:00:00 2026\303\251'; do
     printf '#!/bin/sh\nprintf "%s\\n"\nexit 0\n' "$_ps" > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
     _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; echo "proc:$(wr_proc $$ "Mon Nov  2 10:00:00 2026")"; o=$(wr_started $$); echo "started rc=$?"' _ "$PB" 2>&1)
     case "$_t1" in *"proc:unknown"*"started rc=1"*) ;; *) PA_WHY="PR1: a ps that prints '$_ps' and succeeds: '$_t1' (want unknown, and no start time)"; return 1 ;; esac
   done
-  for _ps in 'Sun Dec 31 23:59:59 2026' 'Thu Jan  1 00:00:00 2026' 'Mon Nov  2 10:00:00 2026' 'Sat Feb 29 12:30:45 2028'; do
+  for _ps in 'Sun Dec 31 23:59:59 2026' 'Thu Jan  1 00:00:00 2026' 'Mon Nov  2 10:00:00 2026' 'Sat Feb 29 12:30:45 2028' 'Fri Nov  6 07:30:42 2026'; do
     _norm=$(printf '%s' "$_ps" | tr -s ' ')
     printf '#!/bin/sh\nprintf "%s\\n"\nexit 0\n' "$_ps" > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
     _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; echo "proc:$(wr_proc $$ "$2")"; o=$(wr_started $$); echo "started rc=$? out=[$o]"' _ "$PB" "$_norm" 2>&1)
@@ -1865,6 +1866,80 @@ STUB
   # a second check with a working post: the failed row now goes, the live row (its pid is gone by now) is judged alone
   pa_exec WARROOM_DIR="$PW" bash "$PB/pids.sh" check
   [ "$(grep -c "job 'pk-a'" "$PW/board.md")" = 1 ] && [ ! -s "$PW/pids.tsv" ] || { PA_WHY="PK1: second check: wake for pk-a $(grep -c "job 'pk-a'" "$PW/board.md") time(s), ledger '$(cut -f1 "$PW/pids.tsv" | tr '\n' ' ')'"; return 1; }
+}
+fx_pk2() { # the job check keeps every row byte for byte: an old three-column row gains no column, and when nothing was delivered the ledger is not rewritten at all
+  pa_setup; pa_w; [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  mkdir -p "$PAW/cp"; cp -R "$PB" "$PAW/cp/bin"
+  cat > "$PAW/cp/bin/board.sh" <<STUB
+#!/bin/bash
+[ -e "$PAW/allfail" ] && exit 1
+case "\$*" in *"job 'pk-a'"*) exit 1 ;; esac
+exec "$PB/board.sh" "\$@"
+STUB
+  chmod +x "$PAW/cp/bin/board.sh"
+  sleep 0 & _d1=$!; sleep 0 & _d2=$!; wait "$_d1" "$_d2"
+  sleep 30 & _al=$!
+  : > "$PW/board.md"
+  # part 1: two old three-column rows, every post fails: same bytes, same file (no rewrite), nothing left behind
+  printf 'pk-a\t%s\tW1\npk-b\t%s\tW1\n' "$_d1" "$_d2" > "$PW/pids.tsv"; cp "$PW/pids.tsv" "$PAW/led0"; _i0=$(ls -i "$PW/pids.tsv" | cut -d' ' -f1)
+  : > "$PAW/allfail"
+  pa_exec WARROOM_DIR="$PW" bash "$PAW/cp/bin/pids.sh" check; _rc=$PA_RC; _o=$PA_OUT
+  [ "$_rc" = 0 ] || { kill "$_al" 2>/dev/null; PA_WHY="PK2: check ended $_rc: '$_o'"; return 1; }
+  cmp -s "$PAW/led0" "$PW/pids.tsv" || { kill "$_al" 2>/dev/null; PA_WHY="PK2: the ledger changed although no post was delivered: $(tr '\t' '~' < "$PW/pids.tsv" | tr '\n' '|')"; return 1; }
+  [ "$(ls -i "$PW/pids.tsv" | cut -d' ' -f1)" = "$_i0" ] || { kill "$_al" 2>/dev/null; PA_WHY="PK2: the ledger was replaced although no post was delivered"; return 1; }
+  [ "$(printf '%s\n' "$_o" | grep -c 'could not post the wake')" = 2 ] || { kill "$_al" 2>/dev/null; PA_WHY="PK2: the two failed posts were not both said: '$_o'"; return 1; }
+  [ "$(find "$PW" -name '.wrtmp.*' | wc -l | tr -d ' ')" = 0 ] || { kill "$_al" 2>/dev/null; PA_WHY="PK2: a temp file was left"; return 1; }
+  # part 2: one delivered, one failed, one live (all three-column): exactly the failed and the live row remain, as they were written
+  rm -f "$PAW/allfail"; printf 'pk-a\t%s\tW1\npk-b\t%s\tW1\npk-c\t%s\tW1\n' "$_d1" "$_d2" "$_al" > "$PW/pids.tsv"
+  printf 'pk-a\t%s\tW1\npk-c\t%s\tW1\n' "$_d1" "$_al" > "$PAW/led1"
+  pa_exec WARROOM_DIR="$PW" bash "$PAW/cp/bin/pids.sh" check; _rc=$PA_RC; _o=$PA_OUT
+  kill "$_al" 2>/dev/null; wait "$_al" 2>/dev/null
+  [ "$_rc" = 0 ] || { PA_WHY="PK2: second check ended $_rc: '$_o'"; return 1; }
+  cmp -s "$PAW/led1" "$PW/pids.tsv" || { PA_WHY="PK2: the ledger is '$(tr '\t' '~' < "$PW/pids.tsv" | tr '\n' '|')' (want the failed and the live row, unchanged)"; return 1; }
+}
+pa_hooklint() { # TREE: every hook ends on an explicit exit 0 or 1; no shell statement of a hook or of a library it sources exits with anything else
+  # (comments and Python's sys.exit are not statements); the only exit 2 left in a library are the two bin-only arms in _common.sh
+  _hs='(^[[:space:]]*|[;&|{][[:space:]]*|(then|else|do)[[:space:]]+)exit([[:space:]]+[^[:space:];}&|)]+)?'
+  for _f in "$1"/hooks/*.sh; do
+    _code=$(grep -v '^[[:space:]]*#' "$_f" | grep -v '^[[:space:]]*$'); _last=$(printf '%s\n' "$_code" | tail -1)
+    case "$_last" in 'exit 0'|'exit 1') ;; *) PA_WHY="${_f##*/}: the last line is '$_last', not an explicit exit 0 or 1"; return 1 ;; esac
+    printf '%s\n' "$_code" | grep -q 'wr_seat_arg' && { PA_WHY="${_f##*/} calls wr_seat_arg (it exits 2)"; return 1; }
+    grep -q '^WR_CONFIG_EXIT=1$' "$_f" || { PA_WHY="${_f##*/} does not set WR_CONFIG_EXIT=1"; return 1; }
+  done
+  for _f in "$1"/hooks/*.sh "$1"/bin/_cursor.sh "$1"/bin/_config.sh "$1"/bin/_common.sh; do
+    _ex=$(grep -v '^[[:space:]]*#' "$_f" | grep -oE "$_hs" | sed -E 's/^.*exit/exit/; s/[[:space:]]+/ /g')
+    _odd=$(printf '%s\n' "$_ex" | grep -v '^$' | grep -vxE 'exit 0|exit 1|exit 2' | head -1)
+    [ -z "$_odd" ] || { PA_WHY="${_f##*/}: a shell statement '$_odd' (only a literal exit 0 or 1 is allowed)"; return 1; }
+    _n2=$(printf '%s\n' "$_ex" | grep -c '^exit 2$')
+    case "${_f##*/}" in
+      _common.sh) [ "$_n2" = 2 ] || { PA_WHY="_common.sh: exit 2 must stand exactly twice (wr_seat_arg and the bin-only startup arm), found $_n2"; return 1; } ;;
+      *) [ "$_n2" = 0 ] || { PA_WHY="${_f##*/}: an exit 2 statement"; return 1; } ;;
+    esac
+  done
+}
+fx_hl1() { # hooks never exit 2: a failing stage of the board-tail view exits 1 and says so; a banner that cannot be written exits 1; the static rule holds on the tree
+  pa_setup; pa_w; mkdir -p "$PAW/shim"
+  pa_hooklint "$(dirname "$PB")" || return 1
+  printf 'sid-hl1\tBOSS\t1\t00:00\n' > "$PW/seats.tsv"; printf '[00:00 · W1] @BOSS fresh hl1\n' >> "$PW/board.md"
+  _o=$(printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/board-tail.sh" 2>"$PAW/e"); _rc=$?
+  { [ "$_rc" = 0 ] && case "$_o" in *"fresh hl1"*) true ;; *) false ;; esac; } || { PA_WHY="HL1: the control (no fault) -> rc $_rc '$_o' '$(cat "$PAW/e")'"; return 1; }
+  for _st in sed awk tail cut; do
+    case $_st in sed) _pat='-n*,*p*' ;; awk) _pat='*@ALL*' ;; tail) _pat='-3' ;; cut) _pat='-c1-300' ;; esac
+    printf '#!/bin/sh\ncase "$*" in %s) cat >/dev/null 2>&1; exit 2 ;; esac\nexec %s "$@"\n' "$_pat" "$(command -v $_st)" > "$PAW/shim/$_st"; chmod +x "$PAW/shim/$_st"
+    _o=$(printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash "$PHK/board-tail.sh" 2>"$PAW/e"); _rc=$?
+    rm -f "$PAW/shim/$_st"
+    { [ "$_rc" = 1 ] && grep -q 'board-tail: could not show the lines that name BOSS' "$PAW/e"; } || { PA_WHY="HL1: $_st exits 2 inside the line view -> hook rc $_rc (want 1 and the diagnostic), err '$(cat "$PAW/e")'"; return 1; }
+  done
+  # a banner that cannot be written (stdout closed) is a skip, exit 1: the final exit 0 does not hide it
+  : > "$PW/seats.tsv"
+  printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/waiter-check.sh" >&- 2>"$PAW/e"; _rc=$?
+  [ "$_rc" = 1 ] || { PA_WHY="HL1: waiter-check (not armed) with stdout closed -> rc $_rc (want 1)"; return 1; }
+  printf 'sid-hl1\tBOSS\t999999\t00:00\tMon Nov 2 10:00:00 2026\n' > "$PW/seats.tsv"
+  _o=$(printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/waiter-check.sh" 2>"$PAW/e"); _rc=$?
+  { [ "$_rc" = 0 ] && case "$_o" in *"[WAITER ENDED]"*) true ;; *) false ;; esac; } || { PA_WHY="HL1: waiter-check control (ended waiter) -> rc $_rc '$_o'"; return 1; }
+  printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/waiter-check.sh" >&- 2>"$PAW/e"; _rc=$?
+  [ "$_rc" = 1 ] || { PA_WHY="HL1: waiter-check (ended waiter) with stdout closed -> rc $_rc (want 1)"; return 1; }
+  return 0
 }
 fx_ul1() { # a lock taken by its full path is released by a short spelling even after a failed builtin write (Bash 3.2 leaves text in front of a $( ) result)
   pa_setup
@@ -1903,6 +1978,8 @@ pa_run_fx fx_ep1 "entry paths: every script finds its own folder by a plain expa
 pa_run_fx fx_cf1 "config and cursor bytes: a config that is a folder or a link that leads nowhere is refused, an absent one is the defaults; a cursor holding a NUL byte is refused"
 pa_run_fx fx_pr1 "process words: an odd pid and a ps that prints something that is not a start time are unknown, never dead; a good start time is still compared"
 pa_run_fx fx_pk1 "job check: delivered wakes drop their rows in one rewrite, a failed post keeps exactly that row, the live row stays and the order holds"
+pa_run_fx fx_pk2 "job check: rows are kept byte for byte (an old three-column row gains no column) and a check that delivered nothing does not rewrite the ledger"
+pa_run_fx fx_hl1 "hooks: a failing stage of the board-tail view or a banner that cannot be written exits 1, never 2 and never hidden by the final exit; the static exit rule holds on the tree"
 pa_run_fx fx_ul1 "lock release: a lock taken by its full path is released by a short spelling after a failed builtin write, and can be taken again"
 pa_run_fx fx_ro1 "entry scripts: \$0 = /name looks in /, a folder named -dash works"
 pa_run_fx fx_rd1 "README recovery: one quoted rm -- command for a cursor file that removes exactly that file"
@@ -2063,12 +2140,31 @@ pa_mcopy tempkept; pa_msed tempkept hooks/board-guard.sh 's|^      wr_drop "\$ma
 [ "$(grep -c '^      wr_unlock "\$mark"; echo "board-guard: the post for \$seat failed;' "$MA/tempkept/hooks/board-guard.sh")" = 1 ] && pa_mut tempkept fx_g1 || bad "mutant tempkept: the change was not applied"
 pa_mcopy pkfaildrop; pa_msed pkfaildrop bin/pids.sh 's|^        echo "pids.sh: could not post the wake|        gone="$gone $nrow"; echo "pids.sh: could not post the wake|'
 [ "$(grep -c 'gone="\$gone \$nrow"; echo' "$MA/pkfaildrop/bin/pids.sh")" = 1 ] && pa_mut pkfaildrop fx_pk1 || bad "mutant pkfaildrop: the change was not applied"
-pa_mcopy pknofilter; pa_msed pknofilter bin/pids.sh 's|^    if \[ -n "\$gone" \]; then$|    if false; then|'
-[ "$(grep -c '^    if false; then$' "$MA/pknofilter/bin/pids.sh")" = 1 ] && pa_mut pknofilter fx_pk1 || bad "mutant pknofilter: the change was not applied"
-pa_mcopy lsbashhour; pa_msed lsbashhour bin/_common.sh '/^  _wr_re=/ s#(\[01\]\[0-9\]|2\[0-3\])#[0-9][0-9]#'
-[ "$(diff "$B/_common.sh" "$MA/lsbashhour/bin/_common.sh" | grep -c '^>')" = 1 ] && pa_mut lsbashhour fx_pr1 || bad "mutant lsbashhour: the change was not applied"
-pa_mcopy lspyday; pa_msed lspyday bin/_common.sh '/re.fullmatch/ s#(\[1-9\]|\[12\]\[0-9\]|3\[01\])#[0-9]{1,2}#'
-[ "$(diff "$B/_common.sh" "$MA/lspyday/bin/_common.sh" | grep -c '^>')" = 1 ] && pa_mut lspyday fx_pr1 || bad "mutant lspyday: the change was not applied"
+pa_mcopy pknofilter; pa_msed pknofilter bin/pids.sh "s/ !(NR in g)' / 1' /"
+[ "$(grep -c "g\[a\[i\]\] = 1 } 1' " "$MA/pknofilter/bin/pids.sh")" = 1 ] && pa_mut pknofilter fx_pk1 || bad "mutant pknofilter: the change was not applied"
+pa_mcopy pkskip; pa_msed pkskip bin/pids.sh 's|^    if \[ -z "\$gone" \]; then|    if false; then|'
+[ "$(grep -c '^    if false; then' "$MA/pkskip/bin/pids.sh")" = 1 ] && pa_mut pkskip fx_pk2 || bad "mutant pkskip: the change was not applied"
+pa_mcopy pkprintf; pa_msed pkprintf bin/pids.sh 's|^  printf .%s\\n. "\$1" >> "\$keep" \|\| bad=1|  printf "%s\\t%s\\t%s\\t%s\\n" "$rl" "$rp" "$ro" "$rs" >> "$keep" \|\| bad=1|'
+[ "$(grep -c 'printf "%s\\t%s\\t%s\\t%s\\n" "\$rl"' "$MA/pkprintf/bin/pids.sh")" = 1 ] && pa_mut pkprintf fx_pk2 || bad "mutant pkprintf: the change was not applied"
+pa_mcopy lshour; pa_msed lshour bin/_common.sh '/^_RE = / s#(\[01\]\[0-9\]|2\[0-3\])#[0-9][0-9]#'
+[ "$(diff "$B/_common.sh" "$MA/lshour/bin/_common.sh" | grep -c '^>')" = 1 ] && pa_mut lshour fx_pr1 || bad "mutant lshour: the change was not applied"
+pa_mcopy lsday; pa_msed lsday bin/_common.sh '/^_RE = / s#(\[1-9\]|\[12\]\[0-9\]|3\[01\])#[0-9]{1,2}#'
+[ "$(diff "$B/_common.sh" "$MA/lsday/bin/_common.sh" | grep -c '^>')" = 1 ] && pa_mut lsday fx_pr1 || bad "mutant lsday: the change was not applied"
+pa_mcopy lsnul; pa_msed lsnul bin/_common.sh 's|r.stdout.decode("ascii").rstrip|r.stdout.decode("ascii").replace(chr(0), "").rstrip|'
+[ "$(diff "$B/_common.sh" "$MA/lsnul/bin/_common.sh" | grep -c '^>')" = 1 ] && pa_mut lsnul fx_pr1 || bad "mutant lsnul: the change was not applied"
+pa_mcopy lsraw; pa_msed lsraw bin/_common.sh 's|^    out = " ".join(w for w in text.split(" ") if w)$|    out = text.strip()|'
+[ "$(diff "$B/_common.sh" "$MA/lsraw/bin/_common.sh" | grep -c '^>')" = 1 ] && pa_mut lsraw fx_pr1 || bad "mutant lsraw: the change was not applied"
+pa_mcopy hltail; pa_msed hltail hooks/board-tail.sh 's/ || { echo "board-tail: could not show the lines that name \$seat" >&2; exit 1; }$//'
+[ "$(diff "$ROOT/hooks/board-tail.sh" "$MA/hltail/hooks/board-tail.sh" | grep -c '^>')" = 1 ] && pa_mut hltail fx_hl1 || bad "mutant hltail: the change was not applied"
+pa_mcopy hlwait; pa_msed hlwait hooks/waiter-check.sh 's/^\(echo "\[WAITER NOT ARMED\].*\) || exit 1$/\1/'
+[ "$(diff "$ROOT/hooks/waiter-check.sh" "$MA/hlwait/hooks/waiter-check.sh" | grep -c '^>')" = 1 ] && pa_mut hlwait fx_hl1 || bad "mutant hlwait: the change was not applied"
+pa_mcopy hlexit2; pa_msed hlexit2 hooks/board-tail.sh 's/could not show the lines that name \$seat" >&2; exit 1; }$/could not show the lines that name $seat" >\&2; exit 2; }/'
+[ "$(grep -c 'name \$seat" >&2; exit 2; }' "$MA/hlexit2/hooks/board-tail.sh")" = 1 ] && pa_mut hlexit2 fx_hl1 || bad "mutant hlexit2: the change was not applied"
+pa_mcopy hlnoend; pa_mawk hlnoend hooks/board-tail.sh 'NR>1 && prev=="exit 0" && $0=="" {next} {print}'
+printf '%s\n' "$(sed '$d' "$ROOT/hooks/board-tail.sh")" > "$MA/hlnoend/hooks/board-tail.sh"
+[ "$(tail -1 "$MA/hlnoend/hooks/board-tail.sh" | grep -c '^exit 0$')" = 0 ] && pa_mut hlnoend fx_hl1 || bad "mutant hlnoend: the change was not applied"
+pa_mcopy hlbare; pa_msed hlbare hooks/waiter-check.sh '1,/|| exit 1; exit 0 ;;/ s/|| exit 1; exit 0 ;;/|| exit $?; exit 0 ;;/'
+[ "$(grep -c 'exit \$?; exit 0 ;;' "$MA/hlbare/hooks/waiter-check.sh")" = 1 ] && pa_mut hlbare fx_hl1 || bad "mutant hlbare: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
 pa_mcopy nofiltercheck; pa_msed nofiltercheck bin/waiter.sh 's|new=$(filter < "$chunk_t") \|\||new=$(filter < "$chunk_t" \|\| true) \|\||'
 [ "$(grep -c 'filter < "\$chunk_t" || true' "$MA/nofiltercheck/bin/waiter.sh")" = 1 ] && pa_mut nofiltercheck fx_k11 || bad "mutant nofiltercheck: the change was not applied"
@@ -2082,8 +2178,8 @@ pa_mcopy c1abs; pa_msed c1abs bin/_common.sh 's/^  if \[ "\$_wa" = dir \]; then 
 [ "$(grep -c '^  echo yes$' "$MA/c1abs/bin/_common.sh")" = 1 ] && pa_mut c1abs fx_c1 || bad "mutant c1abs: the change was not applied"
 pa_mcopy t1kill; pa_msed t1kill bin/_common.sh 's/^    except OSError: return "unknown"$/    except OSError: return "dead"/'
 [ "$(grep -c '^    except OSError: return "dead"$' "$MA/t1kill/bin/_common.sh")" = 1 ] && pa_mut t1kill fx_t1 || bad "mutant t1kill: the change was not applied"
-pa_mcopy t1pipe; pa_msed t1pipe bin/_common.sh 's/^  _wr_st=\$( set -o pipefail; /  _wr_st=$( /'
-[ "$(grep -c 'set -o pipefail; { ps -o lstart=' "$MA/t1pipe/bin/_common.sh")" = 0 ] && pa_mut t1pipe fx_t1 || bad "mutant t1pipe: the change was not applied"
+pa_mcopy t1rc; pa_msed t1rc bin/_common.sh '/^    if r.returncode != 0: return None$/d'
+[ "$(grep -c 'r.returncode != 0' "$MA/t1rc/bin/_common.sh")" = 0 ] && pa_mut t1rc fx_t1 || bad "mutant t1rc: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
 pa_mcopy m1poll; pa_msed m1poll bin/waiter.sh 's/^  mine || { echo "\[WAITER\] the seat registry .*$/  mine || replaced/'
 [ "$(grep -c '^  mine || replaced$' "$MA/m1poll/bin/waiter.sh")" = 1 ] && pa_mut m1poll fx_m1 || bad "mutant m1poll: the change was not applied"

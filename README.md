@@ -39,6 +39,8 @@ git clone https://github.com/sunglasses-dev/warroom warroom && cd warroom
 
 Take care with the edit. On Claude Code 2.1.318 we saw this, in a fresh session: a settings file that is not valid JSON is reported as not loaded, and nothing in it is in effect, hooks and permission rules included; one hook entry whose command is a number is skipped and the rest of the file stays in effect. Other mistakes were not tried. Whether a session that is already open picks up the change was not checked either: if the banner in Quick start step 3 does not appear, restart the session. Keep the copy until the wake check passes.
 
+A hook ends on an explicit exit status, 0 or 1, both non-blocking (1 means it skipped and said why on stderr); it never exits 2, which would block your prompt. A banner that cannot be written is such a skip.
+
 The hooks apply to every Claude Code session that reads that settings file, including sessions in other projects. Each session you want left alone opts out on its own with `waiter.sh NONE <session id>`.
 
 `warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else. `$WARROOM_ENV` must be an absolute path.
