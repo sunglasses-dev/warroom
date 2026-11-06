@@ -310,7 +310,7 @@ PY
 cmd1=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hooks"]["SessionStart"][0]["hooks"][0]["command"])' "$T/i17/settings.json")
 hout=$(printf '{"session_id": "sid-i17"}' | sh -c "$cmd1" 2>&1)
 case "$hout" in *"[WAITER NOT ARMED]"*) ok "the printed SessionStart command runs from a clone path with a space" ;; *) bad "INSTALL.md SessionStart command output: $hout" ;; esac
-pc=$(grep '^python3 -c' "$D"); printf '{"a": 1}\n' > "$T/i17/good.json"; printf '{"a": \n' > "$T/i17/broken.json"
+pc=$(grep '^python3 -I -S -c' "$D"); printf '{"a": 1}\n' > "$T/i17/good.json"; printf '{"a": \n' > "$T/i17/broken.json"
 f="$T/i17/good.json" sh -c "$pc" >/dev/null 2>&1; g=$?; f="$T/i17/broken.json" sh -c "$pc" >/dev/null 2>&1; br=$?
 [ -n "$pc" ] && [ $g = 0 ] && [ $br != 0 ] && [ "$(wc -l < "$D" | tr -d ' ')" -le 60 ] && ok "INSTALL.md parse command: accepts a good file, refuses a broken one; the page is at most 60 lines" || bad "INSTALL.md parse command: good rc $g, broken rc $br"
 
@@ -871,7 +871,7 @@ fx_p2() { # python3 passes the startup check and fails only the hook's JSON pars
   PA_IN='{"session_id": "sid-pa"}'
 }
 fx_p3() { # a json.py planted in the folder the hook runs from is never imported: the hooks start python3 isolated
-  pa_setup; mkdir -p "$PAW/plant"; printf 'open("PWNED", "w").write("ran")\n' > "$PAW/plant/json.py"
+  pa_setup; mkdir -p "$PAW/plant"; printf 'open("PWNED", "w").write("ran")\ndef load(f):\n    return {"session_id": "sid-pa"}\n' > "$PAW/plant/json.py"
   PA_CWD="$PAW/plant"
   for h in waiter-check board-tail; do
     pa_pass WARROOM_DIR="$PAW/p3" "$PHK/$h.sh" || { PA_CWD=""; return 1; }

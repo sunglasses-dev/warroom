@@ -36,7 +36,7 @@ First run the check in step 4 on the file as it is: if it fails, stop and repair
 
 4. **Check the file.** On Claude Code 2.1.318 we saw two things, each in a fresh session: a settings file that is not valid JSON is reported as not loaded and nothing in it is in effect, permission rules included; one hook entry whose command is a number is skipped and the rest of the file stays in effect. Nothing else was tried. This command checks JSON and the shape of `"hooks"` (an object of lists of groups, each group holding a `"hooks"` list), not that Claude Code runs the hooks; step 5 does that:
 ```
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); h=d.get("hooks",{}) if isinstance(d,dict) else None; ok=isinstance(h,dict) and all(isinstance(g,list) and all(isinstance(x,dict) and isinstance(x.get("hooks"),list) for x in g) for g in h.values()); sys.exit(0 if ok else "hooks: wrong shape, repair first")' "$f" && echo parses
+python3 -I -S -c 'import json,sys; d=json.load(open(sys.argv[1])); h=d.get("hooks",{}) if isinstance(d,dict) else None; ok=isinstance(h,dict) and all(isinstance(g,list) and all(isinstance(x,dict) and isinstance(x.get("hooks"),list) for x in g) for g in h.values()); sys.exit(0 if ok else "hooks: wrong shape, repair first")' "$f" && echo parses
 ```
 Compare the file with your copy: `diff "$f".before-warroom-* "$f"` (skip this if step 3 made no copy; with several copies, name one instead of the `*`). Keep the copy until step 5 passes. To go back, copy it over the file: `cp "$b" "$f"` with the name step 3 printed.
 
