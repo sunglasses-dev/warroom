@@ -647,9 +647,11 @@ PB="$B"; PHK="$ROOT/hooks"; PA_IN='{"session_id": "sid-pa"}'; PA_WHY=""; PA_SKIP
 pa_setup() { PAW=$(cd -P "$(mktemp -d "$T/paw.XXXXXX")" && pwd -P); PAH="$PAW/h"; PAC="$PAW/cfg"; mkdir -p "$PAH" "$PAC" "$PAW/cwd"; }
 pa_snap() { find "$PAW" -print 2>/dev/null | LC_ALL=C sort; }
 pa_mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
-pa_run() { ( cd "${PA_CWD:-$PAW/cwd}" && env HOME="$PAH" CLAUDE_CONFIG_DIR="$PAC" WARROOM_ENV="$PAW/none.env" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0 "$@" ); }
+pa_run() { ( cd "${PA_CWD:-$PAW/cwd}" && env HOME="$PAH" CLAUDE_CONFIG_DIR="$PAC" PYTHONDONTWRITEBYTECODE=1 WARROOM_ENV="$PAW/none.env" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0 "$@" ); }
 pa_exec() { PA_OUT=$(printf '%s' "$PA_IN" | pa_run "$@" 2>&1); PA_RC=$?; }
 pa_pass() { pa_exec "$@"; [ "$PA_RC" = 0 ] || { PA_WHY="rc $PA_RC (want 0): $* -> $(printf '%s' "$PA_OUT" | head -c 160)"; return 1; }; }
+# (pa_run sets PYTHONDONTWRITEBYTECODE=1: the Apple /usr/bin/python3 stub otherwise writes a bytecode cache under $HOME/Library,
+# which is the interpreter creating a file, not a script of ours)
 # pa_want PATTERN RC [ENV=VAL...] CMD [ARGS]: the run ends with RC, says PATTERN, and creates nothing under $PAW
 pa_want() {
   _pat=$1; _wrc=$2; shift 2
@@ -881,6 +883,7 @@ pa_run_fx() { # pa_run_fx FIXTURE "what it shows": ok, a printed skip, or FAIL w
   if "$1"; then if [ -n "$PA_SKIP" ]; then echo "skip $2 ($PA_SKIP)"; else ok "$2${PA_NOTE:+ [$PA_NOTE]}"; fi; else bad "$2: $PA_WHY"; fi
 }
 _TP=$(cd -P "$T" && pwd -P); pa_setup; case "$PAH$PAC" in "$_TP"/*"$_TP"/*) ok "destinations: the fixture HOME and CLAUDE_CONFIG_DIR are under the temp dir" ;; *) bad "destinations: fixture HOME/CLAUDE_CONFIG_DIR are not under $T" ;; esac
+pa_setup; if [ -x /usr/bin/python3 ]; then pa_run /usr/bin/python3 -c 'import json, os, re' >/dev/null 2>&1; [ ! -e "$PAH/Library" ] && ok "interpreter: the system python3, run the way every fixture runs it, leaves nothing under the fixture HOME" || bad "interpreter: the system python3 created $(find "$PAH" -print | head -3 | tr '\n' ' ')"; fi
 pa_run_fx fx_r1 "resolver: the config folder is refused however it is spelled (trailing /, /./, /x/.., a symlink to it)"
 pa_run_fx fx_r2 "resolver: an absent nested run folder is made after the checks, and the board is exactly under it (also through a symlink spelling)"
 pa_run_fx fx_r3 "resolver: a refused board leaves a fresh run folder and the board's parents uncreated"
