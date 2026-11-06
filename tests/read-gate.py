@@ -2987,6 +2987,13 @@ TREE_CASES.update({
                                                    'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/a.sh" check\n'}), 1, '!ENVELOPE E4'),
     'env_control_trap_action_plain_calls': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'wr_drop \"$a\"; wr_drop \"$b\"' EXIT\n"}), 1, '!ENVELOPE E4'),
     'env_trap_action_exec_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'exec 2>\"$1\"' DEBUG\n"}), 1, 'a trap action holds only plain calls'),
+    # a hook that sources an entry script is outside the envelope and so is everything in its own shell, but a separate entry
+    # script is another process: its own rows stand (the one checked read below is still accepted)
+    'env_hook_failure_leaves_other_processes': (env_tree(**{'bin/_common.sh': ENV_COMMON_CHECKED,
+                                                            'bin/b.sh': ENV_ENTRY + 'y=1\n',
+                                                            'hooks/h.sh': ENV_HOOK + '. "$HERE/../bin/b.sh" || exit 1\n',
+                                                            'bin/a.sh': ENV_ENTRY + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
+                                                1, 'ok=1 '),
     'env_control_high_descriptors': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 9>>"$WR_ROOT/x.lock"\nexec 8>&-\nexec 9>&-\n'}), 1, '!ENVELOPE E3'),
     # a file outside the envelope shares its shell with every file it sources and every file that sources it: no row there stands
     'env_shared_shell_library_fails': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 2>>"$WR_ROOT/log"\n',
