@@ -256,7 +256,8 @@ cmp -s "$R4/.lastwake-W1" "$LD/w4.orig" && [ $r1 = 2 ] && [ $r2 = 2 ] && grep -q
 code="$B/board.sh $B/pids.sh $B/waiter.sh $ROOT/hooks/board-guard.sh"
 sub='\$\([^)]*wr_(lock|unlock|run)|(^|[^|])\| *wr_(lock|unlock|run)'
 ! grep -nE "$sub" $code >/dev/null && ok "lock lint: no lock call inside \$( ) or after a pipe" || bad "lock lint: a lock call runs in a subshell: $(grep -nE "$sub" $code | head -2)"
-! grep -nE '(^|[^0-9&<>])[89]>|>&[89]|<&[89]' $code "$ROOT/tools/"*.sh >/dev/null && ok "lock lint: fds 8 and 9 are used only by _common.sh" || bad "lock lint: another script uses fd 8 or 9"
+_fdl=$(grep -nE '(^|[^0-9&<>])[89]>|>&[89]|<&[89]' $code "$ROOT/tools/"*.sh | grep -v '^[^:]*waiter\.sh:[0-9]*: *exec 8>&- 9>&-; echo "\[WAITER ERROR\] ')
+[ -z "$_fdl" ] && [ "$(grep -c '^ *exec 8>&- 9>&-; echo "\[WAITER ERROR\] ' "$B/waiter.sh")" = 4 ] && ok "lock lint: fds 8 and 9 are used only by _common.sh, plus the 4 terminal delivery-error branches of waiter.sh that close them" || bad "lock lint: another script uses fd 8 or 9: $_fdl"
 grep -q "stop every session, waiter and job using this run directory" "$ROOT/README.md" && ok "lock lint: the README carries the upgrade step" || bad "lock lint: README upgrade step missing"
 
 # 8 simultaneous posts to a missing board through board.sh all land, no error (5 rounds)
@@ -526,14 +527,14 @@ printf '.cursor-W1\n' > "$FAILMV_FILE"; c0=$(cksum < "$R9/.cursor-W1"); s0=$(cks
 WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/waiter.sh" W1 sid-f3 > /dev/null 2> "$T/f3.err" & WP=$!; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?; e=$(cat "$T/f3.err")
 [ $r = 1 ] && case "$e" in *"could not save the position of seat W1"*) true ;; *) false ;; esac && [ "$(cksum < "$R9/.cursor-W1")" = "$c0" ] \
   && [ "$(cksum < "$R9/seats.tsv")" = "$s0" ] && ! grep -q sid-f3 "$R9/seats.tsv" && [ -z "$(find "$R9" -name '*tmp*')" ] && ok "arm: a failed position write says so, exits 1, keeps the cursor and the registry" || bad "arm with a failed position write: rc $r, '$e'"
-# 41c. a wake whose position cannot be saved is not reported as delivered: exit 1, the lines are printed, the cursor is kept,
-#      and the next arm delivers them again
+# 41c. a wake whose position cannot be saved is not reported as delivered: exit 1, the header and lines were printed first, the cursor
+#      is kept, the fresh gap marker stays (nothing is unlinked to undo a failure), and the next arm delivers them again
 rm -f "$FAILMV_FILE" "$R9/.lastwake-W1"; WARROOM_DIR="$R9" PATH="$SH41:$PATH" "$B/waiter.sh" W1 sid-f4 > "$T/f4.out" 2> "$T/f4.err" & WP=$!; sleep 2
 c0=$(cksum < "$R9/.cursor-W1"); printf '.cursor-W1\n' > "$FAILMV_FILE"
 WARROOM_DIR="$R9" "$B/board.sh" post BOSS "@W1 ACTION: delivery fault line" >/dev/null
 wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
-[ $r = 1 ] && grep -q "delivery fault line" "$T/f4.out" && grep -q "NOT marked as delivered" "$T/f4.err" && ! grep -q '^\[WAKE' "$T/f4.out" && [ "$(cksum < "$R9/.cursor-W1")" = "$c0" ] && [ ! -e "$R9/.lastwake-W1" ] \
-  && ok "wake: a position that cannot be saved is not a delivery (exit 1, lines printed, cursor and gap marker kept)" || bad "wake with a failed position write: rc $r, out '$(cat "$T/f4.out")', err '$(cat "$T/f4.err")'"
+[ $r = 1 ] && grep -q "delivery fault line" "$T/f4.out" && grep -q "printed but not marked" "$T/f4.err" && grep -q '^\[WAKE' "$T/f4.out" && [ "$(cksum < "$R9/.cursor-W1")" = "$c0" ] && [ -e "$R9/.lastwake-W1" ] \
+  && ok "wake: a position that cannot be saved is not a delivery (exit 1; header and lines printed first, cursor kept, the fresh gap marker kept and not unlinked)" || bad "wake with a failed position write: rc $r, out '$(cat "$T/f4.out")', err '$(cat "$T/f4.err")'"
 rm -f "$FAILMV_FILE"; WARROOM_DIR="$R9" "$B/waiter.sh" W1 sid-f5 > "$T/f5.out" 2>/dev/null & WP=$!
 if wait_exit $WP 8 && grep -q "delivery fault line" "$T/f5.out"; then ok "wake: after the fault is gone the same line is delivered again, once"; else bad "wake after a failed save: the line was lost"; fi
 kill $WP 2>/dev/null; wait $WP 2>/dev/null
@@ -560,8 +561,8 @@ WARROOM_DIR="$DA" "$B/waiter.sh" W1 sid-t1 > "$T/t1.out" 2> "$T/t1.err" & WP=$!;
 c0=$(cksum < "$DA/.cursor-W1"); ln -s "$T/no-such-dir/marker" "$DA/.lastwake-W1"
 WARROOM_DIR="$DA" "$B/board.sh" post BOSS "@W1 ACTION: marker fault line" >/dev/null
 wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
-[ $r = 1 ] && grep -q "marker fault line" "$T/t1.out" && grep -q "NOT marked as delivered" "$T/t1.err" && ! grep -q '^\[WAKE' "$T/t1.out" && [ "$(cksum < "$DA/.cursor-W1")" = "$c0" ] \
-  && ok "wake: a gap marker that cannot be written is not a delivery (exit 1, lines printed, position untouched)" || bad "wake with a failed gap marker: rc $r, out '$(cat "$T/t1.out")', err '$(cat "$T/t1.err")'"
+[ $r = 1 ] && grep -q "marker fault line" "$T/t1.out" && grep -q "printed but not marked" "$T/t1.err" && grep -q "gap marker" "$T/t1.err" && grep -q '^\[WAKE' "$T/t1.out" && [ "$(cksum < "$DA/.cursor-W1")" = "$c0" ] \
+  && ok "wake: a gap marker that cannot be written is not a delivery (exit 1, header and lines printed first, position untouched)" || bad "wake with a failed gap marker: rc $r, out '$(cat "$T/t1.out")', err '$(cat "$T/t1.err")'"
 rm -f "$DA/.lastwake-W1"; WARROOM_DIR="$DA" "$B/waiter.sh" W1 sid-t2 > "$T/t2.out" 2>/dev/null & WP=$!
 if wait_exit $WP 8 && grep -q "marker fault line" "$T/t2.out"; then ok "wake: after the marker fault is gone the same line is delivered again"; else bad "wake after a failed marker write: the line was lost"; fi
 kill $WP 2>/dev/null; wait $WP 2>/dev/null
@@ -932,7 +933,7 @@ if [ "$PS_OK" = 1 ]; then
 # L1 delivery: a dangling link at the gap marker; the wake is not a delivery (exit 1), the position stays, the target is not created
 l51_base; WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-l1d > "$L51/o" 2>"$L51/e" & WP=$!; sleep 2; ln -s "$L51/tgt/.lastwake-W1" "$L51/w/.lastwake-W1"; c0=$(cksum < "$L51/w/.cursor-W1")
 WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: link marker line" >/dev/null; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
-[ $r = 1 ] && l51_clean .lastwake-W1 && [ "$(cksum < "$L51/w/.cursor-W1")" = "$c0" ] && grep -q "link marker line" "$L51/o" && grep -q "NOT marked as delivered" "$L51/e" \
+[ $r = 1 ] && l51_clean .lastwake-W1 && [ "$(cksum < "$L51/w/.cursor-W1")" = "$c0" ] && grep -q "link marker line" "$L51/o" && grep -q "printed but not marked" "$L51/e" \
   && ok "links: a dangling link at the gap marker is refused at the delivery (exit 1, position kept, nothing created behind it)" || bad "links: marker link: rc $r, '$(cat "$L51/e")'"
 else echo "skip links: dangling link at the gap marker (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # L1b: wr_replace called directly on a symlinked FINAL (wr_lock would refuse first in the full path): refused, target absent, the recorded temp removed
@@ -945,7 +946,7 @@ l51_base; printf 'outside file\n' > "$L51/out"; ln "$L51/out" "$L51/w/.lastwake-
 WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-l2 > "$L51/o" 2>"$L51/e" & WP=$!; sleep 2; WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: hard link marker line" >/dev/null
 wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?
 m1=$(stat -c %Y "$L51/out" 2>/dev/null || stat -f %m "$L51/out"); n1=$(stat -c %h "$L51/out" 2>/dev/null || stat -f %l "$L51/out")
-[ $r = 1 ] && grep -q "NOT marked as delivered" "$L51/e" && [ "$(cksum < "$L51/out")" = "$o0" ] && [ "$m1" = "$m0" ] && [ "$n1" = 2 ] \
+[ $r = 1 ] && grep -q "printed but not marked" "$L51/e" && [ "$(cksum < "$L51/out")" = "$o0" ] && [ "$m1" = "$m0" ] && [ "$n1" = 2 ] \
   && ok "links: a gap marker with a second name is refused at the delivery (exit 1); the other name keeps its bytes, time and link count" || bad "links: marker hard link: rc $r, mtime $m0->$m1, links $n1, '$(cat "$L51/e")'"
 # L3: FINAL becomes a directory AFTER the precheck (a python3 shim does it right before the real os.replace): exit 1, the directory stays empty
 # (an "mv" replace would move the temp INTO it)
@@ -1153,12 +1154,12 @@ for st in "snapshot 1" "chunk 2"; do
   [ "$said" -ge 1 ] && grep -q "wf $name line" "$L51/o" && ro_hit \
     && ok "write fault: an unwritable $name in the waiter poll consumes nothing (said so, fault reached) and the same line is delivered by the next poll" || bad "write fault waiter $name: said $said, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")'"
 done
-# waiter delivery: the position write (call 3 of the run: snapshot, chunk, cursor) fails: exit 1 'NOT marked as delivered', lines printed, position kept, re-arm gets them again
+# waiter delivery: the position write (call 3 of the run: snapshot, chunk, cursor) fails: exit 1 'printed but not marked', header and lines printed, position kept, re-arm gets them again
 f2_base; rm -f "$L51/w/seats.tsv"; WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/waiter.sh" W1 sid-pd > "$L51/o" 2>"$L51/e" & WP=$!; sleep 2
 ro_set "3 waiter.sh"; WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: wf deliver line" >/dev/null; wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null; r=$?; ro_clear
 WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-pd2 > "$L51/o2" 2>/dev/null & WP=$!; sleep 3; kill $WP 2>/dev/null; wait $WP 2>/dev/null
-[ $r = 1 ] && ro_hit && grep -q "NOT marked as delivered" "$L51/e" && grep -q "wf deliver line" "$L51/o" && grep -q "wf deliver line" "$L51/o2" \
-  && ok "write fault: a failed position write at delivery exits 1 'NOT marked as delivered' (line printed, fault reached) and the re-arm delivers it again" || bad "write fault waiter delivery: rc $r, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")', retry '$(cat "$L51/o2")'"
+[ $r = 1 ] && ro_hit && grep -q "printed but not marked" "$L51/e" && grep -q "^\[WAKE" "$L51/o" && grep -q "wf deliver line" "$L51/o" && grep -q "wf deliver line" "$L51/o2" \
+  && ok "write fault: a failed position write at delivery exits 1 'printed but not marked' (header and line printed, fault reached) and the re-arm delivers it again" || bad "write fault waiter delivery: rc $r, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")', retry '$(cat "$L51/o2")'"
 else echo "skip write faults in the waiter: cursor, snapshot, chunk, delivery position (no ps start times, or running as root)"; fi
 
 # 59. mutants of the checks above: each is a copy of bin/ and hooks/ in $T with ONE change (asserted by grep -c); the copy
@@ -1168,9 +1169,10 @@ pa_mcopy() { rm -rf "${MA:?}/${1:?}"; mkdir -p "$MA/$1"; cp -R "$B" "$MA/$1/bin"
 pa_msed() { _mt=$(sed "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }   # rewritten in place: the exec bit stays
 pa_mawk() { _mt=$(awk "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }
 pa_mut() { # pa_mut NAME FIXTURE: the pristine copy passes FIXTURE, the mutated copy fails it
-  _n=$1; _fx=$2; PA_WHY=""
+  _n=$1; _fx=$2; PA_WHY=""; PA_SKIP=""
   PB="$MA/pristine/bin"; PHK="$MA/pristine/hooks"
   if ! "$_fx"; then bad "mutant $_n: the unmutated copy fails $_fx: $PA_WHY"; PB="$B"; PHK="$ROOT/hooks"; return; fi
+  if [ -n "$PA_SKIP" ]; then echo "skip mutant $_n ($PA_SKIP)"; PB="$B"; PHK="$ROOT/hooks"; return; fi
   PB="$MA/$_n/bin"; PHK="$MA/$_n/hooks"; PA_WHY=""
   if "$_fx"; then bad "mutant $_n survived: $_fx passed"; else ok "mutant $_n: $_fx fails at: $(printf '%s' "$PA_WHY" | head -c 150)"; fi
   PB="$B"; PHK="$ROOT/hooks"
@@ -1419,10 +1421,69 @@ pa_run_fx fx_w2 "wc: a failed line count in the prompt hook (its own, or inside 
 pa_run_fx fx_w3 "wc: a failed line count while arming (its own, or inside the cursor check) exits 1 'not armed', registry and cursor byte-equal"
 pa_run_fx fx_w4 "wc: a failed line count in the waiter poll consumes nothing (stays up, says so) and the line is delivered when the fault ends"
 pa_run_fx fx_w5 "wc: a failed line count of a post's text exits 1 and posts nothing"
+pa_probe_bin() { # PBP := a copy of PB whose 4 delivery error branches first try an independent nonblocking flock on the cursor lock file and append free/HELD to $WR_PROBE (so the lock is checked BEFORE the diagnostic, not only after the process has exited). The probe is a python3 script that writes the file itself: a shell echo here would flush the text a failed builtin write left in the buffer into the probe file
+  rm -rf "$PAW.pt"; mkdir -p "$PAW.pt" && cp -R "$PB" "$PAW.pt/bin" && cp -R "$PHK" "$PAW.pt/hooks" || return 1
+  printf '%s\n' 'import fcntl, sys' 'f = open(sys.argv[1])' 'try:' '    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)' '    r = "free"' 'except OSError:' '    r = "HELD"' 'open(sys.argv[2], "a").write(r + "\n")' > "$PAW.pt/probe.py" || return 1
+  python3 -I - "$PAW.pt/bin/waiter.sh" "$PAW.pt/probe.py" <<'PYE' || return 1
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+probe = 'python3 -I "%s" "$CUR.flock" "$WR_PROBE" 2>/dev/null; ' % sys.argv[2]
+s, n = re.subn(r'echo "\[WAITER ERROR\] (?=could not write the |the lines were printed but not marked)', lambda m: probe + m.group(0), s)
+if n != 4: sys.exit(1)
+open(p, 'w').write(s)
+PYE
+  PBP="$PAW.pt/bin"; rm -f "$PAW/probe"
+}
+pa_probe_free() { [ "$(cat "$PAW/probe" 2>/dev/null)" = free ] || { PA_WHY="$1: the cursor lock was still held when the error was reported (probe says '$(cat "$PAW/probe" 2>/dev/null)', want exactly one 'free')"; return 1; }; }
+fx_k1() { # delivery, the position cannot be saved (the 3rd temp of the run, the cursor, is unwritable): the header and the line are printed FIRST, exit 1 'printed but not marked', the cursor is as it was, and the fresh gap marker stays (nothing is unlinked)
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  [ "$(id -u)" != 0 ] || { PA_SKIP="running as root: mode 444 does not block root"; return 0; }
+  pa_b2; rm -f "$PW/seats.tsv"; pa_probe_bin || { PA_WHY="K1: no probe copy"; return 1; }
+  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" PATH="$SHRO:$PATH" "$PBP/waiter.sh" W1 sid-k > "$PAW/o" 2>"$PAW/e" & _wp=$!; sleep 2; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"
+  ro_set "3 waiter.sh"; pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: k1 line" >/dev/null
+  wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k" 2>/dev/null; ro_clear; PA_WHY="K1: the waiter did not exit"; return 1; }; wait $_wp 2>/dev/null; _r=$?; _hit=n; ro_hit && _hit=y; ro_clear
+  _hdr=$(grep -n '^\[WAKE' "$PAW/o" | head -1 | cut -d: -f1); _ln=$(grep -n 'k1 line' "$PAW/o" | head -1 | cut -d: -f1)
+  { [ "$_r" = 1 ] && [ "$_hit" = y ] && [ -n "$_hdr" ] && [ -n "$_ln" ] && [ "$_hdr" -lt "$_ln" ] && grep -q "printed but not marked" "$PAW/e" && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ] && [ -e "$PW/.lastwake-W1" ]; } || { PA_WHY="K1: rc $_r, fault reached $_hit, header line '$_hdr', line '$_ln', err '$(tail -c 300 "$PAW/e")', cursor $([ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ] && echo kept || echo CHANGED), marker $([ -e "$PW/.lastwake-W1" ] && echo kept || echo GONE)"; return 1; }
+  pa_probe_free K1
+}
+fx_k2() { # delivery, the header cannot be written (stdout closed): exit 1 naming the header (K2b: the header step ran, not only the payload step), nothing saved, the next arm delivers the line
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; rm -f "$PW/seats.tsv"; pa_probe_bin || { PA_WHY="K2: no probe copy"; return 1; }
+  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" "$PBP/waiter.sh" W1 sid-k >&- 2>"$PAW/e" & _wp=$!; sleep 2; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"
+  pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: k2 line" >/dev/null
+  wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k" 2>/dev/null; PA_WHY="K2: the waiter did not exit"; return 1; }; wait $_wp 2>/dev/null; _r=$?
+  { [ "$_r" = 1 ] && grep -q "could not write the wake header" "$PAW/e" && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ] && [ ! -e "$PW/.lastwake-W1" ]; } || { PA_WHY="K2: rc $_r, err '$(cat "$PAW/e")', cursor $([ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ] && echo kept || echo CHANGED), marker $([ -e "$PW/.lastwake-W1" ] && echo WRITTEN || echo absent)"; return 1; }
+  pa_probe_free K2 || return 1
+  pa_run WARROOM_DIR="$PW" "$PB/waiter.sh" W1 sid-k2b > "$PAW/o2" 2>/dev/null & _wp=$!; sleep 3; kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k2b" 2>/dev/null
+  grep -q "k2 line" "$PAW/o2" || { PA_WHY="K2: the re-arm did not deliver the line again"; return 1; }
+}
+fx_k5() { # delivery, the reader closes after the header while the payload is larger than a pipe buffer: the write fails (trap '' PIPE, not death by SIGPIPE): exit 1 naming the lines, nothing saved
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; rm -f "$PW/seats.tsv"; _ff="$PAW/ff"; mkfifo "$_ff"; pa_probe_bin || { PA_WHY="K5: no probe copy"; return 1; }
+  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" "$PBP/waiter.sh" W1 sid-k > "$_ff" 2>"$PAW/e" & _wp=$!
+  ( IFS= read -r _h; sleep 1 ) < "$_ff" & _rp=$!; sleep 2; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"
+  _pad=$(printf 'x%.0s' $(seq 1 3000)); for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do printf '[00:00 · BOSS] @W1 ACTION: k5 %s %s\n' "$_i" "$_pad"; done >> "$PW/board.md"
+  wait_exit $_wp 12 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k" 2>/dev/null; PA_WHY="K5: the waiter did not exit"; return 1; }; wait $_wp 2>/dev/null; _r=$?; wait $_rp 2>/dev/null
+  { [ "$_r" = 1 ] && grep -q "could not write the lines" "$PAW/e" && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ] && [ ! -e "$PW/.lastwake-W1" ]; } || { PA_WHY="K5: rc $_r (141 = killed by SIGPIPE), err '$(cat "$PAW/e" | head -c 200)'"; return 1; }
+  pa_probe_free K5
+}
+fx_k3() { # delivery, the gap marker cannot be written (a dangling link at the marker name): the header and the line are printed first, exit 1 'printed but not marked', the position is untouched, and the cursor lock is released before the diagnostic
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_b2; rm -f "$PW/seats.tsv"; pa_probe_bin || { PA_WHY="K3: no probe copy"; return 1; }
+  pa_run WARROOM_DIR="$PW" WR_PROBE="$PAW/probe" "$PBP/waiter.sh" W1 sid-k > "$PAW/o" 2>"$PAW/e" & _wp=$!; sleep 2; _c0=$(cksum < "$PW/.cursor-W1"); rm -f "$PW/.lastwake-W1"; ln -s "$PAW/no-such-dir/marker" "$PW/.lastwake-W1"
+  pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: k3 line" >/dev/null
+  wait_exit $_wp 8 || { kill $_wp 2>/dev/null; wait $_wp 2>/dev/null; pkill -f "waiter.sh W1 sid-k" 2>/dev/null; PA_WHY="K3: the waiter did not exit"; return 1; }; wait $_wp 2>/dev/null; _r=$?
+  { [ "$_r" = 1 ] && grep -q '^\[WAKE' "$PAW/o" && grep -q "k3 line" "$PAW/o" && grep -q "printed but not marked" "$PAW/e" && grep -q "gap marker" "$PAW/e" && [ "$(cksum < "$PW/.cursor-W1")" = "$_c0" ]; } || { PA_WHY="K3: rc $_r, out '$(head -c 200 "$PAW/o")', err '$(head -c 300 "$PAW/e")'"; return 1; }
+  pa_probe_free K3
+}
+pa_run_fx fx_k1 "delivery: the header and the lines are printed first; a position that cannot be saved exits 1 'printed but not marked', keeps the cursor and the fresh gap marker"
+pa_run_fx fx_k2 "delivery: a header that cannot be written exits 1 naming the header, saves nothing, and the next arm delivers the line"
+pa_run_fx fx_k3 "delivery: a gap marker that cannot be written exits 1 'printed but not marked' after the header and the line, keeps the position, and has released the cursor lock before it reports"
+pa_run_fx fx_k5 "delivery: a closed reader during a large payload is a failed write (exit 1 naming the lines), not death by SIGPIPE; nothing saved"
 # --- B mutants ---
 if [ "$PS_OK" = 1 ]; then
-pa_mcopy touchlast; pa_msed touchlast bin/waiter.sh 's|if ! { wr_stamp "\$LAST" \&\& {|if ! { touch "$LAST" \&\& {|'
-[ "$(grep -c 'touch "\$LAST" &&' "$MA/touchlast/bin/waiter.sh")" = 1 ] && [ "$(grep -c 'wr_stamp "\$LAST"' "$MA/touchlast/bin/waiter.sh")" = 0 ] && pa_mut touchlast fx_l1 || bad "mutant touchlast: the change was not applied"
+pa_mcopy touchlast; pa_msed touchlast bin/waiter.sh 's|if ! wr_stamp "\$LAST"; then|if ! touch "$LAST"; then|'
+[ "$(grep -c 'if ! touch "\$LAST"; then' "$MA/touchlast/bin/waiter.sh")" = 1 ] && [ "$(grep -c 'wr_stamp "\$LAST"' "$MA/touchlast/bin/waiter.sh")" = 0 ] && pa_mut touchlast fx_l1 || bad "mutant touchlast: the change was not applied"
 pa_mcopy legacytemp; pa_msed legacytemp bin/_common.sh 's|^  _wr_tn=$(mktemp "$(dirname "$1")/.wrtmp.XXXXXXXX" 2>/dev/null) \|\| return 1$|  _wr_tn="$1.tmp.$$"; : > "$_wr_tn" \|\| return 1|'
 [ "$(grep -c '_wr_tn="\$1.tmp.\$\$"; : > "\$_wr_tn"' "$MA/legacytemp/bin/_common.sh")" = 1 ] && [ "$(grep -c 'mktemp "\$(dirname' "$MA/legacytemp/bin/_common.sh")" = 0 ] && pa_mut legacytemp fx_l4 || bad "mutant legacytemp: the change was not applied"
 pa_mcopy mvreplace; pa_msed mvreplace bin/_common.sh "s#^  _wr_re=\$(python3 -I -S -c 'import os,sys; os.replace(sys.argv\[1\], sys.argv\[2\])' \"\$_wr_rt\" \"\$_wr_rf\" 2>&1) \&\& return 0#  _wr_re=\$(mv -f -- \"\$_wr_rt\" \"\$_wr_rf\" 2>\&1) \&\& return 0#"
@@ -1476,6 +1537,26 @@ pa_mcopy warm; pa_msed warm bin/waiter.sh 's/^\(  base=\$(wr_lines "\$BOARD_FILE
 pa_mcopy wpoll; pa_msed wpoll bin/waiter.sh 's/^\(  n=\$(wr_lines "\$BOARD_FILE")\) || {.*$/\1 || true/'
 [ "$(grep -c '^  n=\$(wr_lines "\$BOARD_FILE") || true$' "$MA/wpoll/bin/waiter.sh")" = 1 ] && pa_mut wpoll fx_w4 || bad "mutant wpoll: the change was not applied"
 else echo "skip mutants warm, wpoll (ps cannot read process start times here, so a waiter cannot arm)"; fi
+
+# --- delivery-order mutants ---
+if [ "$PS_OK" = 1 ]; then
+pa_mcopy krm; pa_msed krm bin/waiter.sh 's|if ! wr_cursor_put "\$CUR" "\$gen" "\$base" "\$lastck"; then|if ! wr_cursor_put "$CUR" "$gen" "$base" "$lastck"; then rm -f "$LAST";|'
+[ "$(grep -c 'then rm -f "\$LAST";' "$MA/krm/bin/waiter.sh")" = 1 ] && pa_mut krm fx_k1 || bad "mutant krm: the change was not applied"
+# F3 root control (id double): K1's own root skip reaches pa_mut as a skip, counted as neither ok nor FAIL
+mkdir -p "$T/idroot" && printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exec /usr/bin/id "$@"' > "$T/idroot/id" && chmod +x "$T/idroot/id"
+_f0=$fail; _p0=$PATH; PATH="$T/idroot:$PATH"; pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0
+[ "$fail" = "$_f0" ] && grep -q '^skip mutant krm (running as root: mode 444 does not block root)$' "$T/skiproot.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skiproot.out")" = 0 ] && ok "mutants: K1 under an id double that reports root skips; pa_mut prints the skip and counts neither ok nor FAIL" || bad "mutants: K1 root-skip control: $(cat "$T/skiproot.out")"
+pa_mcopy khdr; pa_msed khdr bin/waiter.sh 's|^    if ! echo \(".*"\); then$|    echo \1; if false; then|'
+[ "$(grep -c 'if false; then$' "$MA/khdr/bin/waiter.sh")" = 1 ] && pa_mut khdr fx_k2 || bad "mutant khdr: the change was not applied"
+pa_mcopy knotrap; pa_msed knotrap bin/waiter.sh "s|^trap '' PIPE.*\$|:|"
+[ "$(grep -c "^trap '' PIPE" "$MA/knotrap/bin/waiter.sh")" = 0 ] && pa_mut knotrap fx_k5 || bad "mutant knotrap: the change was not applied"
+pa_mcopy knounlock; pa_msed knounlock bin/waiter.sh 's|exec 8>&- 9>&-; ||'
+[ "$(grep -c 'exec 8>&- 9>&-' "$MA/knounlock/bin/waiter.sh")" = 0 ] && for _kf in fx_k1 fx_k2 fx_k3 fx_k5; do pa_mut knounlock $_kf; done || bad "mutant knounlock: the change was not applied"
+else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process start times here, so a waiter cannot arm)"; fi
+# a fixture that skips (root, no ps) makes pa_mut print a skip and count nothing: no ok, no FAIL
+fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }
+_f0=$fail; pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
+[ "$fail" = "$_f0" ] && grep -q '^skip mutant skipctl (control: this fixture always skips)$' "$T/skipctl.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skipctl.out")" = 0 ] && ok "mutants: a skipped fixture makes pa_mut print a skip and count neither ok nor FAIL" || bad "mutants: pa_mut on a skipped fixture: $(cat "$T/skipctl.out")"
 
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
