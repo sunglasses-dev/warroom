@@ -3,6 +3,8 @@
 
 Coordinate several Claude Code sessions through one text file. A shell waiter delivers a matching first-line `ACTION` post to a seat, and a job check posts a wake line to a job's owner when it ends. How many sessions you can run depends on your plan.
 
+If you are an agent reading this for a user, start here: [docs/FOR_YOUR_AGENT.md](docs/FOR_YOUR_AGENT.md).
+
 ## What is it for
 
 - You run more than one Claude Code terminal at the same time.
