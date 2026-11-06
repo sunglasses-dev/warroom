@@ -20,7 +20,7 @@ n=$(wr_lines "$BOARD_FILE") || { echo "board-tail: could not count the lines of 
 last=$(wr_cursor_get "$W/.anchor-$seat" "$BOARD_FILE" 31536000) || { echo "board-tail: could not read the read position of seat $seat (or checksum the board $BOARD_FILE): no count shown" >&2; exit 1; }
 [ "$last" = none ] && last=0
 new=$((n-last)); [ "$new" -gt 0 ] || exit 0
-echo "[BOARD] $new new line(s) since your last read. Read them with: bash $(printf '%q' "$(cd "$HERE/../bin" && pwd)/board.sh") tail $seat"
+echo "[BOARD] $new new line(s) since your last read. Read them with: bash $(printf '%q' "$(cd "$HERE/../bin" && pwd)/board.sh") tail $seat" || exit 1
 # the lines that name this seat: a view of the board, last in the script and followed by nothing that is written. A board with
 # no such line is not an error (awk, unlike grep, exits 0 on no match), so a failing stage here is a real read error.
 set -o pipefail

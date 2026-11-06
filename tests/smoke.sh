@@ -1930,6 +1930,12 @@ fx_hl1() { # hooks never exit 2: a failing stage of the board-tail view exits 1 
     rm -f "$PAW/shim/$_st"
     { [ "$_rc" = 1 ] && grep -q 'board-tail: could not show the lines that name BOSS' "$PAW/e"; } || { PA_WHY="HL1: $_st exits 2 inside the line view -> hook rc $_rc (want 1 and the diagnostic), err '$(cat "$PAW/e")'"; return 1; }
   done
+  # the [BOARD] banner of the board-tail hook itself, with no line that names the seat (the view then writes nothing): stdout closed is exit 1
+  printf 'sid-hl1\tBOSS\t1\t00:00\n' > "$PW/seats.tsv"; printf '[00:00 · W1] nothing for anyone here\n' > "$PW/board.md"
+  _o=$(printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/board-tail.sh" 2>"$PAW/e"); _rc=$?
+  { [ "$_rc" = 0 ] && case "$_o" in "[BOARD] 1 new line(s)"*) true ;; *) false ;; esac; } || { PA_WHY="HL1: the banner control (no line names the seat) -> rc $_rc '$_o' '$(cat "$PAW/e")'"; return 1; }
+  printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/board-tail.sh" >&- 2>"$PAW/e"; _rc=$?
+  [ "$_rc" = 1 ] || { PA_WHY="HL1: board-tail banner with stdout closed and no line naming the seat -> rc $_rc (want 1)"; return 1; }
   # a banner that cannot be written (stdout closed) is a skip, exit 1: the final exit 0 does not hide it
   : > "$PW/seats.tsv"
   printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/waiter-check.sh" >&- 2>"$PAW/e"; _rc=$?
@@ -2156,6 +2162,8 @@ pa_mcopy lsraw; pa_msed lsraw bin/_common.sh 's|^    out = " ".join(w for w in t
 [ "$(diff "$B/_common.sh" "$MA/lsraw/bin/_common.sh" | grep -c '^>')" = 1 ] && pa_mut lsraw fx_pr1 || bad "mutant lsraw: the change was not applied"
 pa_mcopy hltail; pa_msed hltail hooks/board-tail.sh 's/ || { echo "board-tail: could not show the lines that name \$seat" >&2; exit 1; }$//'
 [ "$(diff "$ROOT/hooks/board-tail.sh" "$MA/hltail/hooks/board-tail.sh" | grep -c '^>')" = 1 ] && pa_mut hltail fx_hl1 || bad "mutant hltail: the change was not applied"
+pa_mcopy hlbanner; pa_msed hlbanner hooks/board-tail.sh 's/\(board\.sh") tail \$seat"\) || exit 1$/\1/'
+[ "$(grep -c 'board.sh") tail \$seat" || exit 1' "$MA/hlbanner/hooks/board-tail.sh")" = 0 ] && pa_mut hlbanner fx_hl1 || bad "mutant hlbanner: the change was not applied"
 pa_mcopy hlwait; pa_msed hlwait hooks/waiter-check.sh 's/^\(echo "\[WAITER NOT ARMED\].*\) || exit 1$/\1/'
 [ "$(diff "$ROOT/hooks/waiter-check.sh" "$MA/hlwait/hooks/waiter-check.sh" | grep -c '^>')" = 1 ] && pa_mut hlwait fx_hl1 || bad "mutant hlwait: the change was not applied"
 pa_mcopy hlexit2; pa_msed hlexit2 hooks/board-tail.sh 's/could not show the lines that name \$seat" >&2; exit 1; }$/could not show the lines that name $seat" >\&2; exit 2; }/'

@@ -29,7 +29,7 @@ hooks/board-guard.sh	d612-2a20-368d	0	M	-	cat >/dev/null 2>&1
 hooks/board-guard.sh	4733-ce47-337d	0	K	-	$(printf '\t')
 hooks/board-tail.sh	a964-c11f-2307	0	H	-	sed -n -- '2,3p' "$0"
 hooks/board-tail.sh	a964-c11f-2307	1	H	-	sed 's/^# \{0,1\}//'
-hooks/board-tail.sh	20ba-b462-056e	0	D	-	$(printf '%q' "$(cd "$HERE/../bin" && pwd)/board.sh")
+hooks/board-tail.sh	dae8-2f44-9ca0	0	D	-	$(printf '%q' "$(cd "$HERE/../bin" && pwd)/board.sh")
 hooks/board-tail.sh	0933-3c0a-906b	0	D	-	$(cd "$HERE/../bin" && pwd)
 hooks/waiter-check.sh	219d-0d3d-ccbc	0	H	-	sed -n -- '2,6p' "$0"
 hooks/waiter-check.sh	219d-0d3d-ccbc	1	H	-	sed 's/^# \{0,1\}//'

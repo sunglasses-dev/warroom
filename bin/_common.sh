@@ -432,7 +432,7 @@ wr_append() {
 # Process identity = a pid plus the time its process started (ps lstart, C locale, blanks squeezed; resolution one second).
 # The job ledger, the seat registry, the idle guard and the waiter hook all judge a recorded process with wr_proc.
 # ONE implementation of "what ps says about when a process started", used by wr_started and by wr_proc (the same source text is
-# handed to Python in both): ps is read as bytes and decoded strictly as ASCII, so a NUL or any other non-ASCII byte is refused
+# handed to Python in both): ps is read as bytes and decoded strictly as ASCII (a non-ASCII byte is refused; a NUL is ASCII and is refused by the full match below)
 # (bash $( ) would drop a NUL without a word); blanks are squeezed to single spaces; the result must be one start time such as
 # "Mon Nov 2 10:00:00 2026" (weekday and month names, day 1-31, hour 0-23, minute and second 0-59, a four-digit year).
 # start_of(pid) returns that text, or None when ps failed or printed anything else.
