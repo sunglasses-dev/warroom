@@ -80,7 +80,12 @@ filter() {
       if (author != seat && (index(rest, "@" seat " ACTION:") == 1 || index(rest, "@ALL ACTION:") == 1)) print
     }'
 }
-mine()     { grep -q "${TAB}${SEAT}${TAB}$$${TAB}" "$REG" 2>/dev/null; }    # still the seat's waiter?
+# mine: is this still the seat's waiter? 0 yes, 1 no (the registry was read and holds no such row), 2 cannot tell (the
+# registry could not be read). Only 1 ends the waiter; on 2 it keeps its place and looks again.
+mine() {
+  _mr=$(awk -F'\t' -v s="$SEAT" -v p="$$" '$2 == s && $3 == p && NF >= 4 { f = 1 } END { print f + 0 }' "$REG" 2>/dev/null) || return 2
+  case "$_mr" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
+}
 replaced() { echo "[WAITER REPLACED] a newer waiter holds seat $SEAT; this one stops (exit 3). It is not a wake." >&2; exit 3; }
 # the two scratch files of one poll are temps this waiter made (snap_t, chunk_t): removed after each poll and at exit; a temp
 # that cannot be removed is reported with its path
@@ -89,7 +94,8 @@ pend=""
 trap '' PIPE      # a closed reader gives a failed write (checked below), not a silent death by SIGPIPE
 while :; do
   sleep "$POLL"
-  mine || replaced
+  mine; _m=$?                                    # poll check
+  if [ "$_m" = 1 ]; then replaced; elif [ "$_m" != 0 ]; then echo "[WAITER] the seat registry $REG could not be read; staying up, will look again" >&2; continue; fi
   "$HERE/pids.sh" check >/dev/null || true      # stdout dropped, stderr kept: a ledger lock failure is shown
   g2=$(wr_generation "$BOARD_FILE") || { echo "[WAITER] could not read the board $BOARD_FILE; nothing consumed, will look again" >&2; continue; }
   n=$(wr_lines "$BOARD_FILE") || { echo "[WAITER] could not count the lines of the board $BOARD_FILE; nothing consumed, will look again" >&2; continue; }
@@ -120,7 +126,8 @@ while :; do
     if [ -e "$LAST" ] && [ $(( $(date +%s) - $(wr_mtime "$LAST") )) -lt "$GAP" ]; then continue; fi
     # Deliver under the cursor lock: recheck ownership and gap, then print header and lines before saving marker and position.
     wr_lock "$CUR" || continue
-    if ! mine; then wr_unlock "$CUR"; replaced; fi
+    mine; _m=$?                                  # delivery check
+    if [ "$_m" = 1 ]; then wr_unlock "$CUR"; replaced; elif [ "$_m" != 0 ]; then wr_unlock "$CUR"; echo "[WAITER] the seat registry $REG could not be read; nothing delivered, will look again" >&2; continue; fi
     if [ -e "$LAST" ] && [ $(( $(date +%s) - $(wr_mtime "$LAST") )) -lt "$GAP" ]; then wr_unlock "$CUR"; continue; fi
     # The wake is printed first and marked after it, each step checked alone: header, lines, gap marker, position.
     # A failed delivery step exits 1 without attempting later delivery steps. Header or payload failure leaves the delivery

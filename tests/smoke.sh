@@ -1313,7 +1313,7 @@ TBL
 }
 fx_t1() { # process judgement: dead only on "no such process" or another start time; a refused kill and a failed or partial ps are unknown
   pa_setup; mkdir -p "$PAW/shim"
-  _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md bash -c '. "$1/_common.sh"; sleep 30 & p=$!; me=$(wr_started "$p") || exit 9; echo "a:$(wr_proc "$p") b:$(wr_proc "$p" "$me") c:$(wr_proc "$p" "not the start") d:$(wr_proc 99999) e:$(wr_proc "$p" "$me" | head -c 0)"; kill "$p"; wait "$p" 2>/dev/null; echo "f:$(wr_proc "$p" "$me")"' _ "$PB" 2>&1)
+  _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md bash -c '. "$1/_common.sh"; sleep 30 & p=$!; me=$(wr_started "$p") || exit 9; echo "a:$(wr_proc "$p") b:$(wr_proc "$p" "$me") c:$(wr_proc "$p" "not the start") d:$(wr_proc 99999)"; kill "$p"; wait "$p" 2>/dev/null; echo "f:$(wr_proc "$p" "$me")"' _ "$PB" 2>&1)
   case "$_t1" in *"a:alive b:alive c:dead d:dead"*"f:dead"*) ;; *) PA_WHY="proc plain states: '$_t1'"; return 1 ;; esac
   if [ "$(id -u)" != 0 ]; then
     _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md bash -c '. "$1/_common.sh"; echo "pid1:$(wr_proc 1) pid1s:$(wr_proc 1 "anything")"' _ "$PB" 2>&1)
@@ -1322,6 +1322,44 @@ fx_t1() { # process judgement: dead only on "no such process" or another start t
   printf '#!/bin/sh\nprintf "Thu Nov"\nexit 1\n' > "$PAW/shim/ps"; chmod +x "$PAW/shim/ps"
   _t1=$(pa_run WARROOM_DIR="$PAW" BOARD=t1.md PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; o=$(wr_started $$); echo "rc=$? out=[$o]"; echo "proc:$(wr_proc $$ "Thu Nov")"' _ "$PB" 2>&1)
   case "$_t1" in *"rc=1 out=[]"*"proc:unknown"*) ;; *) PA_WHY="proc a ps that prints part of a time and fails: '$_t1' (want rc 1 with nothing, and unknown)"; return 1 ;; esac
+}
+fx_m1() { # the seat registry cannot be read: the waiter stays up and delivers nothing (poll check and delivery check), then delivers once it can read; only a registry that is read and lacks the row ends it
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  pa_setup; pa_w; mkdir -p "$PAW/shim"; _aw=$(command -v awk)
+  cat > "$PAW/shim/awk" <<SHIM
+#!/bin/sh
+f="$PAW/regfault"
+if [ -f "\$f" ]; then
+  for a; do last=\$a; done
+  if [ "\$last" = "$PW/seats.tsv" ]; then
+    k=\$(cat "\$f")
+    if [ "\$k" = all ] || { [ "\$k" = locked ] && { [ -e /dev/fd/8 ] || [ -e /dev/fd/9 ]; }; }; then echo hit >> "\$f.hit"; echo "shim: awk refused" >&2; exit 2; fi
+  fi
+fi
+exec $_aw "\$@"
+SHIM
+  chmod +x "$PAW/shim/awk"
+  for _case in poll lock; do
+    _sid="sid-m1$_case"; : > "$PAW/o.$_case"; : > "$PAW/e.$_case"
+    pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 "$_sid" > "$PAW/o.$_case" 2> "$PAW/e.$_case" & _wpa=$!
+    for _ in 1 2 3 4 5 6 7 8; do grep -q "$_sid" "$PW/seats.tsv" 2>/dev/null && break; sleep 1; done
+    _wp=$(awk -F'\t' -v s="$_sid" '$1 == s { print $3 }' "$PW/seats.tsv")
+    [ -n "$_wp" ] || { kill "$_wpa" 2>/dev/null; PA_WHY="M1 ($_case): the waiter did not arm"; return 1; }
+    rm -f "$PAW/regfault.hit"
+    if [ "$_case" = poll ]; then printf 'all\n' > "$PAW/regfault"; else printf 'locked\n' > "$PAW/regfault"; fi   # locked: only a read made while the waiter holds a lock descriptor (the delivery check)
+    _c0=$(cksum < "$PW/.cursor-W1" 2>/dev/null)
+    pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: m1 $_case line" >/dev/null; sleep 4
+    _alive=n; kill -0 "$_wp" 2>/dev/null && _alive=y
+    _hit=n; [ -s "$PAW/regfault.hit" ] && _hit=y
+    _c1=$(cksum < "$PW/.cursor-W1" 2>/dev/null)
+    rm -f "$PAW/regfault"
+    { [ "$_alive" = y ] && [ "$_hit" = y ]; } || { kill "$_wp" 2>/dev/null; wait "$_wpa" 2>/dev/null; PA_WHY="M1 ($_case): with the registry unreadable the waiter alive=$_alive (want y), fault reached=$_hit (want y): $(head -c 200 "$PAW/e.$_case")"; return 1; }
+    grep -q "could not be read" "$PAW/e.$_case" || { kill "$_wp" 2>/dev/null; wait "$_wpa" 2>/dev/null; PA_WHY="M1 ($_case): no line saying the registry could not be read: $(head -c 200 "$PAW/e.$_case")"; return 1; }
+    grep -q "WAITER REPLACED" "$PAW/e.$_case" && { PA_WHY="M1 ($_case): an unreadable registry was treated as replaced"; return 1; }
+    [ -z "$(cat "$PAW/o.$_case")" ] && [ "$_c0" = "$_c1" ] || { kill "$_wp" 2>/dev/null; wait "$_wpa" 2>/dev/null; PA_WHY="M1 ($_case): the wake was delivered or the position moved while the registry was unreadable"; return 1; }
+    wait_exit "$_wpa" 8 || { kill "$_wp" 2>/dev/null; wait "$_wpa" 2>/dev/null; PA_WHY="M1 ($_case): the line was not delivered once the registry could be read"; return 1; }
+    wait "$_wpa" 2>/dev/null; grep -q "m1 $_case line" "$PAW/o.$_case" || { PA_WHY="M1 ($_case): the waiter ended without the line"; return 1; }
+  done
 }
 fx_g2() { # the restore fails: the new mark stays and the hook says so (kills a failed-restore-only "rm")
   pa_setup; pa_w; printf '[00:00 · W1] working\n' > "$PW/board.md"; mkdir -p "$PAW/shim"; _py=$(command -v python3)
@@ -1440,6 +1478,7 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
 }
 pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
 pa_run_fx fx_t1 "process judgement: a gone pid or another start time is dead; a live process of another owner and a ps that fails after printing part of a time are unknown, never dead"
+pa_run_fx fx_m1 "seat registry unreadable: the waiter stays up at the poll check and at the locked delivery check, delivers nothing and keeps its position, then delivers when the registry reads again"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
 pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
 pa_run_fx fx_f9c "F9: a failed generation or prefix checksum in the prompt hook shows no count and says why"
@@ -1603,6 +1642,12 @@ pa_mcopy t1kill; pa_msed t1kill bin/_common.sh 's/^    \*) echo unknown; return 
 [ "$(grep -c '^    \*) echo dead; return 0 ;;$' "$MA/t1kill/bin/_common.sh")" = 1 ] && pa_mut t1kill fx_t1 || bad "mutant t1kill: the change was not applied"
 pa_mcopy t1pipe; pa_msed t1pipe bin/_common.sh 's/^  _wr_st=\$( set -o pipefail; /  _wr_st=$( /'
 [ "$(grep -c 'set -o pipefail; { ps -o lstart=' "$MA/t1pipe/bin/_common.sh")" = 0 ] && pa_mut t1pipe fx_t1 || bad "mutant t1pipe: the change was not applied"
+if [ "$PS_OK" = 1 ]; then
+pa_mcopy m1poll; pa_msed m1poll bin/waiter.sh 's/^  if \[ "\$_m" = 1 \]; then replaced; elif \[ "\$_m" != 0 \]; then \(.*\)$/  if [ "$_m" != 0 ]; then replaced; elif false; then \1/'
+[ "$(grep -c '^  if \[ "\$_m" != 0 \]; then replaced; elif false' "$MA/m1poll/bin/waiter.sh")" = 1 ] && pa_mut m1poll fx_m1 || bad "mutant m1poll: the change was not applied"
+pa_mcopy m1lock; pa_msed m1lock bin/waiter.sh 's/^    if \[ "\$_m" = 1 \]; then wr_unlock "\$CUR"; replaced; elif/    if [ "$_m" != 0 ]; then wr_unlock "$CUR"; replaced; elif/'
+[ "$(grep -c '^    if \[ "\$_m" != 0 \]; then wr_unlock "\$CUR"; replaced; elif' "$MA/m1lock/bin/waiter.sh")" = 1 ] && pa_mut m1lock fx_m1 || bad "mutant m1lock: the change was not applied"
+else echo "skip mutants m1poll and m1lock (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9tail/bin/board.sh")" = 1 ] && pa_mut f9tail fx_f9a || bad "mutant f9tail: the change was not applied"
