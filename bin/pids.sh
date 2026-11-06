@@ -18,6 +18,27 @@ case $0 in */*) _d=${0%/*} ;; *) _d=. ;; esac
 HERE=$(cd -P "$_d" && pwd) || exit 1
 . "$HERE/_common.sh" || exit 1
 P="$W/pids.tsv"; wr_create "$P" || { echo "cannot write the ledger $P" >&2; exit 1; }; TAB="$(printf '\t')"
+# check_row LABEL PID OWNER START: judge one ledger row for the checker. A live job keeps its row; one that cannot be told apart
+# from a reused pid keeps it too and is said (unk); a dead one posts to its owner and keeps the row only if the post failed.
+# It leaves the script (exit 1, ledger unchanged) when a process cannot be judged.
+check_row() {
+  [ -n "$1" ] || return 0
+  st=$(wr_proc "$2" "$4") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: could not judge pid $2 (job '$1'); ledger unchanged" >&2; exit 1; }
+  case "$st" in
+    alive) printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$keep" || bad=1 ;;
+    unknown)          # cannot tell a live job from a reused pid: keep the row, say so, look again
+      printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$keep" || bad=1
+      echo "pids.sh: cannot read the start time of pid $2 (job '$1'): ps failed, so a live job cannot be told from a reused pid; row kept" >&2; unk=1 ;;
+    dead)
+      if wr_run "$HERE/board.sh" post GUARD "@$3 ACTION: job '$1' (pid $2) is no longer running. Read its receipt, then continue or restart it." </dev/null >/dev/null; then
+        :                             # delivered: the row is dropped
+      else
+        printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$keep" || bad=1     # not delivered: keep it, the next check tries again
+      fi ;;
+    *) wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: unexpected answer '$st' for pid $2 (job '$1'); ledger unchanged" >&2; exit 1 ;;
+  esac
+  return 0
+}
 case "${1:-}" in
   add)
     l=${2:?label}; p=${3:?pid}; o=${4:?owner}
@@ -54,23 +75,7 @@ case "${1:-}" in
     # the whole ledger is read first and judged from that copy: a read that fails, at the start or after some rows, posts nothing
     # and removes nothing
     rows=$(wr_registry_read "$P") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: the job ledger $P could not be read; nothing changed" >&2; exit 1; }
-    while IFS="$TAB" read -r l p o s; do
-      [ -n "$l" ] || continue
-      st=$(wr_proc "$p" "$s") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: could not judge pid $p (job '$l'); ledger unchanged" >&2; exit 1; }
-      case "$st" in
-        alive) printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$keep" || bad=1 ;;
-        unknown)          # cannot tell a live job from a reused pid: keep the row, say so, look again
-          printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$keep" || bad=1
-          echo "pids.sh: cannot read the start time of pid $p (job '$l'): ps failed, so a live job cannot be told from a reused pid; row kept" >&2; unk=1 ;;
-        dead)
-          if wr_run "$HERE/board.sh" post GUARD "@$o ACTION: job '$l' (pid $p) is no longer running. Read its receipt, then continue or restart it." </dev/null >/dev/null; then   # wr_run: the post holds no copy of the ledger lock; its stderr is kept
-            :                             # delivered: the row is dropped
-          else
-            printf '%s\t%s\t%s\t%s\n' "$l" "$p" "$o" "$s" >> "$keep" || bad=1     # not delivered: keep it, the next check tries again
-          fi ;;
-        *) wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: unexpected answer '$st' for pid $p (job '$l'); ledger unchanged" >&2; exit 1 ;;
-      esac
-    done <<< "$rows"
+    while IFS="$TAB" read -r l p o s; do check_row "$l" "$p" "$o" "$s"; done <<< "$rows"
     # a failed write to the new ledger means it is incomplete: keep the old one (a wake may then repeat) and say so
     if [ "$bad" = 0 ] && wr_replace "$keep" "$P"; then wr_unlock "$P"; [ "$unk" = 0 ] || exit 3
     else wr_drop "$keep"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; fi ;;

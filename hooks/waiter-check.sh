@@ -15,7 +15,7 @@ IN=$(cat) || { echo "waiter-check: could not read the hook input" >&2; exit 1; }
 SID=$(printf '%s' "$IN" | python3 -I -S -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null) || { echo "waiter-check: python3 could not read the hook input as JSON" >&2; exit 1; }
 [ -n "$SID" ] || exit 0
 BIN=$(cd -P "$HERE/../bin" && pwd) || exit 1
-WAIT=$(printf '%q' "$BIN/waiter.sh")      # printed commands are shell-quoted: a path may hold spaces
+WAIT=$(printf '%q' "$BIN/waiter.sh") || { echo "waiter-check: cannot quote the path of the waiter" >&2; exit 1; }      # printed commands are shell-quoted: a path may hold spaces
 REG="$W/seats.tsv"; wr_create "$REG" || { echo "waiter-check: cannot create the seat registry $REG" >&2; exit 1; }
 # the registry is read whole before anything is judged: a failed read is said so and never turned into "not armed" or a stale row
 rows=$(wr_registry_read "$REG") || { echo "waiter-check: the seat registry $REG could not be read, so this hook cannot tell whether your waiter runs" >&2; exit 1; }

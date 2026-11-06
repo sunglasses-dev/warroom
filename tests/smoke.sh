@@ -226,12 +226,12 @@ if [ "$(id -u)" != 0 ]; then
   mkdir "$LD/ro"; chmod 555 "$LD/ro"; o=$(lk 'wr_lock "$1"; echo "rc=$? s8=[$_WR_SLOT8] fd8=$([ -e /dev/fd/8 ] && echo open || echo closed)"' "$LD/ro/f"); chmod 755 "$LD/ro"
   case "$o" in *"could not open lock file"*"rc=1 s8=[] fd8=closed"*) ok "lock: an unwritable folder prints its own line, leaves the slot empty and fd 8 closed" ;; *) bad "lock: open failure: $o" ;; esac
 fi
-mkdir -p "$LD/py3" "$LD/nopy"; printf '#!/bin/sh\necho "stub helper says no" >&2\nexit 3\n' > "$LD/py3/python3"; chmod +x "$LD/py3/python3"
+mkdir -p "$LD/py3" "$LD/nopy"; printf '#!/bin/sh\ncase "$*" in *fcntl*) echo "stub helper says no" >&2; exit 3 ;; esac\nexec %s "$@"\n' "$(command -v python3)" > "$LD/py3/python3"; chmod +x "$LD/py3/python3"
 for t in dirname basename stat sed head cat; do p=$(command -v $t) && ln -s "$p" "$LD/nopy/$t"; done
 o=$(lk 'PATH="$2:$PATH"; wr_lock "$1"; echo "rc=$? s8=[$_WR_SLOT8] fd8=$([ -e /dev/fd/8 ] && echo open || echo closed)"' "$LD/a" "$LD/py3")
 case "$o" in *"lock helper failed"*"stub helper says no"*"exit 3"*"rc=1 s8=[] fd8=closed"*) ok "lock: a helper that exits 3 prints its own line and cleans up" ;; *) bad "lock: helper exit 3: $o" ;; esac
 o=$(lk 'PATH="$2"; wr_lock "$1"; echo "rc=$? s8=[$_WR_SLOT8] fd8=$([ -e /dev/fd/8 ] && echo open || echo closed)"' "$LD/a" "$LD/nopy")
-case "$o" in *"lock helper failed"*"exit 127"*"rc=1 s8=[] fd8=closed"*) ok "lock: python3 missing from PATH prints its own line and cleans up" ;; *) bad "lock: helper missing: $o" ;; esac
+case "$o" in *"could not open lock file"*"cannot be examined"*"rc=1 s8=[] fd8=closed"*) ok "lock: python3 missing from PATH prints its own line, opens nothing and leaves the slot empty" ;; *) bad "lock: helper missing: $o" ;; esac
 
 # caller_timeout_visibility: outer and nested lock failures, one caller at a time, no unlocked change
 R3="$LD/run3"; mkdir -p "$R3"
@@ -270,8 +270,8 @@ cmp -s "$R4/.lastwake-W1" "$LD/w4.orig" && [ $r1 = 2 ] && [ $r2 = 2 ] && grep -q
 code="$B/board.sh $B/pids.sh $B/waiter.sh $ROOT/hooks/board-guard.sh"
 sub='\$\([^)]*wr_(lock|unlock|run)|(^|[^|])\| *wr_(lock|unlock|run)'
 ! grep -nE "$sub" $code >/dev/null && ok "lock lint: no lock call inside \$( ) or after a pipe" || bad "lock lint: a lock call runs in a subshell: $(grep -nE "$sub" $code | head -2)"
-_fdl=$(grep -nE '(^|[^0-9&<>])[89]>|>&[89]|<&[89]' $code "$ROOT/tools/"*.sh | grep -v '^[^:]*waiter\.sh:[0-9]*: *exec 8>&- 9>&-; echo "\[WAITER ERROR\] ')
-[ -z "$_fdl" ] && [ "$(grep -c '^ *exec 8>&- 9>&-; echo "\[WAITER ERROR\] ' "$B/waiter.sh")" = 4 ] && ok "lock lint: fds 8 and 9 are used only by _common.sh, plus the 4 terminal delivery-error branches of waiter.sh that close them" || bad "lock lint: another script uses fd 8 or 9: $_fdl"
+_fdl=$(grep -nE '(^|[^0-9&<>])[89]>|>&[89]|<&[89]' $code "$ROOT/tools/"*.sh)
+[ -z "$_fdl" ] && [ "$(grep -c '^ *wr_unlock "\$CUR"; echo "\[WAITER ERROR\] ' "$B/waiter.sh")" = 4 ] && ok "lock lint: fds 8 and 9 are used only by _common.sh; the 4 terminal delivery-error branches of waiter.sh release the cursor lock through wr_unlock" || bad "lock lint: another script uses fd 8 or 9: $_fdl"
 grep -q "stop every session, waiter and job using this run directory" "$ROOT/README.md" && ok "lock lint: the README carries the upgrade step" || bad "lock lint: README upgrade step missing"
 
 # 8 simultaneous posts to a missing board through board.sh all land, no error (5 rounds)
@@ -637,7 +637,7 @@ SHIM
 chmod +x "$SH42/mkdir"
 RACE="$T/race-ship"; WARROOM_DIR="$T/race-run1" BOARD="$RACE/board.md" RACE_DIR="$RACE" PATH="$SH42:$PATH" bash -c '. "$1"' _ "$C" >/dev/null 2>&1
 [ "$(cat "$RACE/board.md" 2>/dev/null)" = "first writer line" ] && ok "bootstrap: a line written between the check and the create survives (forced race)" || bad "bootstrap race: the board holds '$(cat "$RACE/board.md" 2>/dev/null)'"
-MUT="$T/mut42"; mkdir -p "$MUT"; cp -R "$B" "$MUT/bin"; sed 's/^  wr_create "\$BOARD_FILE" ||/  : > "$BOARD_FILE" ||/' "$B/_common.sh" > "$MUT/bin/_common.sh.new"; mv "$MUT/bin/_common.sh.new" "$MUT/bin/_common.sh"
+MUT="$T/mut42"; mkdir -p "$MUT"; cp -R "$B" "$MUT/bin"; sed 's/^    wr_create "\$BOARD_FILE" ||/  : > "$BOARD_FILE" ||/' "$B/_common.sh" > "$MUT/bin/_common.sh.new"; mv "$MUT/bin/_common.sh.new" "$MUT/bin/_common.sh"
 RACE="$T/race-mut"; WARROOM_DIR="$T/race-run2" BOARD="$RACE/board.md" RACE_DIR="$RACE" PATH="$SH42:$PATH" bash -c '. "$1"' _ "$MUT/bin/_common.sh" >/dev/null 2>&1
 [ -z "$(cat "$RACE/board.md" 2>/dev/null)" ] && ok "bootstrap control: the old truncating create loses that line, so the fixture catches it" || bad "bootstrap control: the old form did not lose the line; the fixture is blind"
 unset FAILMV_FILE
@@ -1207,21 +1207,21 @@ pa_mut() { # pa_mut NAME FIXTURE: the pristine copy passes FIXTURE, the mutated 
 pa_mcopy pristine
 pa_mcopy nofold; pa_msed nofold bin/_common.sh "s/^wr_fold() { printf '%s' \"\$1\" | tr 'A-Z' 'a-z'; }/wr_fold() { printf '%s' \"\$1\"; }/"
 [ "$(grep -c "^wr_fold() { printf '%s' \"\$1\"; }" "$MA/nofold/bin/_common.sh")" = 1 ] && [ "$(grep -c "tr 'A-Z' 'a-z'" "$MA/nofold/bin/_common.sh")" = 0 ] && pa_mut nofold fx_n1 || bad "mutant nofold: the change was not applied"
-pa_mcopy late; pa_mawk late bin/_common.sh '/^wr_validate_paths$/ {next} {print} /^readonly W BOARD_FILE/ {print "mkdir -p \"$W\" 2>/dev/null; wr_validate_paths"}'
-[ "$(grep -c 'wr_validate_paths$' "$MA/late/bin/_common.sh")" = 1 ] && [ "$(grep -n '; wr_validate_paths$' "$MA/late/bin/_common.sh" | cut -d: -f1)" -lt "$(grep -n '^mkdir -p "\$W" 2>/dev/null$' "$MA/late/bin/_common.sh" | cut -d: -f1)" ] && pa_mut late fx_r3 || bad "mutant late: the change was not applied"
-pa_mcopy lexical; pa_msed lexical bin/_common.sh 's|^  _ra=$(cd -P -- "$_rs" 2>/dev/null \&\& pwd -P) \|\| {|  _ra=$_rs \|\| {|'
-[ "$(grep -c '^  _ra=\$_rs || {' "$MA/lexical/bin/_common.sh")" = 1 ] && [ "$(grep -c 'cd -P -- "\$_rs"' "$MA/lexical/bin/_common.sh")" = 0 ] && pa_mut lexical fx_n3 || bad "mutant lexical: the change was not applied"
+pa_mcopy late; pa_mawk late bin/_common.sh '/^  wr_validate_paths \|\| return 2$/ {next} {print} /^  mkdir -p "\$W" 2>\/dev\/null$/ {print "  wr_validate_paths || return 2"}'
+[ "$(grep -c '^  wr_validate_paths || return 2$' "$MA/late/bin/_common.sh")" = 1 ] && [ "$(grep -n '^  wr_validate_paths || return 2$' "$MA/late/bin/_common.sh" | cut -d: -f1)" -gt "$(grep -n '^  mkdir -p "\$W" 2>/dev/null$' "$MA/late/bin/_common.sh" | cut -d: -f1)" ] && pa_mut late fx_r3 || bad "mutant late: the change was not applied"
+pa_mcopy lexical; pa_msed lexical bin/_common.sh 's|^  _ra=$(cd -P -- "$_rs" 2>/dev/null \&\& pwd -P) \|\| return 1$|  _ra=$_rs|'
+[ "$(grep -c '^  _ra=\$_rs$' "$MA/lexical/bin/_common.sh")" = 1 ] && [ "$(grep -c 'cd -P -- "\$_rs"' "$MA/lexical/bin/_common.sh")" = 0 ] && pa_mut lexical fx_n3 || bad "mutant lexical: the change was not applied"
 pa_mcopy nod6; pa_mawk nod6 bin/_common.sh '/^  # D6 /{skip=1} /^  return 0$/{skip=0} !skip{print}'
 [ "$(grep -c '# D6 ' "$MA/nod6/bin/_common.sh")" = 0 ] && [ "$(grep -c 'wr_ef_reserved "\$WR_C_SEL"' "$MA/nod6/bin/_common.sh")" = 0 ] && pa_mut nod6 fx_n6a || bad "mutant nod6: the change was not applied"
 pa_mcopy tailseat; pa_msed tailseat bin/board.sh 's|^    wr_seat_arg "\$seat"; a=|    a=|'
 [ "$(grep -c 'wr_seat_arg' "$MA/tailseat/bin/board.sh")" = 0 ] && [ "$(grep -c '^    a="\$W/.anchor-\$seat"' "$MA/tailseat/bin/board.sh")" = 1 ] && pa_mut tailseat fx_s1 || bad "mutant tailseat: the change was not applied"
-pa_mcopy nopython; pa_msed nopython bin/_common.sh 's|^wr_need_python$|:|'
-[ "$(grep -c '^wr_need_python$' "$MA/nopython/bin/_common.sh")" = 0 ] && [ "$(grep -c '^:$' "$MA/nopython/bin/_common.sh")" = 1 ] && pa_mut nopython fx_p1 || bad "mutant nopython: the change was not applied"
+pa_mcopy nopython; pa_msed nopython bin/_common.sh 's/^  wr_need_python || return 2$/  :/'
+[ "$(grep -c '^  wr_need_python || return 2$' "$MA/nopython/bin/_common.sh")" = 0 ] && [ "$(grep -c '^  :$' "$MA/nopython/bin/_common.sh")" = 1 ] && pa_mut nopython fx_p1 || bad "mutant nopython: the change was not applied"
 pa_mcopy noiso; pa_msed noiso hooks/waiter-check.sh 's|python3 -I -S -c |python3 -c |'; pa_msed noiso hooks/board-tail.sh 's|python3 -I -S -c |python3 -c |'
 [ "$(grep -c "python3 -I -S -c" "$MA/noiso/hooks/waiter-check.sh" "$MA/noiso/hooks/board-tail.sh" | grep -vc ':0$')" = 0 ] && [ "$(grep -c "python3 -c 'import sys,json" "$MA/noiso/hooks/waiter-check.sh" "$MA/noiso/hooks/board-tail.sh" | grep -c ':1$')" = 2 ] && pa_mut noiso fx_p3 || bad "mutant noiso: the change was not applied"
-pa_mcopy relw; pa_msed relw bin/_common.sh '/^case "\$WARROOM_DIR" in \/\*) ;; \*) wr_refuse/d;/^  case "\$_rp" in \/\*) ;; \*) _WR_WHY="is not an absolute path"/d'
+pa_mcopy relw; pa_msed relw bin/_common.sh '/^  case "\$WARROOM_DIR" in \/\*) ;; \*) { echo/d;/^  case "\$_rp" in \/\*) ;; \*) _WR_WHY="is not an absolute path"/d'
 [ "$(grep -c 'WARROOM_DIR must be an absolute path' "$MA/relw/bin/_common.sh")" = 0 ] && [ "$(grep -c '_WR_WHY="is not an absolute path"' "$MA/relw/bin/_common.sh")" = 0 ] && pa_mut relw fx_r6 || bad "mutant relw: the change was not applied"
-pa_mcopy noancestor; pa_msed noancestor bin/_common.sh '/^  case "\$_fw\/" in "\$_fb"\/\*) wr_refuse/d'
+pa_mcopy noancestor; pa_msed noancestor bin/_common.sh '/^  case "\$_fw\/" in "\$_fb"\/\*) { echo/d'
 [ "$(grep -c 'is a folder above the run folder' "$MA/noancestor/bin/_common.sh")" = 0 ] && pa_mut noancestor fx_r5 || bad "mutant noancestor: the change was not applied"
 
 # --- fixtures for the PR B mutants (each takes the code under test from $PB / $PHK, like the A fixtures) ---
@@ -1296,6 +1296,9 @@ checksum with an empty half|@G 2 @N 5-\n|1|
 TBL
   pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2/absent" "$BOARD_FILE" 99999' _ "$PB" "$PAW"
   { [ "$PA_RC" = 0 ] && [ "$PA_OUT" = none ]; } || { PA_WHY="C1 absent: rc $PA_RC out '$PA_OUT' (want rc 0 none)"; return 1; }
+  # a cursor whose folder is not there is not known to be absent: status 1, nothing on stdout, a line on stderr
+  pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2/nofolder/cur" "$BOARD_FILE" 99999 2>"$3"' _ "$PB" "$PAW" "$PAW/errnf"
+  { [ "$PA_RC" = 1 ] && [ -z "$PA_OUT" ] && [ -s "$PAW/errnf" ]; } || { PA_WHY="C1 missing folder: rc $PA_RC out '$PA_OUT' (want rc 1, nothing on stdout, a line on stderr)"; return 1; }
   ln -s "$PAW/cb.md" "$PAW/curlink"
   pa_exec WARROOM_DIR="$PAW" BOARD=cb.md bash -c '. "$1/_common.sh"; . "$1/_cursor.sh"; wr_cursor_get "$2" "$BOARD_FILE" 99999 2>/dev/null' _ "$PB" "$PAW/curlink"
   { [ "$PA_RC" = 1 ] && [ -z "$PA_OUT" ]; } || { PA_WHY="C1 symlink: rc $PA_RC out '$PA_OUT' (want rc 1, nothing)"; return 1; }
@@ -1332,6 +1335,14 @@ if [ -f "$PAW/awkfault" ] && [ "\$last" = "\$(cat "$PAW/awkfault")" ]; then echo
 exec $_aw "\$@"
 SHIM
   chmod +x "$PAW/shim/awk"
+  _ct=$(command -v cat)   # the registry reader is a cat: the same fault, named by the file it was asked to read
+  cat > "$PAW/shim/cat" <<SHIM
+#!/bin/sh
+for a; do last=\$a; done
+if [ -f "$PAW/awkfault" ] && [ "\$last" = "\$($_ct "$PAW/awkfault")" ]; then echo "shim: cat refused" >&2; exit 2; fi
+exec $_ct "\$@"
+SHIM
+  chmod +x "$PAW/shim/cat"
   printf '#!/bin/sh\nif [ -f "%s/datefault" ]; then cat "%s/datefault"; exit 0; fi\nexec /bin/date "$@"\n' "$PAW" "$PAW" > "$PAW/shim/date"; chmod +x "$PAW/shim/date"
   _gw() { PW="$PAW/g$1"; rm -rf "$PW"; mkdir -p "$PW"; printf '%s\n' "${2:-[00:00 · W1] working}" > "$PW/board.md"; rm -f "$PAW/awkfault" "$PAW/datefault"; }
   _gposts() { grep -c '@W1 ACTION: no board post' "$PW/board.md"; }
@@ -1863,17 +1874,17 @@ pa_run_fx fx_k5 "delivery: a closed reader during a large payload is a failed wr
 if [ "$PS_OK" = 1 ]; then
 pa_mcopy touchlast; pa_msed touchlast bin/waiter.sh 's|if ! wr_stamp "\$LAST"; then|if ! touch "$LAST"; then|'
 [ "$(grep -c 'if ! touch "\$LAST"; then' "$MA/touchlast/bin/waiter.sh")" = 1 ] && [ "$(grep -c 'wr_stamp "\$LAST"' "$MA/touchlast/bin/waiter.sh")" = 0 ] && pa_mut touchlast fx_l1 || bad "mutant touchlast: the change was not applied"
-pa_mcopy legacytemp; pa_msed legacytemp bin/_common.sh 's|^  _wr_tn=$(mktemp "$(dirname "$1")/.wrtmp.XXXXXXXX" 2>/dev/null) \|\| return 1$|  _wr_tn="$1.tmp.$$"; : > "$_wr_tn" \|\| return 1|'
-[ "$(grep -c '_wr_tn="\$1.tmp.\$\$"; : > "\$_wr_tn"' "$MA/legacytemp/bin/_common.sh")" = 1 ] && [ "$(grep -c 'mktemp "\$(dirname' "$MA/legacytemp/bin/_common.sh")" = 0 ] && pa_mut legacytemp fx_l4 || bad "mutant legacytemp: the change was not applied"
+pa_mcopy legacytemp; pa_msed legacytemp bin/_common.sh 's|^  _wr_tn=$(mktemp "$_wr_td/.wrtmp.XXXXXXXX" 2>/dev/null) \|\| return 1$|  _wr_tn="$1.tmp.$$"; : > "$_wr_tn" \|\| return 1|'
+[ "$(grep -c '_wr_tn="\$1.tmp.\$\$"; : > "\$_wr_tn"' "$MA/legacytemp/bin/_common.sh")" = 1 ] && [ "$(grep -c 'mktemp "\$_wr_td' "$MA/legacytemp/bin/_common.sh")" = 0 ] && pa_mut legacytemp fx_l4 || bad "mutant legacytemp: the change was not applied"
 pa_mcopy mvreplace; pa_msed mvreplace bin/_common.sh "s#^  _wr_re=\$(python3 -I -S -c 'import os,sys; os.replace(sys.argv\[1\], sys.argv\[2\])' \"\$_wr_rt\" \"\$_wr_rf\" 2>&1) \&\& return 0#  _wr_re=\$(mv -f -- \"\$_wr_rt\" \"\$_wr_rf\" 2>\&1) \&\& return 0#"
 [ "$(grep -c '_wr_re=$(mv -f -- ' "$MA/mvreplace/bin/_common.sh")" = 1 ] && [ "$(grep -c 'os.replace(sys.argv' "$MA/mvreplace/bin/_common.sh")" = 0 ] && pa_mut mvreplace fx_l3 || bad "mutant mvreplace: the change was not applied"
 else echo "skip mutants touchlast, legacytemp, mvreplace (ps cannot read process start times here, so a waiter cannot arm)"; fi
-pa_mcopy oldrollback; pa_msed oldrollback hooks/board-guard.sh 's|^      if ! { wr_temp "\$mark" \&\& mark_t=\$_WR_TMP \&\& printf .%s\\n. "\${prev:--}"|      if [ "$prev" = "-" ]; then rm -f "$mark"; elif ! { wr_temp "$mark" \&\& mark_t=$_WR_TMP \&\& printf "%s\\n" "${prev:--}"|'
-[ "$(grep -c 'if \[ "\$prev" = "-" \]; then rm -f "\$mark"; elif' "$MA/oldrollback/hooks/board-guard.sh")" = 1 ] && pa_mut oldrollback fx_g1 || bad "mutant oldrollback: the change was not applied"
-pa_mcopy restorerm; pa_msed restorerm hooks/board-guard.sh 's|^        wr_drop "\$mark_t"; echo "board-guard: the post for|        rm -f "$mark"; wr_drop "$mark_t"; echo "board-guard: the post for|'
+pa_mcopy oldrollback; pa_msed oldrollback hooks/board-guard.sh 's|^      wr_temp "\$mark" \|\| { wr_unlock "\$mark"; echo "board-guard: the post for|      if [ "$prev" = "-" ]; then rm -f "$mark"; wr_unlock "$mark"; return 1; fi; wr_temp "$mark" \|\| { wr_unlock "$mark"; echo "board-guard: the post for|'
+[ "$(grep -c 'if \[ "\$prev" = "-" \]; then rm -f "\$mark"' "$MA/oldrollback/hooks/board-guard.sh")" = 1 ] && pa_mut oldrollback fx_g1 || bad "mutant oldrollback: the change was not applied"
+pa_mcopy restorerm; pa_msed restorerm hooks/board-guard.sh 's|^      wr_replace "\$mark_t" "\$mark" \|\| { wr_drop "\$mark_t"; wr_unlock "\$mark"; echo "board-guard: the post for|      wr_replace "$mark_t" "$mark" \|\| { rm -f "$mark"; wr_drop "$mark_t"; wr_unlock "$mark"; echo "board-guard: the post for|'
 [ "$(grep -c 'rm -f "\$mark"; wr_drop' "$MA/restorerm/hooks/board-guard.sh")" = 1 ] && pa_mut restorerm fx_g2 || bad "mutant restorerm: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
-pa_mcopy nofiltercheck; pa_msed nofiltercheck bin/waiter.sh 's|&& new=$(filter < "$chunk_t"); }; then|\&\& { new=$(filter < "$chunk_t" \|\| true); }; }; then|'
+pa_mcopy nofiltercheck; pa_msed nofiltercheck bin/waiter.sh 's|new=$(filter < "$chunk_t") \|\||new=$(filter < "$chunk_t" \|\| true) \|\||'
 [ "$(grep -c 'filter < "\$chunk_t" || true' "$MA/nofiltercheck/bin/waiter.sh")" = 1 ] && pa_mut nofiltercheck fx_k11 || bad "mutant nofiltercheck: the change was not applied"
 else echo "skip mutant nofiltercheck (ps cannot read process start times here, so a waiter cannot arm)"; fi
 
@@ -1881,21 +1892,21 @@ pa_mcopy c1len; pa_msed c1len bin/_cursor.sh 's/^  \[ "\${#1}" -le 15 \]$/  true
 [ "$(grep -c '^  true$' "$MA/c1len/bin/_cursor.sh")" = 1 ] && pa_mut c1len fx_c1 || bad "mutant c1len: the change was not applied"
 pa_mcopy c1fut; pa_msed c1fut bin/_cursor.sh '/more than a day ahead of the clock" >&2; return 1; }$/d'
 [ "$(grep -c 'more than a day ahead of the clock" >&2' "$MA/c1fut/bin/_cursor.sh")" = 0 ] && pa_mut c1fut fx_c1 || bad "mutant c1fut: the change was not applied"
-pa_mcopy c1abs; pa_msed c1abs bin/_common.sh 's/^  \[ -d "\$_wr_ad" \] && \[ -x "\$_wr_ad" \]$/  true/'
-[ "$(grep -c '^  \[ -d "\$_wr_ad" \] && \[ -x "\$_wr_ad" \]$' "$MA/c1abs/bin/_common.sh")" = 0 ] && pa_mut c1abs fx_c1 || bad "mutant c1abs: the change was not applied"
-pa_mcopy t1kill; pa_msed t1kill bin/_common.sh 's/^    \*) echo unknown; return 0 ;;   .*$/    *) echo dead; return 0 ;;/'
-[ "$(grep -c '^    \*) echo dead; return 0 ;;$' "$MA/t1kill/bin/_common.sh")" = 1 ] && pa_mut t1kill fx_t1 || bad "mutant t1kill: the change was not applied"
+pa_mcopy c1abs; pa_msed c1abs bin/_common.sh 's/^  if \[ "\$_wa" = dir \]; then echo yes; else echo no; fi$/  echo yes/'
+[ "$(grep -c '^  echo yes$' "$MA/c1abs/bin/_common.sh")" = 1 ] && pa_mut c1abs fx_c1 || bad "mutant c1abs: the change was not applied"
+pa_mcopy t1kill; pa_msed t1kill bin/_common.sh 's/^    except OSError: return "unknown"$/    except OSError: return "dead"/'
+[ "$(grep -c '^    except OSError: return "dead"$' "$MA/t1kill/bin/_common.sh")" = 1 ] && pa_mut t1kill fx_t1 || bad "mutant t1kill: the change was not applied"
 pa_mcopy t1pipe; pa_msed t1pipe bin/_common.sh 's/^  _wr_st=\$( set -o pipefail; /  _wr_st=$( /'
 [ "$(grep -c 'set -o pipefail; { ps -o lstart=' "$MA/t1pipe/bin/_common.sh")" = 0 ] && pa_mut t1pipe fx_t1 || bad "mutant t1pipe: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
-pa_mcopy m1poll; pa_msed m1poll bin/waiter.sh 's/^  if \[ "\$_m" = 1 \]; then replaced; elif \[ "\$_m" != 0 \]; then \(.*\)$/  if [ "$_m" != 0 ]; then replaced; elif false; then \1/'
-[ "$(grep -c '^  if \[ "\$_m" != 0 \]; then replaced; elif false' "$MA/m1poll/bin/waiter.sh")" = 1 ] && pa_mut m1poll fx_m1 || bad "mutant m1poll: the change was not applied"
-pa_mcopy m1lock; pa_msed m1lock bin/waiter.sh 's/^    if \[ "\$_m" = 1 \]; then wr_unlock "\$CUR"; replaced; elif/    if [ "$_m" != 0 ]; then wr_unlock "$CUR"; replaced; elif/'
-[ "$(grep -c '^    if \[ "\$_m" != 0 \]; then wr_unlock "\$CUR"; replaced; elif' "$MA/m1lock/bin/waiter.sh")" = 1 ] && pa_mut m1lock fx_m1 || bad "mutant m1lock: the change was not applied"
+pa_mcopy m1poll; pa_msed m1poll bin/waiter.sh 's/^  mine || { echo "\[WAITER\] the seat registry .*$/  mine || replaced/'
+[ "$(grep -c '^  mine || replaced$' "$MA/m1poll/bin/waiter.sh")" = 1 ] && pa_mut m1poll fx_m1 || bad "mutant m1poll: the change was not applied"
+pa_mcopy m1lock; pa_msed m1lock bin/waiter.sh 's/^  mine || { wr_unlock "\$CUR"; echo "\[WAITER\] the seat registry .*$/  mine || { wr_unlock "$CUR"; replaced; }/'
+[ "$(grep -c '^  mine || { wr_unlock "\$CUR"; replaced; }$' "$MA/m1lock/bin/waiter.sh")" = 1 ] && pa_mut m1lock fx_m1 || bad "mutant m1lock: the change was not applied"
 else echo "skip mutants m1poll and m1lock (ps cannot read process start times here, so a waiter cannot arm)"; fi
-pa_mcopy gledger; pa_msed gledger hooks/board-guard.sh 's/^      || { echo "board-guard: skipped \$seat (cannot read the job ledger.*$/      || true/'
+pa_mcopy gledger; pa_msed gledger hooks/board-guard.sh 's/^    || { echo "board-guard: skipped \$seat (cannot read the job ledger.*$/    || true/'
 [ "$(grep -c 'cannot read the job ledger' "$MA/gledger/hooks/board-guard.sh")" = 0 ] && pa_mut gledger fx_gr1 || bad "mutant gledger: the change was not applied"
-pa_mcopy gboard; pa_msed gboard hooks/board-guard.sh 's/^    || { echo "board-guard: skipped \$seat (could not read the board), will retry on the next prompt" >&2; continue; }$/    || true/'
+pa_mcopy gboard; pa_msed gboard hooks/board-guard.sh 's/^    || { echo "board-guard: skipped \$seat (could not read the board), will retry on the next prompt" >&2; return 1; }$/    || true/'
 [ "$(grep -c '^    || true$' "$MA/gboard/hooks/board-guard.sh")" = 1 ] && pa_mut gboard fx_gr1 || bad "mutant gboard: the change was not applied"
 pa_mcopy gmark; pa_msed gmark hooks/board-guard.sh 's/^    if \[ "\$prev" != "-" \] \&\& ! \[\[ \$prev =~ \$mre \]\]; then$/    if false; then/'
 [ "$(grep -c '^    if false; then$' "$MA/gmark/hooks/board-guard.sh")" = 1 ] && pa_mut gmark fx_gr1 || bad "mutant gmark: the change was not applied"
@@ -1903,17 +1914,17 @@ pa_mcopy gstamp; pa_msed gstamp hooks/board-guard.sh '/^  wr_hhmm "\$hm" || /d'
 [ "$(grep -c 'its last post is stamped' "$MA/gstamp/hooks/board-guard.sh")" = 0 ] && pa_mut gstamp fx_gr1 || bad "mutant gstamp: the change was not applied"
 pa_mcopy gclock; pa_msed gclock hooks/board-guard.sh '/^wr_hhmm "\$now" || /d'
 [ "$(grep -c "not HH:MM" "$MA/gclock/hooks/board-guard.sh")" = 0 ] && pa_mut gclock fx_gr1 || bad "mutant gclock: the change was not applied"
-pa_mcopy kboard; pa_msed kboard bin/board.sh 's/^    stamp=\$(wr_now) \&\& wr_hhmm "\$stamp" || {.*$/    stamp=$(wr_now)/'
-[ "$(grep -c '^    stamp=\$(wr_now)$' "$MA/kboard/bin/board.sh")" = 1 ] && pa_mut kboard fx_ck1 || bad "mutant kboard: the change was not applied"
+pa_mcopy kboard; pa_msed kboard bin/board.sh '/^    wr_hhmm "\$stamp" || /d'
+[ "$(grep -c 'wr_hhmm "\$stamp"' "$MA/kboard/bin/board.sh")" = 0 ] && pa_mut kboard fx_ck1 || bad "mutant kboard: the change was not applied"
 pa_mcopy kepoch; pa_msed kepoch bin/_common.sh 's/^wr_epoch() { .*$/wr_epoch() { date +%s; }/'
 [ "$(grep -c '^wr_epoch() { date +%s; }$' "$MA/kepoch/bin/_common.sh")" = 1 ] && pa_mut kepoch fx_ck1 || bad "mutant kepoch: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
-pa_mcopy karm; pa_msed karm bin/waiter.sh '/^_at=\$(wr_now) \&\& wr_hhmm/{s/.*/_at=$(wr_now)/;}'
-[ "$(grep -c '^_at=\$(wr_now)$' "$MA/karm/bin/waiter.sh")" = 1 ] && pa_mut karm fx_ck1 || bad "mutant karm: the change was not applied"
-pa_mcopy kgap; pa_msed kgap bin/waiter.sh 's/^gap_closed() { \(.*\)_gn=\$(wr_epoch) || return 2;/gap_closed() { \1_gn=$(wr_epoch) || return 1;/'
-[ "$(grep -c '_gn=\$(wr_epoch) || return 1;' "$MA/kgap/bin/waiter.sh")" = 1 ] && pa_mut kgap fx_ck1 || bad "mutant kgap: the change was not applied"
-pa_mcopy stfall; pa_msed stfall bin/_common.sh 's/^  _sn=\(.*\) || return 1$/  _sn=\1 || _sn=1/'
-[ "$(grep -c '|| _sn=1$' "$MA/stfall/bin/_common.sh")" = 1 ] && pa_mut stfall fx_st1 || bad "mutant stfall: the change was not applied"
+pa_mcopy karm; pa_msed karm bin/waiter.sh '/^wr_hhmm "\$_at" || /d'
+[ "$(grep -c 'wr_hhmm "\$_at"' "$MA/karm/bin/waiter.sh")" = 0 ] && pa_mut karm fx_ck1 || bad "mutant karm: the change was not applied"
+pa_mcopy kgap; pa_msed kgap bin/waiter.sh 's/^  _gn=\$(wr_epoch) || return 1$/  _gn=$(wr_epoch) || _gn=0/'
+[ "$(grep -c '^  _gn=\$(wr_epoch) || _gn=0$' "$MA/kgap/bin/waiter.sh")" = 1 ] && pa_mut kgap fx_ck1 || bad "mutant kgap: the change was not applied"
+pa_mcopy stfall; pa_msed stfall bin/_common.sh 's/\(_sn=\$(stat [^)]*)\) || return 1/\1 || _sn=1/'
+[ "$(grep -c '|| _sn=1' "$MA/stfall/bin/_common.sh")" = 2 ] && pa_mut stfall fx_st1 || bad "mutant stfall: the change was not applied"
 pa_mcopy stcase; pa_msed stcase bin/_common.sh "s/^  case \"\$_sn\" in ''|0\*|/  case \"\$_sn\" in ''|/"
 [ "$(grep -c "case \"\$_sn\" in ''|\*\[!0-9\]\*) return 1" "$MA/stcase/bin/_common.sh")" = 1 ] && pa_mut stcase fx_st1 || bad "mutant stcase: the change was not applied"
 pa_mcopy stgen; pa_msed stgen bin/_cursor.sh 's/_gi=\$(wr_inode "\$1") || return 1; /_gi=$(wr_inode "$1"); /'
@@ -1928,8 +1939,8 @@ pa_mcopy rgwait; pa_msed rgwait hooks/waiter-check.sh 's/^\(rows=\$(wr_registry_
 [ "$(grep -c '^rows=\$(wr_registry_read "\$REG")$' "$MA/rgwait/hooks/waiter-check.sh")" = 1 ] && pa_mut rgwait fx_rg1 || bad "mutant rgwait: the change was not applied"
 pa_mcopy rgtail; pa_msed rgtail hooks/board-tail.sh 's/^\(rows=\$(wr_registry_read "\$W\/seats.tsv")\) || {.*$/\1/'
 [ "$(grep -c '^rows=\$(wr_registry_read "\$W/seats.tsv")$' "$MA/rgtail/hooks/board-tail.sh")" = 1 ] && pa_mut rgtail fx_rg1 || bad "mutant rgtail: the change was not applied"
-pa_mcopy abreg; pa_msed abreg bin/_common.sh 's/^  if wr_absent "\$1"; then return 0; fi$/  if wr_absent "$1"; then return 1; fi/'
-[ "$(grep -c '^  if wr_absent "\$1"; then return 1; fi$' "$MA/abreg/bin/_common.sh")" = 1 ] && pa_mut abreg fx_ab1 || bad "mutant abreg: the change was not applied"
+pa_mcopy abreg; pa_msed abreg bin/_common.sh 's/^  if \[ "\$_wr_ab" = yes \]; then return 0; fi$/  if [ "$_wr_ab" = yes ]; then return 1; fi/'
+[ "$(grep -c '^  if \[ "\$_wr_ab" = yes \]; then return 1; fi$' "$MA/abreg/bin/_common.sh")" = 1 ] && pa_mut abreg fx_ab1 || bad "mutant abreg: the change was not applied"
 else echo "skip mutants karm and kgap (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
@@ -1942,17 +1953,17 @@ pa_mcopy f9gen; pa_msed f9gen bin/_cursor.sh 's/\(_cg=\$(wr_generation "\$2")\) 
 [ "$(grep -c '^  _cg=\$(wr_generation "\$2")$' "$MA/f9gen/bin/_cursor.sh")" = 1 ] && pa_mut f9gen fx_f9c || bad "mutant f9gen: the change was not applied"
 pa_mcopy f9hook; pa_msed f9hook hooks/board-tail.sh 's/^\(last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9hook/hooks/board-tail.sh")" = 1 ] && pa_mut f9hook fx_f9c || bad "mutant f9hook: the change was not applied"
-pa_mcopy f9guard; pa_msed f9guard hooks/board-guard.sh 's/^\(  lsum=.*wr_sum)\) || {.*$/\1 || true/'
-[ "$(grep -c '^  lsum=.*wr_sum) || true$' "$MA/f9guard/hooks/board-guard.sh")" = 1 ] && pa_mut f9guard fx_f9e || bad "mutant f9guard: the change was not applied"
+pa_mcopy f9guard; pa_msed f9guard hooks/board-guard.sh 's/^\(  lsum=.*wr_sum )\) || {.*$/\1 || true/'
+[ "$(grep -c '^  lsum=.*wr_sum ) || true$' "$MA/f9guard/hooks/board-guard.sh")" = 1 ] && pa_mut f9guard fx_f9e || bad "mutant f9guard: the change was not applied"
 pa_mcopy f1tailgen; pa_msed f1tailgen bin/board.sh 's/^\(    g=\$(wr_generation "\$BOARD_FILE")\) || {.*$/\1 || true/'
 [ "$(grep -c '^    g=\$(wr_generation "\$BOARD_FILE") || true$' "$MA/f1tailgen/bin/board.sh")" = 1 ] && pa_mut f1tailgen fx_f1c || bad "mutant f1tailgen: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
-pa_mcopy f9arm; pa_msed f9arm bin/waiter.sh 's/^\(  c=\$(wr_cursor_get [^)]*)\) || armfail .*$/\1/'
+pa_mcopy f9arm; pa_msed f9arm bin/waiter.sh 's/^\(  c=\$(wr_cursor_get [^)]*)\) || {.*$/\1/'
 [ "$(grep -c '^  c=\$(wr_cursor_get "\$CUR" "\$BOARD_FILE" "\$AGE")$' "$MA/f9arm/bin/waiter.sh")" = 1 ] && pa_mut f9arm fx_f9d || bad "mutant f9arm: the change was not applied"
-pa_mcopy f1reg; pa_msed f1reg bin/waiter.sh 's/ || armfail "could not write the seat registry: not armed"//'
+pa_mcopy f1reg; pa_msed f1reg bin/waiter.sh 's/^\(  awk -F.*> "\$reg_t"\) || {.*$/\1 || true/'
 [ "$(grep -c 'could not write the seat registry' "$MA/f1reg/bin/waiter.sh")" = 0 ] && pa_mut f1reg fx_f1a || bad "mutant f1reg: the change was not applied"
-pa_mcopy f1arm; pa_msed f1arm bin/waiter.sh 's/^\(  lastck=.*\) || armfail "could not checksum the board \$BOARD_FILE: not armed"$/\1/'
-[ "$(grep -c '^  lastck=.*armfail' "$MA/f1arm/bin/waiter.sh")" = 0 ] && [ "$(grep -c '^  lastck=' "$MA/f1arm/bin/waiter.sh")" = 1 ] && pa_mut f1arm fx_f1b || bad "mutant f1arm: the change was not applied"
+pa_mcopy f1arm; pa_msed f1arm bin/waiter.sh 's/^\(  lastck=.*\) || {.*$/\1/'
+[ "$(grep -c '^  lastck=.*||' "$MA/f1arm/bin/waiter.sh")" = 0 ] && [ "$(grep -c '^  lastck=' "$MA/f1arm/bin/waiter.sh")" = 1 ] && pa_mut f1arm fx_f1b || bad "mutant f1arm: the change was not applied"
 else echo "skip mutants f9arm, f1reg, f1arm (ps cannot read process start times here, so a waiter cannot arm)"; fi
 
 # --- line-count mutants ---
@@ -1965,7 +1976,7 @@ pa_mcopy whook; pa_msed whook hooks/board-tail.sh 's/^\(n=\$(wr_lines "\$BOARD_F
 pa_mcopy wpost; pa_msed wpost bin/board.sh 's/^\(    n=\$(printf .%s\\n. "\$text" | wr_lines \/dev\/stdin)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_lines /dev/stdin) || true$' "$MA/wpost/bin/board.sh")" = 1 ] && pa_mut wpost fx_w5 || bad "mutant wpost: the change was not applied"
 if [ "$PS_OK" = 1 ]; then
-pa_mcopy warm; pa_msed warm bin/waiter.sh 's/^\(  base=\$(wr_lines "\$BOARD_FILE")\) || armfail .*$/\1/'
+pa_mcopy warm; pa_msed warm bin/waiter.sh 's/^\(  base=\$(wr_lines "\$BOARD_FILE")\) || {.*$/\1/'
 [ "$(grep -c '^  base=\$(wr_lines "\$BOARD_FILE")$' "$MA/warm/bin/waiter.sh")" = 1 ] && pa_mut warm fx_w3 || bad "mutant warm: the change was not applied"
 pa_mcopy wpoll; pa_msed wpoll bin/waiter.sh 's/^\(  n=\$(wr_lines "\$BOARD_FILE")\) || {.*$/\1 || true/'
 [ "$(grep -c '^  n=\$(wr_lines "\$BOARD_FILE") || true$' "$MA/wpoll/bin/waiter.sh")" = 1 ] && pa_mut wpoll fx_w4 || bad "mutant wpoll: the change was not applied"
@@ -1979,12 +1990,12 @@ pa_mcopy krm; pa_msed krm bin/waiter.sh 's|if ! wr_cursor_put "\$CUR" "\$gen" "\
 mkdir -p "$T/idroot" && printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exec /usr/bin/id "$@"' > "$T/idroot/id" && chmod +x "$T/idroot/id"
 _f0=$fail; _p0=$PATH; PATH="$T/idroot:$PATH"; pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant krm (running as root: mode 444 does not block root)$' "$T/skiproot.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skiproot.out")" = 0 ] && ok "mutants: K1 under an id double that reports root skips; pa_mut prints the skip and counts neither ok nor FAIL" || bad "mutants: K1 root-skip control: $(cat "$T/skiproot.out")"
-pa_mcopy khdr; pa_msed khdr bin/waiter.sh 's|^    if ! echo \(".*"\); then$|    echo \1; if false; then|'
+pa_mcopy khdr; pa_msed khdr bin/waiter.sh 's|^  if ! echo \(".*"\); then$|  echo \1; if false; then|'
 [ "$(grep -c 'if false; then$' "$MA/khdr/bin/waiter.sh")" = 1 ] && pa_mut khdr fx_k2 || bad "mutant khdr: the change was not applied"
 pa_mcopy knotrap; pa_msed knotrap bin/waiter.sh "s|^trap '' PIPE.*\$|:|"
 [ "$(grep -c "^trap '' PIPE" "$MA/knotrap/bin/waiter.sh")" = 0 ] && pa_mut knotrap fx_k5 || bad "mutant knotrap: the change was not applied"
-pa_mcopy knounlock; pa_msed knounlock bin/waiter.sh 's|exec 8>&- 9>&-; ||'
-[ "$(grep -c 'exec 8>&- 9>&-' "$MA/knounlock/bin/waiter.sh")" = 0 ] && for _kf in fx_k1 fx_k2 fx_k3 fx_k5; do pa_mut knounlock $_kf; done || bad "mutant knounlock: the change was not applied"
+pa_mcopy knounlock; pa_msed knounlock bin/waiter.sh 's|wr_unlock "\$CUR"; echo "\[WAITER ERROR\]|echo "[WAITER ERROR]|'
+[ "$(grep -c 'wr_unlock "\$CUR"; echo "\[WAITER ERROR\]' "$MA/knounlock/bin/waiter.sh")" = 0 ] && for _kf in fx_k1 fx_k2 fx_k3 fx_k5; do pa_mut knounlock $_kf; done || bad "mutant knounlock: the change was not applied"
 else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # a fixture that skips (root, no ps) makes pa_mut print a skip and count nothing: no ok, no FAIL
 fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }

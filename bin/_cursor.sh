@@ -64,12 +64,22 @@ wr_canon() {
 # (the last line only) or digits "-" digits (the consumed prefix). Anything else is status 1 and a line on stderr naming
 # the file and the first rule it breaks; nothing is printed on stdout.
 wr_cursor_parse() {
-  _g=""; _l=""; _t=""; _s=""; _px=""; _pn=""; _pr=""; _pq=""
-  [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] || { echo "cursor $1 is not a readable regular file" >&2; return 1; }
-  { IFS=' ' read -r _g _l _t _s _px; _pr=$?; IFS= read -r _pn; _pq=$?; } < "$1" 2>/dev/null
-  [ "$_pr" = 0 ] || { echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1; }
-  { [ "$_pq" = 1 ] && [ -z "$_pn" ]; } || { echo "cursor $1 is not exactly one line" >&2; return 1; }
-  [ -z "$_px" ] || { echo "cursor $1 has more than four fields" >&2; return 1; }
+  _g=""; _l=""; _t=""; _s=""; _pc=""; _pf=""; _pi=""
+  _pk=$(wr_kind "$1") || { echo "cursor $1 is not a readable regular file" >&2; return 1; }
+  [ "$_pk" = file ] || { echo "cursor $1 is not a readable regular file" >&2; return 1; }
+  # the file is read once, checked, and then split as text: a failed read is told apart from the end of the file
+  _pc=$( cat -- "$1" 2>/dev/null && printf x ) || { echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1; }
+  _pc=${_pc%x}
+  case "$_pc" in *$'\n'*) ;; *) echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1 ;; esac
+  case "$_pc" in *$'\n') _pc=${_pc%$'\n'} ;; *) echo "cursor $1 is not exactly one line" >&2; return 1 ;; esac
+  case "$_pc" in *$'\n'*) echo "cursor $1 is not exactly one line" >&2; return 1 ;; esac
+  _pf=$1; _pi=$IFS; IFS=' '; set -f
+  # shellcheck disable=SC2086  # split on single spaces on purpose, globbing is off
+  set -- $_pc
+  set +f; IFS=$_pi
+  [ "$#" -le 4 ] || { echo "cursor $_pf has more than four fields" >&2; return 1; }
+  _g=${1-}; _l=${2-}; _t=${3-}; _s=${4-}
+  set -- "$_pf"
   wr_digits "${_g%%:*}" && wr_digits "${_g#*:}" && case "$_g" in *:*:*) false ;; *:*) true ;; *) false ;; esac \
     || { echo "cursor $1: the generation is not digits:digits" >&2; return 1; }
   wr_canon "$_l" || { echo "cursor $1: the line count is not a canonical decimal" >&2; return 1; }
@@ -79,6 +89,9 @@ wr_cursor_parse() {
     *-*) wr_digits "${_s%%-*}" && wr_digits "${_s#*-}" || { echo "cursor $1: the checksum is not digits-digits" >&2; return 1; } ;;
     *) wr_digits "$_s" || { echo "cursor $1: the checksum is not digits" >&2; return 1; } ;;
   esac
+  # the file must still be the regular file that was read (a link put in its place meanwhile is refused)
+  _pk=$(wr_kind "$1") || { echo "cursor $1 changed while it was read" >&2; return 1; }
+  [ "$_pk" = file ] || { echo "cursor $1 changed while it was read" >&2; return 1; }
   return 0
 }
 # wr_cursor_get CURSOR_FILE BOARD MAX_AGE_SECONDS
@@ -89,8 +102,10 @@ wr_cursor_parse() {
 #   consumes nothing. A checksum that cannot be computed is not "the board changed": same, status 1.
 wr_cursor_get() {
   _cg=""; _cs=""; _cn=""
-  if wr_absent "$1"; then echo none; return 0; fi          # a missing cursor is normal on the first arm: say nothing
-  if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; fi
+  _ca=$(wr_absent "$1") || { echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; }
+  if [ "$_ca" = yes ]; then echo none; return 0; fi          # a missing cursor is normal on the first arm: say nothing
+  _ck=$(wr_kind "$1") || { echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; }
+  [ "$_ck" != absent ] || { echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; }
   wr_cursor_parse "$1" || return 1
   _cn=$(wr_epoch) || { echo "cursor $1: could not read the clock" >&2; return 1; }
   [ "$_t" -le $(( _cn + 86400 )) ] || { echo "cursor $1: its time is more than a day ahead of the clock" >&2; return 1; }
@@ -118,6 +133,6 @@ wr_cursor_put() {
   _cp=$(wr_epoch) || { echo "could not read the clock: the cursor $1 was not written" >&2; return 1; }
   wr_temp "$1" || { echo "could not create a temporary file next to $1" >&2; return 1; }
   _cur_t=$_WR_TMP
-  if printf '%s %s %s %s\n' "$2" "$3" "$_cp" "${4:-0}" > "$_cur_t"; then wr_replace "$_cur_t" "$1"; return; fi
+  if printf '%s %s %s %s\n' "$2" "$3" "$_cp" "${4:-0}" > "$_cur_t"; then wr_replace "$_cur_t" "$1" || return 1; return 0; fi
   wr_drop "$_cur_t"; return 1
 }
