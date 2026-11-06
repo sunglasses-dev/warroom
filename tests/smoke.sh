@@ -1369,6 +1369,71 @@ SHIM
   _gw 7; printf '25:99\n' > "$PAW/datefault"; _gwant "G6 clock" "not HH:MM" 0 1 || return 1
   return 0
 }
+fx_ck1() { # the clock is read once, checked and validated: a bad stamp or time is no post, no arming, no delivery (never an empty or odd value on the board, in the registry or in a gap sum)
+  pa_setup; pa_w; mkdir -p "$PAW/shim"
+  cat > "$PAW/shim/date" <<SHIM
+#!/bin/sh
+f="$PAW/datefault"
+if [ -f "\$f" ]; then
+  m=\$(cat "\$f")
+  case "\$m" in
+    stamp) [ "\$1" = "+%H:%M" ] && { echo ab:cd; exit 0; } ;;
+    fail) exit 1 ;;
+    epoch:*) [ "\$1" = "+%s" ] && { echo "\${m#epoch:}"; exit 0; } ;;
+  esac
+fi
+exec /bin/date "\$@"
+SHIM
+  chmod +x "$PAW/shim/date"
+  # the epoch reader: a canonical decimal or nothing
+  for _v in "1700000000:0" "x:1" "0123:1" "-5:1" "1234567890123456:1" ":1"; do
+    printf 'epoch:%s\n' "${_v%:*}" > "$PAW/datefault"
+    _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; wr_epoch' _ "$PB" 2>/dev/null); _r=$?
+    if [ "${_v#*:}" = 0 ]; then [ $_r = 0 ] && [ "$_o" = "${_v%:*}" ] || { PA_WHY="K1: wr_epoch '${_v%:*}' -> rc $_r out '$_o' (want 0 and the value)"; return 1; }
+    else [ $_r != 0 ] && [ -z "$_o" ] || { PA_WHY="K1: wr_epoch '${_v%:*}' -> rc $_r out '$_o' (want failure and no output)"; return 1; }; fi
+  done
+  printf 'fail\n' > "$PAW/datefault"
+  _o=$(pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash -c '. "$1/_common.sh"; wr_epoch' _ "$PB" 2>/dev/null) && { PA_WHY="K1: wr_epoch succeeded with a failing date"; return 1; }
+  # a post with a clock that is not a time (printed garbage, or a failing date): nothing is posted
+  for _m in stamp fail; do
+    printf '%s\n' "$_m" > "$PAW/datefault"; _b0=$(cksum < "$PW/board.md")
+    pa_exec WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" post BOSS "k1 $_m line"
+    [ "$PA_RC" = 1 ] && [ "$(cksum < "$PW/board.md")" = "$_b0" ] && printf '%s\n' "$PA_OUT" | grep -q "could not read the clock: nothing posted" || { PA_WHY="K1 ($_m): post rc $PA_RC (want 1), board changed=$([ "$(cksum < "$PW/board.md")" = "$_b0" ] && echo n || echo y): $(printf '%s' "$PA_OUT" | head -c 160)"; return 1; }
+  done
+  rm -f "$PAW/datefault"
+  pa_pass WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/board.sh" post BOSS "k1 good line" || return 1
+  tail -1 "$PW/board.md" | grep -Eq '^\[[0-9]{2}:[0-9]{2} · BOSS\] k1 good line$' || { PA_WHY="K1: the control post has no HH:MM stamp: $(tail -1 "$PW/board.md")"; return 1; }
+  [ "$PS_OK" = 1 ] || { PA_SKIP="the waiter half needs ps start times (the clock readers above ran)"; return 0; }
+  # arming with a clock that is not a time: the waiter says so and leaves no registry row
+  printf 'stamp\n' > "$PAW/datefault"
+  pa_run WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-k1arm > "$PAW/o.arm" 2>&1 & _wpk=$!
+  if ! wait_exit "$_wpk" 8; then   # a waiter that armed is still running: stop it (by its registered pid) and fail
+    _wp=$(awk -F'\t' '$1 == "sid-k1arm" { print $3 }' "$PW/seats.tsv" 2>/dev/null); [ -z "$_wp" ] || kill "$_wp" 2>/dev/null; kill "$_wpk" 2>/dev/null; wait "$_wpk" 2>/dev/null
+    PA_WHY="K1: the waiter armed with a clock that is not a time: $(head -c 120 "$PAW/o.arm")"; return 1
+  fi
+  wait "$_wpk"; _rk=$?
+  { [ "$_rk" != 0 ] && grep -q "could not read the clock: not armed" "$PAW/o.arm" && ! grep -q "sid-k1arm" "$PW/seats.tsv" 2>/dev/null; } || { PA_WHY="K1: arming with a bad clock: rc $_rk, out '$(head -c 160 "$PAW/o.arm")'"; return 1; }
+  rm -f "$PAW/datefault"
+  # the gap check: a delivery sets the gap; the next wake is held for the gap. With the clock unreadable it is NOT delivered
+  # (the waiter says so and looks again); it is not treated as "gap open"
+  pa_run WARROOM_DIR="$PW" WARROOM_MIN_GAP=300 PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-k1a > "$PAW/o.a" 2> "$PAW/e.a" & _wpa=$!
+  for _ in 1 2 3 4 5 6 7 8; do grep -q "sid-k1a" "$PW/seats.tsv" 2>/dev/null && break; sleep 1; done
+  pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: k1 first line" >/dev/null
+  wait_exit "$_wpa" 8 || { kill "$_wpa" 2>/dev/null; PA_WHY="K1: the first wake was not delivered"; return 1; }
+  wait "$_wpa" 2>/dev/null; grep -q "k1 first line" "$PAW/o.a" || { PA_WHY="K1: the first wake is missing: $(head -c 160 "$PAW/e.a")"; return 1; }
+  pa_run WARROOM_DIR="$PW" WARROOM_MIN_GAP=300 PATH="$PAW/shim:$PATH" "$PB/waiter.sh" W1 sid-k1b > "$PAW/o.b" 2> "$PAW/e.b" & _wpb=$!
+  for _ in 1 2 3 4 5 6 7 8; do grep -q "sid-k1b" "$PW/seats.tsv" 2>/dev/null && break; sleep 1; done
+  _wp=$(awk -F'\t' '$1 == "sid-k1b" { print $3 }' "$PW/seats.tsv")
+  [ -n "$_wp" ] || { kill "$_wpb" 2>/dev/null; PA_WHY="K1: the second waiter did not arm"; return 1; }
+  printf 'epoch:x\n' > "$PAW/datefault"
+  pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: k1 second line" >/dev/null; sleep 4
+  _alive=n; kill -0 "$_wp" 2>/dev/null && _alive=y
+  rm -f "$PAW/datefault"
+  _ok=y; [ "$_alive" = y ] && [ -z "$(cat "$PAW/o.b")" ] && grep -q "could not read the clock; nothing delivered" "$PAW/e.b" || _ok=n
+  kill "$_wp" 2>/dev/null; wait "$_wpb" 2>/dev/null
+  [ "$_ok" = y ] || { PA_WHY="K1: with the clock unreadable at the gap check: alive=$_alive (want y), delivered='$(head -c 80 "$PAW/o.b")' (want none), err '$(head -c 160 "$PAW/e.b")'"; return 1; }
+  return 0
+}
 fx_m1() { # the seat registry cannot be read: the waiter stays up and delivers nothing (poll check and delivery check), then delivers once it can read; only a registry that is read and lacks the row ends it
   [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
   pa_setup; pa_w; mkdir -p "$PAW/shim"; _aw=$(command -v awk)
@@ -1525,6 +1590,7 @@ fx_f1c() { # board.sh tail: the generation checksum fails (first call): exit 1 w
 pa_run_fx fx_c1 "cursor record: a valid record resumes, an old one or none is \"none\", and every corrupt shape (leading zero, 20 digits, future time, extra field or line, no newline, bad generation or checksum, symlink, unreadable, unsearchable folder) is status 1 with nothing on stdout; a repaired record recovers"
 pa_run_fx fx_t1 "process judgement: a gone pid or another start time is dead; a live process of another owner and a ps that fails after printing part of a time are unknown, never dead"
 pa_run_fx fx_gr1 "guard reads: an absent ledger or mark is first use and posts once; an unreadable ledger or board, an odd mark, stamp or clock posts nothing and says why"
+pa_run_fx fx_ck1 "clock: a bad or failing date is no post stamp, no arming and no delivery past the gap; the epoch reader accepts only a canonical decimal"
 pa_run_fx fx_m1 "seat registry unreadable: the waiter stays up at the poll check and at the locked delivery check, delivers nothing and keeps its position, then delivers when the registry reads again"
 pa_run_fx fx_f9a "F9: a failed cursor prefix checksum in board.sh tail prints nothing, exits 1, keeps the anchor, and the retry shows only the new line"
 pa_run_fx fx_f9b "F9: a failed line checksum on an older-format anchor prints nothing, exits 1, keeps the anchor; the retry accepts the older anchor"
@@ -1705,6 +1771,16 @@ pa_mcopy gstamp; pa_msed gstamp hooks/board-guard.sh '/^  wr_hhmm "\$hm" || /d'
 [ "$(grep -c 'its last post is stamped' "$MA/gstamp/hooks/board-guard.sh")" = 0 ] && pa_mut gstamp fx_gr1 || bad "mutant gstamp: the change was not applied"
 pa_mcopy gclock; pa_msed gclock hooks/board-guard.sh '/^wr_hhmm "\$now" || /d'
 [ "$(grep -c "not HH:MM" "$MA/gclock/hooks/board-guard.sh")" = 0 ] && pa_mut gclock fx_gr1 || bad "mutant gclock: the change was not applied"
+pa_mcopy kboard; pa_msed kboard bin/board.sh 's/^    stamp=\$(wr_now) \&\& wr_hhmm "\$stamp" || {.*$/    stamp=$(wr_now)/'
+[ "$(grep -c '^    stamp=\$(wr_now)$' "$MA/kboard/bin/board.sh")" = 1 ] && pa_mut kboard fx_ck1 || bad "mutant kboard: the change was not applied"
+pa_mcopy kepoch; pa_msed kepoch bin/_common.sh 's/^wr_epoch() { .*$/wr_epoch() { date +%s; }/'
+[ "$(grep -c '^wr_epoch() { date +%s; }$' "$MA/kepoch/bin/_common.sh")" = 1 ] && pa_mut kepoch fx_ck1 || bad "mutant kepoch: the change was not applied"
+if [ "$PS_OK" = 1 ]; then
+pa_mcopy karm; pa_msed karm bin/waiter.sh '/^_at=\$(wr_now) \&\& wr_hhmm/{s/.*/_at=$(wr_now)/;}'
+[ "$(grep -c '^_at=\$(wr_now)$' "$MA/karm/bin/waiter.sh")" = 1 ] && pa_mut karm fx_ck1 || bad "mutant karm: the change was not applied"
+pa_mcopy kgap; pa_msed kgap bin/waiter.sh 's/^gap_closed() { \(.*\)_gn=\$(wr_epoch) || return 2;/gap_closed() { \1_gn=$(wr_epoch) || return 1;/'
+[ "$(grep -c '_gn=\$(wr_epoch) || return 1;' "$MA/kgap/bin/waiter.sh")" = 1 ] && pa_mut kgap fx_ck1 || bad "mutant kgap: the change was not applied"
+else echo "skip mutants karm and kgap (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # --- F9 / F1 mutants: one change each, the diagnostic or the state check of its fixture fails ---
 pa_mcopy f9tail; pa_msed f9tail bin/board.sh 's/^\(    last=\$(wr_cursor_get [^)]*)\) || {.*$/\1 || true/'
 [ "$(grep -c 'wr_cursor_get .*|| true$' "$MA/f9tail/bin/board.sh")" = 1 ] && pa_mut f9tail fx_f9a || bad "mutant f9tail: the change was not applied"

@@ -66,7 +66,8 @@ else
   awk -F'\t' -v s="$SID" '$1!=s' "$REG" > "$reg_t" || armfail "could not write the seat registry: not armed"
 fi
 # row: session, seat, waiter pid, armed at, waiter start time (never empty: see START above)
-printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$SEAT" "$$" "$(wr_now)" "$START" >> "$reg_t" && wr_replace "$reg_t" "$REG" || armfail "could not update the seat registry $REG: not armed"
+_at=$(wr_now) && wr_hhmm "$_at" || armfail "could not read the clock: not armed"
+printf '%s\t%s\t%s\t%s\t%s\n' "$SID" "$SEAT" "$$" "$_at" "$START" >> "$reg_t" && wr_replace "$reg_t" "$REG" || armfail "could not update the seat registry $REG: not armed"
 wr_unlock "$REG"
 [ "$SEAT" = NONE ] && { echo "this session opted out of board triggers"; exit 0; }
 wr_unlock "$CUR"
@@ -80,6 +81,9 @@ filter() {
       if (author != seat && (index(rest, "@" seat " ACTION:") == 1 || index(rest, "@ALL ACTION:") == 1)) print
     }'
 }
+# gap_closed: 0 the last delivery is less than GAP seconds old (hold the lines), 1 the gap is open, 2 cannot tell (the clock
+# could not be read). On 2 nothing is delivered and the waiter looks again.
+gap_closed() { [ -e "$LAST" ] || return 1; _gn=$(wr_epoch) || return 2; [ $(( _gn - $(wr_mtime "$LAST") )) -lt "$GAP" ]; }
 # mine: is this still the seat's waiter? 0 yes, 1 no (the registry was read and holds no such row), 2 cannot tell (the
 # registry could not be read). Only 1 ends the waiter; on 2 it keeps its place and looks again.
 mine() {
@@ -123,12 +127,14 @@ while :; do
   fi
   if [ -n "$pend" ]; then
     # loop guard: held, not lost. The held lines are delivered once the gap has passed.
-    if [ -e "$LAST" ] && [ $(( $(date +%s) - $(wr_mtime "$LAST") )) -lt "$GAP" ]; then continue; fi
+    gap_closed; _g=$?                            # poll check
+    if [ "$_g" = 0 ]; then continue; elif [ "$_g" != 1 ]; then echo "[WAITER] could not read the clock; nothing delivered, will look again" >&2; continue; fi
     # Deliver under the cursor lock: recheck ownership and gap, then print header and lines before saving marker and position.
     wr_lock "$CUR" || continue
     mine; _m=$?                                  # delivery check
     if [ "$_m" = 1 ]; then wr_unlock "$CUR"; replaced; elif [ "$_m" != 0 ]; then wr_unlock "$CUR"; echo "[WAITER] the seat registry $REG could not be read; nothing delivered, will look again" >&2; continue; fi
-    if [ -e "$LAST" ] && [ $(( $(date +%s) - $(wr_mtime "$LAST") )) -lt "$GAP" ]; then wr_unlock "$CUR"; continue; fi
+    gap_closed; _g=$?                            # delivery check
+    if [ "$_g" = 0 ]; then wr_unlock "$CUR"; continue; elif [ "$_g" != 1 ]; then wr_unlock "$CUR"; echo "[WAITER] could not read the clock; nothing delivered, will look again" >&2; continue; fi
     # The wake is printed first and marked after it, each step checked alone: header, lines, gap marker, position.
     # A failed delivery step exits 1 without attempting later delivery steps. Header or payload failure leaves the delivery
     # checkpoint unchanged; stamp failure may leave a newly created marker, and position-save failure retains the fresh marker and

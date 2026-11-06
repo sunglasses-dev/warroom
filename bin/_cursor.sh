@@ -95,8 +95,7 @@ wr_cursor_get() {
   if wr_absent "$1"; then echo none; return 0; fi          # a missing cursor is normal on the first arm: say nothing
   if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; fi
   wr_cursor_parse "$1" || return 1
-  _cn=$(date +%s) || return 1
-  wr_canon "$_cn" || return 1
+  _cn=$(wr_epoch) || { echo "cursor $1: could not read the clock" >&2; return 1; }
   [ "$_t" -le $(( _cn + 86400 )) ] || { echo "cursor $1: its time is more than a day ahead of the clock" >&2; return 1; }
   [ $(( _cn - _t )) -le "${3:-86400}" ] || { echo none; return 0; }
   _cg=$(wr_generation "$2") || return 1
@@ -119,8 +118,9 @@ wr_cursor_get() {
 # when the temp, the write or the rename fails; the cursor is then as it was, and only a temp this call made is removed (a
 # removal that fails is reported with the temp's path). Callers check the result before they report a read or a wake.
 wr_cursor_put() {
+  _cp=$(wr_epoch) || { echo "could not read the clock: the cursor $1 was not written" >&2; return 1; }
   wr_temp "$1" || { echo "could not create a temporary file next to $1" >&2; return 1; }
   _cur_t=$_WR_TMP
-  if printf '%s %s %s %s\n' "$2" "$3" "$(date +%s)" "${4:-0}" > "$_cur_t"; then wr_replace "$_cur_t" "$1"; return; fi
+  if printf '%s %s %s %s\n' "$2" "$3" "$_cp" "${4:-0}" > "$_cur_t"; then wr_replace "$_cur_t" "$1"; return; fi
   wr_drop "$_cur_t"; return 1
 }

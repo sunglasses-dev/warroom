@@ -16,9 +16,10 @@ case "$cmd" in
     if ! wr_seat_ok "$seat" && [ "$seat" != GUARD ]; then echo "unknown seat '$seat' (seats: $SEATS)" >&2; exit 2; fi
     n=$(printf '%s\n' "$text" | wr_lines /dev/stdin) || { echo "could not count the lines of the post: nothing posted" >&2; exit 1; }
     if [ "$n" -gt 10 ] && [ "${WARROOM_LONG:-0}" != 1 ]; then echo "post is $n lines; the limit is 10 (WARROOM_LONG=1 to override)" >&2; exit 2; fi
+    stamp=$(wr_now) && wr_hhmm "$stamp" || { echo "could not read the clock: nothing posted" >&2; exit 1; }
     first=1; out=""
     while IFS= read -r line || [ -n "$line" ]; do
-      if [ $first = 1 ]; then out="[$(wr_now) · $seat] $line"; first=0; else out="$out
+      if [ $first = 1 ]; then out="[$stamp · $seat] $line"; first=0; else out="$out
   $line"; fi
     done <<EOT
 $text

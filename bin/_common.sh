@@ -223,6 +223,8 @@ fi
 BOSS_SEAT=${SEATS%% *}
 
 wr_now()   { date +%H:%M; }
+# wr_epoch — the clock in seconds, as a canonical decimal (1-15 digits, no leading zero) or status 1 with nothing printed
+wr_epoch() { _we=$(date +%s) || return 1; case "$_we" in ''|0*|*[!0-9]*) return 1 ;; esac; [ "${#_we}" -le 15 ] || return 1; printf '%s\n' "$_we"; }
 # wr_hhmm T — T is a real clock time: HH:MM with HH 00-23 and MM 00-59 (checked before any arithmetic on it)
 wr_hhmm() { case "$1" in [0-9][0-9]:[0-9][0-9]) [ "$((10#${1%%:*}))" -lt 24 ] && [ "$((10#${1##*:}))" -lt 60 ] ;; *) return 1 ;; esac; }
 # GNU stat first: on Linux `stat -f` means "file system status" and prints several lines, so it must not run first.
