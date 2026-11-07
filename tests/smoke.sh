@@ -2054,6 +2054,7 @@ fx_gapahead() { # a gap marker dated ahead of the clock is an OPEN gap (a clock 
   # ahead: the marker is dated years ahead; a holder keeps the seat's cursor lock so the first attempts miss it and the poll is retried
   pa_setup; pa_w
   : > "$PW/.lastwake-W1"; touch -t "$(( $(date +%Y) + 4 ))12312359" "$PW/.lastwake-W1" || { PA_WHY="gap: cannot date the marker"; return 1; }
+  _t0=$(date +%s)   # the delivery comes after this moment: a marker older than it was not re-stamped to now
   pa_run WARROOM_DIR="$PW" WARROOM_MIN_GAP=300 WARROOM_LOCK_WAIT=1 "$PB/waiter.sh" W1 sid-ga > "$PAW/o.ga" 2> "$PAW/e.ga" & _wpk=$!
   for _ in 1 2 3 4 5 6 7 8; do grep -q "sid-ga" "$PW/seats.tsv" 2>/dev/null && break; sleep 1; done
   _wp=$(awk -F'\t' '$1 == "sid-ga" { print $3 }' "$PW/seats.tsv" 2>/dev/null)
@@ -2075,7 +2076,8 @@ fx_gapahead() { # a gap marker dated ahead of the clock is an OPEN gap (a clock 
   [ "$_rc" = 0 ] || { PA_WHY="gap: the delivering waiter ended with rc $_rc (want 0)"; return 1; }
   [ "$(grep -c 'ga line' "$PAW/o.ga")" = 1 ] && [ "$(grep -c '^\[WAKE -> W1\]' "$PAW/o.ga")" = 1 ] || { PA_WHY="gap: want exactly one wake with the line, got '$(head -c 200 "$PAW/o.ga")'"; return 1; }
   [ "$_said1" -ge 1 ] && [ "$(grep -c 'ahead of the clock' "$PAW/e.ga")" = 1 ] || { PA_WHY="gap: the clock line must appear once per run across the missed and the retried attempt: before the delivery $_said1, in all $(grep -c 'ahead of the clock' "$PAW/e.ga")"; return 1; }
-  [ "$(pa_mt "$PW/.lastwake-W1")" -le "$(date +%s)" ] || { PA_WHY="gap: the delivery did not re-stamp the marker to now"; return 1; }
+  _mk=$(pa_mt "$PW/.lastwake-W1"); _nw=$(date +%s)
+  [ "$_mk" -le "$_nw" ] && [ "$_mk" -ge "$_t0" ] || { PA_WHY="gap: the delivery did not re-stamp the marker to now: marker '$_mk', want between '$_t0' (before the waiter started) and '$_nw' (now)"; return 1; }
   return 0
 }
 fx_jobjudge() { # the job check judges every row before it posts anything: a process that cannot be judged leaves the ledger and the board as they were; an odd pid is named as such
@@ -2329,6 +2331,8 @@ pa_mcopy gapsay; pa_msed gapsay bin/waiter.sh 's|gap_said=1; }; return 0 ;;|:; }
 [ "$(grep -c 'gap_said=1' "$MA/gapsay/bin/waiter.sh")" = 0 ] && pa_mut gapsay fx_gapahead || bad "mutant gapsay: the change was not applied"
 pa_mcopy gapctl; pa_msed gapctl bin/waiter.sh 's|then echo 1; else echo 0; fi|then echo 0; else echo 0; fi|'
 [ "$(grep -c 'then echo 0; else echo 0; fi' "$MA/gapctl/bin/waiter.sh")" = 1 ] && pa_mut gapctl fx_gapahead || bad "mutant gapctl: the change was not applied"
+pa_mcopy stampold; pa_msed stampold bin/waiter.sh 's|^  if ! wr_stamp "\$LAST"; then$|  if ! { wr_stamp "\$LAST" \&\& touch -t "$(( $(date +%Y) - 20 ))01010000" "\$LAST"; }; then|'
+[ "$(grep -c 'date +%Y) - 20 ))01010000" "\$LAST"' "$MA/stampold/bin/waiter.sh")" = 1 ] && pa_mut stampold fx_gapahead || bad "mutant stampold: the change was not applied"
 pa_mcopy jobsfirst; pa_msed jobsfirst bin/pids.sh 's|^    while IFS= read -r row; do judge_row "\$row"; done <<< "\$rows"$|    :|'
 [ "$(grep -c 'judge_row "\$row"' "$MA/jobsfirst/bin/pids.sh")" = 0 ] && pa_mut jobsfirst fx_jobjudge || bad "mutant jobsfirst: the change was not applied"
 pa_mcopy jobslate; pa_msed jobslate bin/pids.sh 's/^  st=\$(wr_proc "\$rp" "\$rs") || { wr_drop "\$keep"; wr_unlock "\$P";.*$/  st=$(wr_proc "$rp" "$rs") || st=fail/'
