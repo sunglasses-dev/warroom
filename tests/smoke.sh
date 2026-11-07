@@ -2559,7 +2559,7 @@ sv_case() { # name, signal, expected status
   rm -f "$SVF"; python3 -I "$SV" --timeout 60 -- bash -c "$SVSTUB" 2>"$T/sv.err" & SVP=$!
   if sv_up; then kill -"$2" $SVP; wait $SVP; _rc=$?; else kill -KILL $SVP 2>/dev/null; wait $SVP 2>/dev/null; _rc=none; fi
   if [ "$_rc" = "$3" ] && sv_gone && [ -n "$(cat "$SVF" 2>/dev/null)" ] && [ ! -e "$(cat "$SVF")" ]; then ok "supervisor: $1 stops the whole run group (status $3), no process and no temp dir left"
-  else bad "supervisor: $1: status $_rc (want $3), $(sv_left) process(es) left, temp dir '$(cat "$SVF" 2>/dev/null)'"; pkill -f "$SVM" 2>/dev/null; fi
+  else bad "supervisor: $1: status $_rc (want $3), $(sv_left) process(es) left, temp dir '$(cat "$SVF" 2>/dev/null)', stderr '$(head -c 400 "$T/sv.err" | tr '\n' ' ')'"; pkill -f "$SVM" 2>/dev/null; fi
 }
 sv_case "SIGINT" INT 130; sv_case "SIGTERM" TERM 143; sv_case "SIGHUP" HUP 129
 rm -f "$SVF"; python3 -I "$SV" --timeout 3 -- bash -c "$SVSTUB" 2>"$T/sv.err"; _rc=$?
@@ -2570,6 +2570,13 @@ if [ $_rc = 0 ] && sv_gone && [ ! -e "$(cat "$SVF")" ]; then ok "supervisor: a r
 else bad "supervisor normal exit: status $_rc, $(sv_left) left"; pkill -f "$SVM" 2>/dev/null; fi
 python3 -I "$SV" --timeout 60 -- bash -c 'exit 7'; _rc=$?
 [ $_rc = 7 ] && ok "supervisor: the command's exit status is kept" || bad "supervisor: status $_rc, want 7"
+# macOS answers EPERM, not ESRCH, for a group that holds only zombies: the sweep must read that as "nothing left", not crash (CI macOS: status 1)
+_o=$(python3 -I -c 'import importlib.util,os,sys
+spec=importlib.util.spec_from_file_location("sv",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+def refuse(*a): raise PermissionError(1,"Operation not permitted")
+os.killpg=refuse
+sys.exit(m.main(["--timeout","60","--","bash","-c","exit 3"]))' "$SV" 2>&1); _rc=$?
+[ $_rc = 3 ] && ok "supervisor: killpg refused with EPERM is read as nothing left to stop; the command's status is kept" || bad "supervisor EPERM: status $_rc '$_o'"
 _o=$(SMOKE_TIMEOUT=abc python3 -I "$SV" -- bash -c 'echo ran' 2>&1); _rc=$?
 { [ $_rc != 0 ] && ! printf '%s' "$_o" | grep -q '^ran$' && printf '%s' "$_o" | grep -q 'whole seconds'; } && ok "supervisor: a bad SMOKE_TIMEOUT is refused before anything runs" || bad "supervisor: SMOKE_TIMEOUT=abc gave rc $_rc '$_o'"
 # the supervisor itself killed outright: the guard (its own session) ends the group and removes the temp dir

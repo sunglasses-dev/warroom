@@ -35,15 +35,15 @@ def main(argv):
     if not raw.isdigit() or int(raw) < 1:
         sys.exit("supervise: the timeout must be whole seconds >= 1, got %r" % raw)
     limit = int(raw)
+    got = []
+    for n in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(n, lambda s, f: got.append(s))   # before any child exists: an early signal is kept, not fatal
     tmp = tempfile.mkdtemp(prefix="smoke.")
     env = dict(os.environ, SMOKE_INNER="1", SMOKE_T=tmp)
     run = subprocess.Popen(argv, env=env, start_new_session=True, stdin=subprocess.DEVNULL)
     guard = subprocess.Popen(["bash", "-c", GUARD, "smoke-guard", str(os.getpid()), str(run.pid), tmp],
                              start_new_session=True, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    got = []
-    for n in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(n, lambda s, f: got.append(s))
     end = time.monotonic() + limit
     rc = None
     while rc is None and not got and time.monotonic() < end:
@@ -56,12 +56,12 @@ def main(argv):
         try:
             os.killpg(run.pid, signal.SIGTERM)
             run.wait(timeout=3)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
             pass
         rc = run.poll()
     try:
         os.killpg(run.pid, signal.SIGKILL)  # whatever is left in the group, also after a normal exit
-    except ProcessLookupError:
+    except OSError:           # ProcessLookupError, or EPERM from a group of zombies on macOS: nothing left to stop
         pass
     if rc is None:
         rc = run.wait()
