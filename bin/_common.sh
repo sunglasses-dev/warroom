@@ -357,7 +357,12 @@ _WR_SLOT8=""; _WR_SLOT9=""; _WR_ARG8=""; _WR_ARG9=""
 _wr_path() { # FILE -> _WR_KEY = physical parent folder + base name (no checks)
   case "$1" in */*) _wr_dn=${1%/*}; [ -n "$_wr_dn" ] || _wr_dn=/ ;; *) _wr_dn=. ;; esac
   _wr_d=$(cd -P -- "$_wr_dn" 2>/dev/null && pwd -P) || return 1
-  # Bash 3.2 puts text left over from an earlier failed builtin write in front of what a $( ) prints: the folder is the last line
+  # Bash 3.2 puts text left over from an earlier failed builtin write in front of what a $( ) prints: the folder is the last line.
+  # The class: a `$( cd ... && pwd )` capture that runs AFTER a builtin write has failed in the same shell (echo, printf or a
+  # redirect on a closed stdout). Here that is possible (error branches call this resolver), so the answer is cut to its last
+  # line. The other `cd -P ... && pwd` captures (WR_ROOT above, wr_resolve, which only the startup checks call, each entry
+  # script's HERE and the BIN of the waiter-check hook) run before the script has written anything, so no stale text can be
+  # waiting; a new capture of this shape after a write needs the same cut.
   _wr_d=${_wr_d##*$'\n'}
   [ -d "$_wr_d" ] || return 1
   _WR_KEY="$_wr_d/${1##*/}"

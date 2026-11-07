@@ -25,20 +25,37 @@ P="$W/pids.tsv"; wr_create "$P" || { echo "cannot write the ledger $P" >&2; exit
 # live job keeps its row; one that cannot be told apart from a reused pid keeps it too and is said (unk); a dead one posts to
 # its owner, and a delivered post records the row's line number in gone so that ONE filter after the loop drops it. A post
 # that fails is said and the row simply stays (return 1: the loop goes on with the next row, the next check tries again).
-# It leaves the script (exit 1, ledger unchanged) when a process cannot be judged.
+# The state of each row was judged before any post (judge_row) and is used from there: a row's process is looked at once per
+# check, so no process that cannot be judged can end the script after a post, and no row can change its answer between the two passes.
+# judge_row ROW: the state of one row's process (alive, dead or unknown), judged for EVERY row before the first wake is posted
+# and kept in jall (one word per row with a label, in ledger order): a process that cannot be judged at all leaves the script
+# (exit 1, ledger unchanged) with nothing posted yet, so no wake is posted twice by the next check.
+judge_row() {
+  rl=$(wr_col 1 "$1") || ledgerfail
+  rp=$(wr_col 2 "$1") || ledgerfail
+  rs=$(wr_col 4 "$1") || ledgerfail
+  [ -n "$rl" ] || return 0
+  st=$(wr_proc "$rp" "$rs") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: could not judge pid $rp (job '$rl'); ledger unchanged, nothing posted for any row until it can be judged (or removed with pids.sh done)" >&2; exit 1; }
+  jall="$jall$st "
+}
 check_row() {
   rl=$(wr_col 1 "$1") || ledgerfail
   rp=$(wr_col 2 "$1") || ledgerfail
   ro=$(wr_col 3 "$1") || ledgerfail
   rs=$(wr_col 4 "$1") || ledgerfail
   [ -n "$rl" ] || return 0
-  st=$(wr_proc "$rp" "$rs") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: could not judge pid $rp (job '$rl'); ledger unchanged" >&2; exit 1; }
   printf '%s\n' "$1" >> "$keep" || bad=1
   nrow=$((nrow + 1))
+  st=${jq%% *}; jq=${jq#* }      # the answer of the first pass (judge_row) for this row; the process is not looked at a second time
   case "$st" in
     alive) ;;
     unknown)          # cannot tell a live job from a reused pid: keep the row, say so, look again
-      echo "pids.sh: cannot read the start time of pid $rp (job '$rl'): ps failed, so a live job cannot be told from a reused pid; row kept" >&2; unk=1 ;;
+      case "$rp" in
+        ''|*[!0-9]*|?????????????*) echo "pids.sh: the pid '$rp' of job '$rl' is not a plain positive number, so it cannot be judged; row kept" >&2 ;;
+        *[!0]*) echo "pids.sh: cannot read the start time of pid $rp (job '$rl'): ps failed, so a live job cannot be told from a reused pid; row kept" >&2 ;;
+        *) echo "pids.sh: the pid '$rp' of job '$rl' is not a plain positive number, so it cannot be judged; row kept" >&2 ;;
+      esac
+      unk=1 ;;
     dead)
       if wr_run "$HERE/board.sh" post GUARD "@$ro ACTION: job '$rl' (pid $rp) is no longer running. Read its receipt, then continue or restart it." </dev/null >/dev/null; then
         gone="$gone $nrow"            # delivered: the row is dropped by the filter after the loop
@@ -77,7 +94,7 @@ case "${1:-}" in
   check)
     # Every waiter runs this on every poll, so two seats can check at the same moment. The whole check runs under the
     # ledger lock: only one caller sees a dead row, posts its wake, then drops it.
-    bad=0; unk=0; nrow=0; gone=""
+    bad=0; unk=0; nrow=0; gone=""; jall=""; jq=""
     wr_lock "$P" || { echo "pids.sh: could not lock the job ledger; nothing changed" >&2; exit 1; }
     # the new ledger is built in a temp this call made (keep); without one nothing is posted or dropped
     wr_temp "$P" || { wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; }
@@ -85,6 +102,8 @@ case "${1:-}" in
     # the whole ledger is read first and judged from that copy: a read that fails, at the start or after some rows, posts nothing
     # and removes nothing
     rows=$(wr_registry_read "$P") || { wr_drop "$keep"; wr_unlock "$P"; echo "pids.sh: the job ledger $P could not be read; nothing changed" >&2; exit 1; }
+    while IFS= read -r row; do judge_row "$row"; done <<< "$rows"
+    jq=$jall
     while IFS= read -r row; do check_row "$row" || continue; done <<< "$rows"
     # a failed write to the new ledger means it is incomplete: keep the old one (a wake may then repeat) and say so
     if [ "$bad" != 0 ]; then wr_drop "$keep"; wr_unlock "$P"; echo "could not write the ledger $P: ledger unchanged" >&2; exit 1; fi
