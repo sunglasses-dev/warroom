@@ -2331,6 +2331,9 @@ pa_mcopy gapctl; pa_msed gapctl bin/waiter.sh 's|then echo 1; else echo 0; fi|th
 [ "$(grep -c 'then echo 0; else echo 0; fi' "$MA/gapctl/bin/waiter.sh")" = 1 ] && pa_mut gapctl fx_gapahead || bad "mutant gapctl: the change was not applied"
 pa_mcopy jobsfirst; pa_msed jobsfirst bin/pids.sh 's|^    while IFS= read -r row; do judge_row "\$row"; done <<< "\$rows"$|    :|'
 [ "$(grep -c 'judge_row "\$row"' "$MA/jobsfirst/bin/pids.sh")" = 0 ] && pa_mut jobsfirst fx_jobjudge || bad "mutant jobsfirst: the change was not applied"
+pa_mcopy jobslate; pa_msed jobslate bin/pids.sh 's/^  st=\$(wr_proc "\$rp" "\$rs") || { wr_drop "\$keep"; wr_unlock "\$P";.*$/  st=$(wr_proc "$rp" "$rs") || st=fail/'
+pa_mawk jobslate bin/pids.sh '/^    dead\)$/ { print "    fail) wr_drop \"$keep\"; wr_unlock \"$P\"; echo \"pids.sh: could not judge pid $rp (job $rl); ledger unchanged, nothing posted for any row\" >&2; exit 1 ;;" } { print }'
+[ "$(grep -c 'st=fail' "$MA/jobslate/bin/pids.sh")" = 1 ] && [ "$(grep -c '^    fail) wr_drop' "$MA/jobslate/bin/pids.sh")" = 1 ] && pa_mut jobslate fx_jobjudge || bad "mutant jobslate: the change was not applied"
 pa_mcopy jobstext; pa_msed jobstext bin/pids.sh "s|^        ''\|\*\[!0-9\]\*\|?????????????\*) echo .*|        ''\|*[!0-9]*\|?????????????*) echo \"pids.sh: cannot read the start time of pid \$rp (job '\$rl'): ps failed, so a live job cannot be told from a reused pid; row kept\" >\&2 ;;|"
 [ "$(grep -c 'not a plain positive number' "$MA/jobstext/bin/pids.sh")" = 1 ] && pa_mut jobstext fx_jobjudge || bad "mutant jobstext: the change was not applied"
 pa_mcopy joblook2; pa_msed joblook2 bin/pids.sh 's/^  st=\${jq%% \*}; jq=\${jq#\* }.*$/  st=$(wr_proc "$rp" "$rs") || return 1/'
