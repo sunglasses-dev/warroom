@@ -8,21 +8,18 @@
 # Supported ways to rotate a board: move it away (mv board.md board.old, then start a new file: new inode), or empty it
 # and let it fill again. A cursor written by an older version holds the checksum of the last line only; it is still
 # accepted once, and every cursor written from now on carries the prefix sum.
-wr_inode() {
-  _ino=$(stat -c %i "$1" 2>/dev/null) || _ino=$(stat -f %i "$1" 2>/dev/null) || _ino=0
-  case "$_ino" in ''|*[!0-9]*) _ino=0 ;; esac
-  echo "$_ino"
-}
+wr_inode() { wr_statnum %i %i "$1"; }   # FILE -> its inode number; status 1 and nothing printed if it cannot be read
 # The checksum functions report a failed read or a failed stage of their pipeline (pipefail inside a subshell), never a sum
 # of whatever arrived. A caller that gets a nonzero status consumes nothing.
 wr_generation() {
-  _gi=$(wr_inode "$1"); _gs=$( set -o pipefail; head -n 1 "$1" 2>/dev/null | cksum | cut -d' ' -f1 ) || return 1
+  _gi=$(wr_inode "$1") || return 1; _gs=$( set -o pipefail; head -n 1 "$1" 2>/dev/null | cksum | cut -d' ' -f1 ) || return 1
   [ -n "$_gs" ] || return 1
   echo "$_gi:$_gs"
 }
-wr_sum() { ( set -o pipefail; cksum | cut -d' ' -f1 ); }                       # checksum of stdin
+# Both buffer the answer and print it only when every stage succeeded: a failed stage prints nothing, not a partial sum.
+wr_sum() { _o=$( set -o pipefail; cksum | cut -d' ' -f1 ) || return 1; [ -n "$_o" ] || return 1; printf '%s\n' "$_o"; }   # checksum of stdin
 # wr_sumstdin — "crc-bytes" of stdin (the byte length makes a collision in the crc alone not enough)
-wr_sumstdin() { ( set -o pipefail; cksum | awk '{print $1 "-" $2}' ); }
+wr_sumstdin() { _o=$( set -o pipefail; cksum | awk '{print $1 "-" $2}' ) || return 1; [ -n "$_o" ] || return 1; printf '%s\n' "$_o"; }
 # wr_prefixsum BOARD N — "crc-bytes" of lines 1 to N (N = 0: the empty prefix, 0); nothing is printed when the read fails
 wr_prefixsum() {
   case "$2" in ''|*[!0-9]*) echo 0; return 0 ;; esac
@@ -47,27 +44,85 @@ wr_lines() {
   case "$_wl" in ''|*[!0-9]*) return 1 ;; esac
   echo "$_wl"
 }
+# wr_digits X — status 0 when X is one or more digits and nothing else
+wr_digits() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+# wr_canon N — status 0 when N is a canonical decimal: "0", or 1 to 15 digits with no leading zero (no wrap in the shell's
+# arithmetic, no octal reading of "08")
+wr_canon() {
+  case "$1" in
+    0) return 0 ;;
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 15 ]
+}
+# wr_cursor_parse FILE — status 0 and the three or four fields in _g _l _t _s when FILE holds exactly one newline-ended
+# record of the current grammar: GEN = digits ":" digits (the board's inode and the checksum of its first line), LINES and
+# EPOCH canonical decimals, each checked on its own, SUM absent (three fields, a cursor from the oldest version), digits
+# (the last line only) or digits "-" digits (the consumed prefix). Anything else is status 1 and a line on stderr naming
+# the file and the first rule it breaks; nothing is printed on stdout.
+wr_cursor_parse() {
+  _g=""; _l=""; _t=""; _s=""; _pc=""; _pf=""; _pi=""
+  _pk=$(wr_kind "$1") || { echo "cursor $1 is not a readable regular file" >&2; return 1; }
+  [ "$_pk" = file ] || { echo "cursor $1 is not a readable regular file" >&2; return 1; }
+  # the file is read once, checked, and then split as text: a failed read is told apart from the end of the file
+  _pc=$( cat -- "$1" 2>/dev/null && printf x ) || { echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1; }
+  _pc=${_pc%x}
+  # $( ) drops NUL bytes without a word, so a record that held one would read as a clean one: count them on their own
+  _pz=$( set -o pipefail; LC_ALL=C tr -d '\001-\377' < "$1" | wc -c ) || { echo "cursor $1 could not be checked for NUL bytes" >&2; return 1; }
+  [ "${_pz//[!0-9]/}" = 0 ] || { echo "cursor $1 holds a NUL byte" >&2; return 1; }
+  case "$_pc" in *$'\n'*) ;; *) echo "cursor $1 is empty, has no final newline or could not be read" >&2; return 1 ;; esac
+  case "$_pc" in *$'\n') _pc=${_pc%$'\n'} ;; *) echo "cursor $1 is not exactly one line" >&2; return 1 ;; esac
+  case "$_pc" in *$'\n'*) echo "cursor $1 is not exactly one line" >&2; return 1 ;; esac
+  _pf=$1; _pi=$IFS; IFS=' '; set -f
+  # shellcheck disable=SC2086  # split on single spaces on purpose, globbing is off
+  set -- $_pc
+  set +f; IFS=$_pi
+  [ "$#" -le 4 ] || { echo "cursor $_pf has more than four fields" >&2; return 1; }
+  _g=${1-}; _l=${2-}; _t=${3-}; _s=${4-}
+  set -- "$_pf"
+  wr_digits "${_g%%:*}" && wr_digits "${_g#*:}" && case "$_g" in *:*:*) false ;; *:*) true ;; *) false ;; esac \
+    || { echo "cursor $1: the generation is not digits:digits" >&2; return 1; }
+  wr_canon "$_l" || { echo "cursor $1: the line count is not a canonical decimal" >&2; return 1; }
+  wr_canon "$_t" || { echo "cursor $1: the time is not a canonical decimal" >&2; return 1; }
+  case "$_s" in
+    '') ;;
+    *-*) wr_digits "${_s%%-*}" && wr_digits "${_s#*-}" || { echo "cursor $1: the checksum is not digits-digits" >&2; return 1; } ;;
+    *) wr_digits "$_s" || { echo "cursor $1: the checksum is not digits" >&2; return 1; } ;;
+  esac
+  # the file must still be the regular file that was read (a link put in its place meanwhile is refused)
+  _pk=$(wr_kind "$1") || { echo "cursor $1 changed while it was read" >&2; return 1; }
+  [ "$_pk" = file ] || { echo "cursor $1 changed while it was read" >&2; return 1; }
+  return 0
+}
 # wr_cursor_get CURSOR_FILE BOARD MAX_AGE_SECONDS
 #   prints the line to resume from; 0 when the board was replaced, shrank or changed in the part already read (all of it
-#   is new to this reader); "none" when there is no usable cursor (first run, unreadable, or older than MAX_AGE_SECONDS).
-#   A checksum that cannot be computed is not "the board changed": nothing is printed and the status is 1, and the caller
-#   consumes nothing.
+#   is new to this reader); "none" when there is no cursor (first run: the file is absent and its folder can be searched)
+#   or the cursor is valid but older than MAX_AGE_SECONDS. A cursor that is unreadable, not of the grammar above, or dated
+#   more than a day ahead of the clock is corrupt, never "none": nothing is printed and the status is 1, and the caller
+#   consumes nothing. A checksum that cannot be computed is not "the board changed": same, status 1.
 wr_cursor_get() {
-  _g=""; _l=""; _t=""; _s=""; _cg=""; _cs=""
-  [ -r "$1" ] || { echo none; return; }                     # a missing cursor is normal on the first arm: say nothing
-  read -r _g _l _t _s < "$1" 2>/dev/null || { echo none; return; }
-  case "$_l$_t" in ''|*[!0-9]*) echo none; return ;; esac
-  [ $(( $(date +%s) - _t )) -le "${3:-86400}" ] || { echo none; return; }
+  _cg=""; _cs=""; _cn=""
+  _ca=$(wr_absent "$1") || { echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; }
+  if [ "$_ca" = yes ]; then echo none; return 0; fi          # a missing cursor is normal on the first arm: say nothing
+  _ck=$(wr_kind "$1") || { echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; }
+  [ "$_ck" != absent ] || { echo "cursor $1: its folder cannot be searched, so it is not known to be absent" >&2; return 1; }
+  wr_cursor_parse "$1" || return 1
+  _cn=$(wr_epoch) || { echo "cursor $1: could not read the clock" >&2; return 1; }
+  [ "$_t" -le $(( _cn + 86400 )) ] || { echo "cursor $1: its time is more than a day ahead of the clock" >&2; return 1; }
+  [ $(( _cn - _t )) -le "${3:-86400}" ] || { echo none; return 0; }
   _cg=$(wr_generation "$2") || return 1
   if [ "$_g" = "$_cg" ]; then
     _n=$(wr_lines "$2") || return 1
     if [ "$_l" -le "$_n" ]; then
-      if [ "$_l" -eq 0 ] || [ -z "$_s" ]; then echo "$_l"; return; fi     # nothing read yet, or a cursor without SUM (accepted once)
+      if [ "$_l" -eq 0 ] || [ -z "$_s" ]; then echo "$_l"; return 0; fi    # nothing read yet, or a cursor without SUM (accepted once)
       case "$_s" in
         *-*) _cs=$(wr_prefixsum "$2" "$_l") || return 1 ;;
         *)   _cs=$(wr_linesum "$2" "$_l") || return 1 ;;                   # older cursor: the last line only
       esac
-      [ "$_s" = "$_cs" ] && { echo "$_l"; return; }
+      [ "$_s" = "$_cs" ] && { echo "$_l"; return 0; }
     fi
   fi
   echo 0
@@ -78,8 +133,10 @@ wr_cursor_get() {
 # when the temp, the write or the rename fails; the cursor is then as it was, and only a temp this call made is removed (a
 # removal that fails is reported with the temp's path). Callers check the result before they report a read or a wake.
 wr_cursor_put() {
+  _cp=$(wr_epoch) || { echo "could not read the clock: the cursor $1 was not written" >&2; return 1; }
   wr_temp "$1" || { echo "could not create a temporary file next to $1" >&2; return 1; }
   _cur_t=$_WR_TMP
-  if printf '%s %s %s %s\n' "$2" "$3" "$(date +%s)" "${4:-0}" > "$_cur_t"; then wr_replace "$_cur_t" "$1"; return; fi
-  wr_drop "$_cur_t"; return 1
+  # the group keeps bash's own redirect error (it names our temporary file) off stderr; this helper says it in its own words
+  if { printf '%s %s %s %s\n' "$2" "$3" "$_cp" "${4:-0}" > "$_cur_t"; } 2>/dev/null; then wr_replace "$_cur_t" "$1" || return 1; return 0; fi
+  wr_drop "$_cur_t"; echo "could not write the cursor $1 (its temporary file could not be written)" >&2; return 1
 }

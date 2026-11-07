@@ -44,7 +44,10 @@ wr_seats_ok() {
 # wr_load_config FILE: sets each KEY found in FILE unless the environment already set it; on a bad line prints why and returns 2
 wr_load_config() {
   _lc_n=0; _lc_seen=" "
-  while IFS= read -r _lc_line || [ -n "$_lc_line" ]; do
+  # the file is read once, checked, and walked as text: a failed read is told apart from the end of the file
+  _lc_rest=$(cat -- "$1") || { echo "warroom.env ($1): cannot read the file" >&2; return 2; }
+  while [ -n "$_lc_rest" ]; do
+    case "$_lc_rest" in *$'\n'*) _lc_line=${_lc_rest%%$'\n'*}; _lc_rest=${_lc_rest#*$'\n'} ;; *) _lc_line=$_lc_rest; _lc_rest="" ;; esac
     _lc_n=$((_lc_n + 1)); _lc_line=${_lc_line%$'\r'}
     case "$_lc_line" in ''|'#'*) continue ;; esac
     if ! [[ $_lc_line =~ ^([A-Z_]+)=(.*)$ ]]; then
@@ -59,6 +62,6 @@ wr_load_config() {
     case "$_lc_k" in WARROOM_POLL|WARROOM_MIN_GAP|WARROOM_IDLE_MIN|WARROOM_LONG)
       case "$_lc_v" in ''|*[!0-9]*) echo "warroom.env line $_lc_n ($1): $_lc_k takes digits only" >&2; return 2 ;; esac ;; esac
     [ -n "${!_lc_k+x}" ] || printf -v "$_lc_k" '%s' "$_lc_v"
-  done < "$1"
+  done
   return 0
 }

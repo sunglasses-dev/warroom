@@ -970,12 +970,16 @@ class Analyzer:
     # Before any statement is judged, every file must be written in the forms the tree uses today. A file outside the envelope
     # has no statement that is ever accepted or listed. The forms are matched literally on purpose: a rule per construct would
     # be a recognizer, and a recognizer can be out-thought; a list of what the files do can only be too short, which fails.
-    CANON_HERE = '"$(cd "$(dirname "$0")" && pwd)"'
-    CANON_WR_ROOT = '"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"'
+    # An entry script finds its own folder with a plain parameter expansion (no dirname, whose status would be lost) and one
+    # checked capture: the case line, then HERE, the line after it. A library finds the repository root the same way.
+    CANON_HERE_CASE = 'case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac'
+    CANON_HERE = '$(cd -P -- "$_d" && pwd)'
+    CANON_WR_ROOT = '$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd)'
     ENV_RUNNERS = {('bin/_common.sh', 'wr_run')}        # file + function that may run a computed command word, as exactly "$@"
     RE_SRC_ENTRY_BIN = re.compile(r'^"\$HERE/(_[A-Za-z0-9_]+)\.sh"$')
     RE_SRC_ENTRY_HOOK = re.compile(r'^"\$HERE/\.\./bin/(_[A-Za-z0-9_]+)\.sh"$')
     RE_RUN_SIBLING = re.compile(r'^"\$HERE/([A-Za-z0-9_-]+\.sh)"$')
+    RE_RUN_TARGET = re.compile(r'^"\$HERE/((?:\.\./bin/)?[A-Za-z0-9][A-Za-z0-9_-]*\.sh)"$')
     RE_SRC_LIB = re.compile(r'^"\$WR_ROOT/bin/(_[A-Za-z0-9_]+)\.sh"$')
 
     def self_refs(self, f):
@@ -1019,17 +1023,22 @@ class Analyzer:
 
                 def bare(it):
                     while True:
-                        if it.k == 'andor' and len(it.parts) == 1:
+                        if it.k == 'andor' and (len(it.parts) == 1 or it.ops == ['||']):
                             it = it.parts[0]
                         elif it.k == 'pipe' and len(it.cmds) == 1 and not it.neg:
                             it = it.cmds[0]
                         else:
                             return it
                 top = [it for it in root.body.items if any(bare(it) is d for d in here_nodes)]    # the statement itself, not a group around it
-                ok_here = (len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1 and len(top) == 1
-                           and src[here_hits[0].value.start:here_hits[0].value.end].strip() == self.CANON_HERE)
+                items = root.body.items
+                at = items.index(top[0]) if top else -1
+                ok_here = (len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1
+                           and src[here_hits[0].value.start:here_hits[0].value.end].strip() == self.CANON_HERE
+                           and at > 0
+                           and src[items[at - 1].start:items[at - 1].end].strip() == self.CANON_HERE_CASE
+                           and self.writes_var(root, '_d') == 3)
                 if not ok_here:
-                    bad(f, None, 'E2', 'an entry script sets HERE exactly once, at top level, by the canonical line')
+                    bad(f, None, 'E2', 'an entry script sets HERE exactly once, at top level, by the canonical case line and the canonical line after it')
             if lib and f == 'bin/_common.sh' or (lib and wr_root_total):
                 pass
             for nd in walk(root):
@@ -1121,6 +1130,8 @@ class Analyzer:
         '"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"': 0,
         '"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"': 1,
         '"$(cd "$(dirname "$0")/.." && pwd)"': 1,
+        '$(cd -P -- "$_d" && pwd)': 0,
+        '$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd)': 1,
     }
 
     @staticmethod
@@ -1216,7 +1227,7 @@ class Analyzer:
         if up is None:
             return None
         _, _, tails, unknown = self.loose_edges()
-        if '"$0"' in key and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):
+        if ('"$0"' in key or '"$_d"' in key) and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):
             return None         # $0 is the file that was run: when this file is sourced it names the sourcer, not this file
         # a top-level statement, before the `.` and not inside anything
         top = None
@@ -1283,6 +1294,10 @@ class Analyzer:
             for d in walk(fn):
                 if d.k == 'simple' and d.words:
                     nm = cmd_name(d)
+                    if nm == 'exec' and len(d.words) == 1 and all(
+                            r.op in ('>&', '<&') and r.target is not None and word_lit(r.target) == '-'
+                            and r.fd.isdigit() and int(r.fd) >= 3 for r in d.redirs):
+                        continue       # `exec 8>&-` only closes a descriptor of 3 or up: it cannot fail and never leaves the shell
                     if nm in ('exit', 'kill', 'exec', 'command', 'builtin', 'eval', '$') or (nm in self.funcs and self.can_exit(nm, seen)):
                         return True
         return False
@@ -1434,6 +1449,8 @@ class Analyzer:
                 break
             c = first.cmds[0]
             if len(it.parts) == 1:
+                if c.k == 'case' and self.files[fname][0][it.start:it.end].strip() == self.CANON_HERE_CASE:
+                    continue        # the one line that finds the script's own folder (the checked capture after it is allowed below)
                 if c.k == 'func':
                     if c.body.k != 'group' or getattr(c.body, 'redirs', None):
                         break       # a redirection on the definition: every call may be skipped
@@ -1949,7 +1966,16 @@ class Analyzer:
                 if kind == 'pipe' and name not in self.propagating:
                     yield 'FCALL', nd       # judged like any command: does the pipeline's status reach a refusal?
                     return
+            if name in self.runner_names():
+                yield 'RUNCALL', nd         # a call of the one listed runner: its target is judged where it is called
+                return
             if name == '$':
+                fn = nd
+                while fn is not None and fn.k != 'func':
+                    fn = fn.parent
+                w0 = self.files[fname][0][nd.words[0].start:nd.words[0].end]
+                if w0 == '"$@"' and fn is not None and (fname, fn.name) in self.ENV_RUNNERS:
+                    return                  # the listed runner's own body (the envelope holds it to exactly this word)
                 yield 'DISPATCH', nd
             elif name == 'command' and len(args) == 2 and args[0] == '-v' and args[1] is not None:
                 yield 'TEST', nd
@@ -1980,6 +2006,29 @@ class Analyzer:
                     yield 'RD', nd
             elif name in self.propagating:
                 yield 'HCALL', nd
+
+    def runner_names(self):
+        """Names of the listed runner functions that are defined in their listed file."""
+        return {fn for (f, fn) in self.ENV_RUNNERS if f in self.files and any(df == f for df, _ in self.funcs.get(fn, []))}
+
+    def runcall(self, o):
+        """The runner runs whatever it is given, so a call must name a scanned script as its target: \"$HERE/x.sh\" or
+        \"$HERE/../bin/x.sh\". The reads inside that script are judged in that script."""
+        nd = o.node
+        if len(nd.words) < 2:
+            return self.bad('the runner is called with no target')
+        src = self.files[o.file][0]
+        m = self.RE_RUN_TARGET.match(src[nd.words[1].start:nd.words[1].end])
+        if m:
+            tgt = posixpath.normpath(posixpath.join(posixpath.dirname(o.file), m.group(1)))
+            if tgt in self.files and tgt != o.file:     # the pattern already refuses a library: its first character is a letter or digit
+                # the child's failure is the call's own status: that status must reach a refusal (as for a capture); a status
+                # saved in a variable and used later, or dropped, is not checked
+                res = self.consume(nd)
+                if res[0] != 'OK':
+                    return self.bad('the runner call is not checked: ' + res[1], res[2])
+                return self.ok('RUN', func=res[3]) if res[1] == 'REFUSE' else res
+        return self.bad('the runner is called with a target that is not a named scanned script')
 
     def async_call(self, nd):
         """'bg' when this call of a script function runs in the background (whatever it refuses ends that process only and the
@@ -2026,6 +2075,8 @@ class Analyzer:
                 res = inner
         elif o.kind == 'ACALL':
             res = self.bad('a script function is called in the background: its refusal ends only that process')
+        elif o.kind == 'RUNCALL':
+            res = self.runcall(o)
         elif o.kind == 'DISPATCH':
             res = self.bad('dispatch through a variable, eval, xargs, command or a shell -c string cannot be audited')
         elif o.kind == 'HERE':
@@ -2352,8 +2403,8 @@ class Contracts:
             return 'H needs the two-stage help pipeline'
         a = [word_lit(w) for w in pipe.cmds[0].words]
         b = [word_lit(w) for w in pipe.cmds[1].words]
-        okA = len(a) == 4 and a[0] == 'sed' and a[1] == '-n' and re.fullmatch(r"[0-9]+,[0-9]+p", a[2] or '') and word_lit(pipe.cmds[0].words[3]) is None \
-            and self.dollar0(pipe.cmds[0].words[3])
+        okA = len(a) == 5 and a[0] == 'sed' and a[1] == '-n' and a[2] == '--' and re.fullmatch(r"[0-9]+,[0-9]+p", a[3] or '') \
+            and word_lit(pipe.cmds[0].words[4]) is None and self.dollar0(pipe.cmds[0].words[4])
         okB = b == ['sed', 's/^# \\{0,1\\}//']
         if not (okA and okB):
             return 'H pipeline is not sed -n N,Mp "$0" | sed s/^# \\{0,1\\}//'
@@ -2381,19 +2432,16 @@ class Contracts:
 
     def display_stmt(self, o):
         """The value is printed by an echo/printf (climbing out of nested substitutions that are arguments). That printing
-        statement must itself sit in a plain place: not captured by a substitution, no redirection to a file, no pipe. The one
-        capture accepted is the stored hint `NAME=$(printf ...)`, a printf that is the whole body of the substitution."""
+        statement must itself sit in a plain place: not captured by a substitution, no redirection to a file, no pipe. A value
+        printed inside an outer capture is never accepted, even when that capture is checked: its status says nothing about the
+        display inside it."""
         sm = self.outer_simple(o)
         while sm is not None:
             if sm.words and cmd_name(sm) in ('echo', 'printf') and not any(self.file_out(r) or r.op == '<' for r in sm.redirs):
                 cs = self.nearest_cs(sm)
                 if cs is None:
                     return self.climb(sm, None, 0, True) is None
-                owner = self.outer_simple_of(cs)
-                if (cmd_name(sm) == 'printf' and len(cs.body.items) == 1 and self.an.single_simple(cs.body.items[0]) is sm
-                        and owner is not None and not owner.words and len(owner.assigns) == 1 and not owner.redirs):
-                    return self.climb(owner, None, 0, False) is None
-                sm = owner
+                sm = self.outer_simple_of(cs)       # printed inside another substitution: that capture hides the failure of this one
                 continue
             cs = self.nearest_cs(sm)
             if cs is None:
@@ -2728,13 +2776,13 @@ def summarize(an, entries, dead, invalid, ambiguous):
     return occs, ok, listed, unlisted
 
 
-def report(an, entries, dead, invalid, ambiguous, verbose=False, tsv=None, out=sys.stdout):
+def report(an, entries, dead, invalid, ambiguous, verbose=False, tsv=None, out=sys.stdout, enforce=False):
     occs, ok, listed, unlisted = summarize(an, entries, dead, invalid, ambiguous)
     kinds = {}
     for o in occs:
         kinds[o.kind] = kinds.get(o.kind, 0) + 1
-    out.write('read-gate (report mode): files=%d occurrences=%d classes=%d unlisted=%d listed=%d ok=%d dead=%d invalid=%d ambiguous=%d%s\n'
-              % (len(an.files), len(occs), len(kinds), len(unlisted), len(listed), len(ok), len(dead), len(invalid), len(ambiguous),
+    out.write('read-gate (%s): files=%d occurrences=%d classes=%d unlisted=%d listed=%d ok=%d dead=%d invalid=%d ambiguous=%d%s\n'
+              % ('enforcing' if enforce else 'report mode', len(an.files), len(occs), len(kinds), len(unlisted), len(listed), len(ok), len(dead), len(invalid), len(ambiguous),
                  '' if an.envelope_on else ' envelope=off'))
     out.write('  classes: %s\n' % ', '.join('%s=%d' % (k, kinds[k]) for k in sorted(kinds)))
     st = {}
@@ -2893,6 +2941,7 @@ MUTANTS = [
     ('d-other-format', 'pos_d_display.sh', '$(date +%H:%M)', '$(date +%s)', '@allows only date'),
     ('k-not-a-tab', 'pos_k_tab.sh', "printf '\\t'", "printf '%s' x", '@literal tab'),
     ('h-other-file', 'pos_h_help.sh', '"$0"', '"$F"', '@H pipeline is not sed'),
+    ('h-no-end-of-options', 'pos_h_help.sh', " -- ", " ", '@H pipeline is not sed'),
     ('m-reads-a-file', 'pos_m_drain.sh', 'cat >/dev/null', 'cat "$F" >/dev/null', '@bare cat'),
     ('x-writes-state', 'pos_x_formatter.sh', '{ : >> "$1.flock"; }', '{ echo hi >> "$1.flock"; }', '@null-command probe'),
     ('x-not-terminal', 'pos_x_formatter.sh', '>&2; return 1', '>&2; echo more', '@followed by return or exit'),
@@ -2942,11 +2991,11 @@ TREE_CASES = {
 
 # The file envelope (envelope on): a tree that is written in the forms the tree uses today shows no ENVELOPE row; each case below
 # changes one thing. A diagnostic that starts with "!" must be ABSENT from the output (the controls).
-CH = 'HERE="$(cd "$(dirname "$0")" && pwd)"\n'
-ENV_COMMON = '#!/usr/bin/env bash\nWR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\ndie() { echo "$1" >&2; exit 1; }\n'
+CH = 'case $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac\nHERE=$(cd -P -- "$_d" && pwd) || exit 1\n'
+ENV_COMMON = '#!/usr/bin/env bash\nWR_ROOT=$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd)\ndie() { echo "$1" >&2; exit 1; }\n'
 # the same library with the prelude in the order the refusal rules want (helper first, the one checked capture next)
 ENV_COMMON_CHECKED = ('#!/usr/bin/env bash\ndie() { echo "$1" >&2; exit 1; }\n'
-                      'WR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1\n')
+                      'WR_ROOT=$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd) || exit 1\n')
 ENV_ENTRY = '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n'
 ENV_HOOK = '#!/usr/bin/env bash\n' + CH + '. "$HERE/../bin/_common.sh" || exit 1\n'
 ENV_BASE = {'bin/_common.sh': ENV_COMMON, 'bin/a.sh': ENV_ENTRY, 'hooks/h.sh': ENV_HOOK}
@@ -2968,9 +3017,12 @@ TREE_CASES.update({
     'env_out_library_in_hooks': (env_tree(**{'hooks/_x.sh': ':\n'}), 1, 'lives in bin/ only'),
     'env_entry_without_here': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n:\n'}), 1, 'sets HERE exactly once'),
     'env_entry_here_twice': (env_tree(**{'bin/a.sh': ENV_ENTRY + 'HERE=/x\n'}), 1, 'sets HERE exactly once'),
-    'env_entry_here_other_form': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\nHERE=$(dirname "$0")\n. "$HERE/_common.sh" || exit 1\n'}),
+    'env_entry_here_other_form': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n' + CH.replace('cd -P', 'cd') + '. "$HERE/_common.sh" || exit 1\n'}),
                                   1, 'sets HERE exactly once'),
-    'env_entry_here_not_top_level': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\nf() {\n' + CH + '}\nf\n. "$HERE/_common.sh" || exit 1\n'}),
+    'env_entry_here_no_case': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\n_d=.\n_d=.\n_d=.\n:\nHERE=$(cd -P -- "$_d" && pwd) || exit 1\n. "$HERE/_common.sh" || exit 1\n'}),
+                               1, 'sets HERE exactly once'),
+    'env_entry_here_d_written_again': (env_tree(**{'bin/a.sh': ENV_ENTRY + '_d=/x\n'}), 1, 'sets HERE exactly once'),
+    'env_entry_here_not_top_level': (env_tree(**{'bin/a.sh': '#!/usr/bin/env bash\ncase $0 in */*) _d=${0%/*}; [ -n "$_d" ] || _d=/ ;; *) _d=. ;; esac\nf() {\nHERE=$(cd -P -- "$_d" && pwd) || exit 1\n}\n'}),
                                      1, 'sets HERE exactly once'),
     'env_library_sets_here': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'HERE=/x\n'}), 1, 'never sets HERE'),
     'env_library_names_itself': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'x=$(dirname "$0")\n'}), 1, 'never names itself'),
@@ -2987,6 +3039,13 @@ TREE_CASES.update({
                                                    'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/a.sh" check\n'}), 1, '!ENVELOPE E4'),
     'env_control_trap_action_plain_calls': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'wr_drop \"$a\"; wr_drop \"$b\"' EXIT\n"}), 1, '!ENVELOPE E4'),
     'env_trap_action_exec_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + "trap 'exec 2>\"$1\"' DEBUG\n"}), 1, 'a trap action holds only plain calls'),
+    # a hook that sources an entry script is outside the envelope and so is everything in its own shell, but a separate entry
+    # script is another process: its own rows stand (its two checked reads below, the folder capture and the file read, are still accepted)
+    'env_hook_failure_leaves_other_processes': (env_tree(**{'bin/_common.sh': ENV_COMMON_CHECKED,
+                                                            'bin/b.sh': ENV_ENTRY + 'y=1\n',
+                                                            'hooks/h.sh': ENV_HOOK + '. "$HERE/../bin/b.sh" || exit 1\n',
+                                                            'bin/a.sh': ENV_ENTRY + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
+                                                1, 'ok=3 '),
     'env_control_high_descriptors': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 9>>"$WR_ROOT/x.lock"\nexec 8>&-\nexec 9>&-\n'}), 1, '!ENVELOPE E3'),
     # a file outside the envelope shares its shell with every file it sources and every file that sources it: no row there stands
     'env_shared_shell_library_fails': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'exec 2>>"$WR_ROOT/log"\n',
@@ -2999,6 +3058,38 @@ TREE_CASES.update({
                                                         'hooks/h.sh': ENV_HOOK + 'F=${1:-}\nx=$(cat "$F") || die "cannot read"\necho "$x" > out\n'}),
                                             1, 'shares a shell with it'),
     'env_runner_in_another_function': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'other() { "$@"; }\n'}), 1, 'computed command word'),
+    # the runner's call sites: the target must be a named scanned script, judged where it is called
+    'env_runcall_named_script': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                             'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                                             'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check || exit 1\n'}), 1, '!not a named scanned script'),
+    'env_runcall_computed_target': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                                'bin/a.sh': ENV_ENTRY + 'wr_run "$1" check || exit 1\n'}), 1, 'not a named scanned script'),
+    'env_runcall_no_target': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                          'bin/a.sh': ENV_ENTRY + 'wr_run || exit 1\n'}), 1, 'called with no target'),
+    'env_runcall_target_not_scanned': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                                   'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/nope.sh" check || exit 1\n'}), 1, 'not a named scanned script'),
+    'env_runcall_target_is_a_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                                    'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/_common.sh" check || exit 1\n'}), 1, 'not a named scanned script'),
+    'env_runcall_runner_body_is_not_a_dispatch': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n'}), 1, '!computed command word'),
+    # the status of a runner call is the child's: it must reach a refusal, not be saved, dropped or defaulted
+    'runcall_status_saved_and_unused': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                       'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                                       'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check > out\nrc=$?\nprintf "%s" "$rc" > out2\n'}), 1, 'the runner call is not checked'),
+    'runcall_status_dropped': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                              'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                              'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check\necho done\n'}), 1, 'the runner call is not checked'),
+    'runcall_status_defaulted': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                                'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                                'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check || true\n'}), 1, 'the runner call is not checked'),
+    'runcall_checked_or_exit': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                               'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                               'bin/a.sh': ENV_ENTRY + 'wr_run "$HERE/b.sh" check > out || exit 1\n'}), 1, '!the runner call is not checked'),
+    'runcall_checked_if_not': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                              'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                              'bin/a.sh': ENV_ENTRY + 'if ! wr_run "$HERE/b.sh" check > out; then exit 1; fi\n'}), 1, '!the runner call is not checked'),
+    'runcall_checked_capture': (env_tree(**{'bin/_common.sh': ENV_COMMON + 'wr_run() { "$@" 8>&- 9>&-; }\n',
+                               'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '. "$HERE/_common.sh" || exit 1\n',
+                               'bin/a.sh': ENV_ENTRY + 'x=$(wr_run "$HERE/b.sh" check) || exit 1\n'}), 1, '!the runner call is not checked'),
     'env_sibling_not_scanned': (env_tree(**{'bin/b.sh': '#!/usr/bin/env bash\n' + CH + '"$HERE/nope.sh" check\n'}), 1, 'computed command word'),
     'env_source_computed_in_library': (env_tree(**{'bin/_common.sh': ENV_COMMON + '. "$1/_x.sh" || exit 1\n'}), 1, 'one of three exact forms'),
 })
@@ -3050,6 +3141,8 @@ CODE_MUTANTS = [
     # rule 4: the prelude (top-level, before the first other statement, defined once, no redirection, checked sources)
     ('code-r4-prelude-ends-at-use', 'if not self.plain_exit(rhs):\n                break', 'if not self.plain_exit(rhs):\n                pass',
      'neg_allow_use_before_definition_in_prelude_run.sh'),
+    ('code-r4-prelude-folder-line-exact', "self.files[fname][0][it.start:it.end].strip() == self.CANON_HERE_CASE:\n                    continue", "True:\n                    continue",
+     'neg_allow_helper_after_other_case.sh'),
     ('code-r4-prelude-ends-at-statement', "if name == 'trap' and args == ['', 'PIPE']:\n                    continue\n                break",
      "if name == 'trap' and args == ['', 'PIPE']:\n                    continue\n                continue", 'neg_allow_statement_before_definition.sh'),
     ('code-r4-top-level-only', 'for it in root.body.items:', "for it in [x for x in walk(root) if x.k == 'andor']:", 'neg_allow_def_in_uncalled_fn.sh'),
@@ -3093,6 +3186,7 @@ CODE_MUTANTS = [
     ('code-no-unset-check', "if any(a is None for a in args) or '-f' in args or any(a in self.funcs or a in REFUSAL_WORDS for a in args if a):", 'if False:', 'neg_shadow_unset_function.sh'),
     ('code-no-exit-trap-check', "elif name == 'trap':\n                        why = self.check_trap(where, args)", "elif False:\n                        why = self.check_trap(where, args)",
      'neg_proc_exit_trap_rewrites.sh'),
+    ('code-can-exit-exec-close-only', "if nm == 'exec' and len(d.words) == 1 and all(", "if nm == 'exec' and len(d.words) == 1 and True or all(", 'neg_allow_cleanup_helper_exec_opens_file.sh'),
     ('code-inert-helper-may-exit', "if nm in ('exit', 'kill', 'exec', 'command', 'builtin', 'eval', '$') or (nm in self.funcs and self.can_exit(nm, seen)):", 'if False:', 'neg_allow_cleanup_helper_exits_zero.sh'),
     ('code-no-alias-check', 'if name in SHADOW_CMDS:', 'if False:', 'neg_allow_alias.sh'),
     ('code-no-unknown-signal-check', "return '%s: trap on %s, which is not a signal name this gate knows' % (where, x)", 'continue', 'neg_allow_trap_unknown_signal_harmless.sh'),
@@ -3119,10 +3213,13 @@ CODE_MUTANTS = [
     ('code-e2-entry-sets-wr-root', "if self.writes_var(root, 'WR_ROOT'):\n                    bad(f, None, 'E2', 'only the library sets WR_ROOT')",
      "if False:\n                    bad(f, None, 'E2', 'only the library sets WR_ROOT')", 'tree:env_entry_sets_wr_root', 'only the library sets WR_ROOT'),
     ('code-e2-entry-here-once', "if not ok_here:", "if False:", 'tree:env_entry_without_here', 'sets HERE exactly once'),
-    ('code-e2-entry-here-count', "len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1 and len(top) == 1", "len(top) >= 1",
+    ('code-e2-entry-here-count', "len(here_hits) == 1 and self.writes_var(root, 'HERE') == 1", "len(top) >= 1",
      'tree:env_entry_here_twice', 'sets HERE exactly once'),
-    ('code-e2-entry-here-canonical', "== self.CANON_HERE)", "!= '')", 'tree:env_entry_here_other_form', 'sets HERE exactly once'),
-    ('code-e2-entry-here-top-level', "and len(top) == 1\n", "\n", 'tree:env_entry_here_not_top_level', 'sets HERE exactly once'),
+    ('code-e2-entry-here-canonical', "== self.CANON_HERE\n", "!= ''\n", 'tree:env_entry_here_other_form', 'sets HERE exactly once'),
+    ('code-e2-entry-here-case-line', "                           and src[items[at - 1].start:items[at - 1].end].strip() == self.CANON_HERE_CASE\n", "",
+     'tree:env_entry_here_no_case', 'sets HERE exactly once'),
+    ('code-e2-entry-here-d-once', "\n                           and self.writes_var(root, '_d') == 3)", ")", 'tree:env_entry_here_d_written_again', 'sets HERE exactly once'),
+    ('code-e2-entry-here-top-level', "                           and at > 0\n", "", 'tree:env_entry_here_not_top_level', 'sets HERE exactly once'),
     ('code-e2-source-keyword', "if name == 'source':\n                    bad(", "if False:\n                    bad(", 'tree:env_source_keyword', 'only the dot form'),
     ('code-e2-source-entry-bin-form', "m = self.RE_SRC_ENTRY_BIN.match(text0)", "m = self.RE_SRC_ENTRY_BIN.match(text0) or self.RE_SRC_ENTRY_HOOK.match(text0)",
      'tree:env_source_hook_form_in_bin', 'one of three exact forms'),
@@ -3144,9 +3241,17 @@ CODE_MUTANTS = [
     ('code-e4-computed-word', """if not (w0 == '"$@"' and fn is not None and (f, fn.name) in self.ENV_RUNNERS):""", "if False:",
      'neg_envelope_computed_word.sh', 'computed command word'),
     ('code-e4-runner-listed', "and (f, fn.name) in self.ENV_RUNNERS):", "):", 'tree:env_runner_in_another_function', 'computed command word'),
+    ('code-runcall-target-named', "if tgt in self.files and tgt != o.file:", "if True:",
+     'tree:env_runcall_target_not_scanned', 'not a named scanned script'),
+    ('code-runcall-status-reaches-refusal', "res = self.consume(nd)\n                if res[0] != 'OK':", "res = self.ok('REFUSE')\n                if res[0] != 'OK':",
+     'tree:runcall_status_saved_and_unused', 'the runner call is not checked'),
+    ('code-display-in-outer-capture', "sm = self.outer_simple_of(cs)       # printed inside another substitution: that capture hides the failure of this one\n                continue",
+     "return True", 'neg_allow_d_inside_checked_capture.sh', 'must be printed by echo or printf'),
+    ('code-runcall-literal-form', "m = self.RE_RUN_TARGET.match(src[nd.words[1].start:nd.words[1].end])", "m = re.match(r'^.*$', src[nd.words[1].start:nd.words[1].end])",
+     'tree:env_runcall_computed_target', 'not a named scanned script'),
     ('code-e4-sibling-scanned', "if sib and not lib and posixpath.join(folder, sib.group(1)) in self.files:", "if sib:", 'tree:env_sibling_not_scanned', 'computed command word'),
     # source identity and call-site context
-    ('code-src-dollar0-names-the-sourcer', """if '"$0"' in key and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):""",
+    ('code-src-dollar0-names-the-sourcer', """if ('"$0"' in key or '"$_d"' in key) and (unknown or any(g != fname for g in tails.get(posixpath.basename(fname), ()))):""",
      "if False:", 'tree:tree_source_dollar0_in_sourced_file'),
     ('code-src-sourced-file-writes-the-variable', "if self.writes_var(self.files[g][2], var) != (1 if g == fname else 0):", "if False:",
      'tree:tree_source_sourced_file_reassigns_here'),
@@ -3297,6 +3402,19 @@ def self_test(here):
     pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--root', os.path.join(fx_dir, 'no-such-root')],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
     check('empty discovery is a tool error', pr.returncode == 2, 'exit %d' % pr.returncode)
+    # a row of a reason that no longer exists (the removed in-place compensation) is refused as an unknown reason, never read
+    check('no reason F in the table', 'F' not in REASONS, 'F is still a reason')
+    stale_d = tempfile.mkdtemp()
+    try:
+        stale = os.path.join(stale_d, 'stale.allow')
+        with open(stale, 'w', encoding='utf-8') as fh:
+            fh.write('bin/pids.sh\t49b3-708d-efb9\t0\tF\tb2a1-8a0f-5649\ta leftover row of a removed reason\n')
+        pr = subprocess.run([sys.executable, '-I', me, '--enforce', '--allow', stale],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        check('a leftover F row is refused as an unknown reason', pr.returncode == 2 and 'expected file' in pr.stdout,
+              'exit %d: %s' % (pr.returncode, pr.stdout.strip()[:200]))
+    finally:
+        shutil.rmtree(stale_d, ignore_errors=True)
     print('read-gate self-test: %d checks passed, %d failed (%d fixtures, %d trees, %d mutants, %d code mutants)' % (passes, len(fails), len(names), len(TREE_CASES), len(MUTANTS), len(CODE_MUTANTS)))
     for f in fails:
         print('  FAIL: %s' % f)
@@ -3332,7 +3450,7 @@ def main(argv):
             exp, allows, minocc = parse_header(text)
             entries = bind_entries(name, text, allows)
             an, d, i, x, u = run_text(name, text, entries)
-            bad = report(an, entries, d, i, x, verbose=True)
+            bad = report(an, entries, d, i, x, verbose=True, enforce=a.enforce)
             return (1 if bad else 0) if a.enforce else 0
         files = tree_files(a.root)
         if not files:
@@ -3352,7 +3470,7 @@ def main(argv):
             with open(a.allow, encoding='utf-8') as fh:
                 entries = load_allow(fh.read(), a.allow)
         dead, invalid, ambiguous = apply_allow(an, entries)
-        bad = report(an, entries, dead, invalid, ambiguous, verbose=a.verbose, tsv=a.tsv)
+        bad = report(an, entries, dead, invalid, ambiguous, verbose=a.verbose, tsv=a.tsv, enforce=a.enforce)
         if a.enforce:
             return 1 if bad else 0
         return 0
