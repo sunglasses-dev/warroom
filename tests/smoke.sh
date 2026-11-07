@@ -1898,16 +1898,36 @@ STUB
   cmp -s "$PAW/led1" "$PW/pids.tsv" || { PA_WHY="PK2: the ledger is '$(tr '\t' '~' < "$PW/pids.tsv" | tr '\n' '|')' (want the failed and the live row, unchanged)"; return 1; }
 }
 pa_hooklint() { # TREE: every hook ends on an explicit exit 0 or 1; no shell statement of a hook or of a library it sources exits with anything else
-  # (comments and Python's sys.exit are not statements); the only exit 2 left in a library are the two bin-only arms in _common.sh
-  _hs='(^[[:space:]]*|[;&|{][[:space:]]*|(then|else|do)[[:space:]]+)exit([[:space:]]+[^[:space:];}&|)]+)?'
+  # (comments and Python's sys.exit are not statements); the only exit 2 left in a library are the two bin-only arms in _common.sh.
+  # Deny by default: every word "exit" of the code must be a statement (it starts a line or follows ; & | { ( ) then else do, with an optional
+  # backslash) that ends in a literal 0 or 1, so a wrapped exit (time, !, if, a variable prefix) is a word left over. The words builtin, command,
+  # eval, trap and errexit, any exec word that is not a bare descriptor change (exec 8>file, exec 8>&-), a set with a flag e or E, wherever
+  # they stand, and a source of a file
+  # the lint does not scan are refused as well. The one message that prints "(exit $_wr_rc)" is left out of the count. A lint of the shapes the
+  # tree can hold, not a shell parser.
+  _sp='(^[[:space:]]*|[;&|{()][[:space:]]*|(then|else|do)[[:space:]]+)\\?'
+  _hs="${_sp}exit([[:space:]]+[^[:space:];}&|)]+)?"
+  _wb='(^|[^A-Za-z0-9_.])'
+  _scanned=$(for _f in "$1"/hooks/*.sh "$1"/bin/_*.sh; do printf '%s\n' "${_f##*/}"; done)
   for _f in "$1"/hooks/*.sh; do
     _code=$(grep -v '^[[:space:]]*#' "$_f" | grep -v '^[[:space:]]*$'); _last=$(printf '%s\n' "$_code" | tail -1)
     case "$_last" in 'exit 0'|'exit 1') ;; *) PA_WHY="${_f##*/}: the last line is '$_last', not an explicit exit 0 or 1"; return 1 ;; esac
     printf '%s\n' "$_code" | grep -q 'wr_seat_arg' && { PA_WHY="${_f##*/} calls wr_seat_arg (it exits 2)"; return 1; }
     grep -q '^WR_CONFIG_EXIT=1$' "$_f" || { PA_WHY="${_f##*/} does not set WR_CONFIG_EXIT=1"; return 1; }
   done
-  for _f in "$1"/hooks/*.sh "$1"/bin/_cursor.sh "$1"/bin/_config.sh "$1"/bin/_common.sh; do
-    _ex=$(grep -v '^[[:space:]]*#' "$_f" | grep -oE "$_hs" | sed -E 's/^.*exit/exit/; s/[[:space:]]+/ /g')
+  for _f in "$1"/hooks/*.sh "$1"/bin/_*.sh; do
+    _code=$(grep -v '^[[:space:]]*#' "$_f")
+    _w=$(printf '%s\n' "$_code" | grep -owE 'builtin|command|eval|trap|errexit' | head -1)
+    [ -z "$_w" ] || { PA_WHY="${_f##*/}: the word '$_w' (builtin, command, eval, trap and errexit can end the script with a status of their own)"; return 1; }
+    _w=$(printf '%s\n' "$_code" | grep -oE "${_wb}exec([[:space:]]+[0-9]*[<>])?" | grep -v '[<>]$' | head -1)
+    [ -z "$_w" ] || { PA_WHY="${_f##*/}: an exec that is not a bare descriptor change"; return 1; }
+    _w=$(printf '%s\n' "$_code" | grep -oE "${_wb}set[[:space:]][^;&|)}]*" | grep -E '[[:space:]]-[A-Za-z]*[eE]' | head -1)
+    [ -z "$_w" ] || { PA_WHY="${_f##*/}: a set that turns errexit or errtrace on ('$(printf '%s' "$_w" | tr -s ' ')')"; return 1; }
+    for _w in $(printf '%s\n' "$_code" | grep -oE "${_sp}(\\.|source)[[:space:]]+[^[:space:];&|)}]+" | sed -E 's/^.*[[:space:]]//; s/["'"'"']//g; s|^.*/||'); do
+      printf '%s\n' "$_scanned" | grep -qxF -- "$_w" || { PA_WHY="${_f##*/}: sources '$_w', a file this lint does not scan"; return 1; }
+    done
+    _xc=$(printf '%s\n' "$_code" | sed -E 's/\(exit \$_wr_rc\)//; s/[A-Za-z_]+\.exit//g')
+    _ex=$(printf '%s\n' "$_xc" | grep -oE "$_hs" | sed -E 's/^.*exit/exit/; s/[[:space:]]+/ /g')
     _odd=$(printf '%s\n' "$_ex" | grep -v '^$' | grep -vxE 'exit 0|exit 1|exit 2' | head -1)
     [ -z "$_odd" ] || { PA_WHY="${_f##*/}: a shell statement '$_odd' (only a literal exit 0 or 1 is allowed)"; return 1; }
     _n2=$(printf '%s\n' "$_ex" | grep -c '^exit 2$')
@@ -1915,7 +1935,10 @@ pa_hooklint() { # TREE: every hook ends on an explicit exit 0 or 1; no shell sta
       _common.sh) [ "$_n2" = 2 ] || { PA_WHY="_common.sh: exit 2 must stand exactly twice (wr_seat_arg and the bin-only startup arm), found $_n2"; return 1; } ;;
       *) [ "$_n2" = 0 ] || { PA_WHY="${_f##*/}: an exit 2 statement"; return 1; } ;;
     esac
+    _nall=$(printf '%s\n' "$_xc" | grep -ow exit | wc -l | tr -d ' '); _nst=$(printf '%s\n' "$_ex" | grep -c '^exit')
+    [ "$_nall" = "$_nst" ] || { PA_WHY="${_f##*/}: $((_nall - _nst)) word(s) 'exit' that are not a statement of their own (found $_nall, statements $_nst)"; return 1; }
   done
+  return 0
 }
 fx_hl1() { # hooks never exit 2: a failing stage of the board-tail view exits 1 and says so; a banner that cannot be written exits 1; the static rule holds on the tree
   pa_setup; pa_w; mkdir -p "$PAW/shim"
@@ -1945,6 +1968,65 @@ fx_hl1() { # hooks never exit 2: a failing stage of the board-tail view exits 1 
   { [ "$_rc" = 0 ] && case "$_o" in *"[WAITER ENDED]"*) true ;; *) false ;; esac; } || { PA_WHY="HL1: waiter-check control (ended waiter) -> rc $_rc '$_o'"; return 1; }
   printf '{"session_id":"sid-hl1"}' | pa_run WARROOM_DIR="$PW" bash "$PHK/waiter-check.sh" >&- 2>"$PAW/e"; _rc=$?
   [ "$_rc" = 1 ] || { PA_WHY="HL1: waiter-check (ended waiter) with stdout closed -> rc $_rc (want 1)"; return 1; }
+  return 0
+}
+pa_lc() { # NAME FILE MODE LINE WANT: the tree with LINE added to FILE (MODE hook: before its last line; lib: at its end) fails pa_hooklint with WANT in the reason; WANT "-": it passes
+  rm -rf "$PAW/lt"; mkdir -p "$PAW/lt" && cp -R "$PB" "$PAW/lt/bin" && cp -R "$PHK" "$PAW/lt/hooks" || { PA_WHY="HL2 $1: copy"; return 1; }
+  if [ "$3" = hook ]; then PA_LCLINE="$4" awk '{ l[NR] = $0 } END { for (i = 1; i < NR; i++) print l[i]; print ENVIRON["PA_LCLINE"]; print l[NR] }' "$PAW/lt/$2" > "$PAW/lt/n" && mv "$PAW/lt/n" "$PAW/lt/$2"
+  elif [ "$3" = lib ]; then printf '%s\n' "$4" >> "$PAW/lt/$2"; fi
+  _lw=$PA_WHY; PA_WHY=""; pa_hooklint "$PAW/lt"; _lr=$?; _lm=$PA_WHY; PA_WHY=$_lw
+  if [ "$5" = "-" ]; then [ "$_lr" = 0 ] || { PA_WHY="HL2 $1: the lint refused a tree it should accept: $_lm"; return 1; }; return 0; fi
+  [ "$_lr" = 1 ] || { PA_WHY="HL2 $1: the lint accepted the line '$4' ($2)"; return 1; }
+  case "$_lm" in *"$5"*) ;; *) PA_WHY="HL2 $1: refused for another reason: '$_lm' (want '$5')"; return 1 ;; esac
+}
+fx_hl2() { # the static exit rule refuses every executable form that can end a hook with a status of its own (a wrapped exit, eval, exec, trap, errexit), in a hook and in a library it sources
+  pa_setup
+  pa_lc clean hooks/board-tail.sh none '' - || return 1
+  pa_lc fd-exec bin/_cursor.sh lib 'exec 8>&-' - || return 1
+  pa_lc pipefail bin/_cursor.sh lib 'set -o pipefail' - || return 1
+  pa_lc exit2-hook hooks/board-tail.sh hook 'exit 2' 'an exit 2 statement' || return 1
+  pa_lc exit2-lib bin/_cursor.sh lib 'exit 2' 'an exit 2 statement' || return 1
+  pa_lc bare-hook hooks/board-tail.sh hook 'exit' "a shell statement 'exit'" || return 1
+  pa_lc bare-lib bin/_cursor.sh lib 'exit' "a shell statement 'exit'" || return 1
+  pa_lc status-hook hooks/board-tail.sh hook 'exit $?' "a shell statement 'exit \$?'" || return 1
+  pa_lc status-lib bin/_cursor.sh lib 'exit $?' "a shell statement 'exit \$?'" || return 1
+  pa_lc builtin-hook hooks/board-tail.sh hook 'builtin exit 2' "the word 'builtin'" || return 1
+  pa_lc builtin-lib bin/_cursor.sh lib 'builtin exit 2' "the word 'builtin'" || return 1
+  pa_lc command-hook hooks/board-tail.sh hook 'command exit 2' "the word 'command'" || return 1
+  pa_lc command-lib bin/_cursor.sh lib 'command exit 2' "the word 'command'" || return 1
+  pa_lc eval-hook hooks/board-tail.sh hook "eval 'exit 2'" "the word 'eval'" || return 1
+  pa_lc eval-lib bin/_cursor.sh lib "eval 'exit 2'" "the word 'eval'" || return 1
+  pa_lc trap-hook hooks/board-tail.sh hook "trap 'exit 2' EXIT" "the word 'trap'" || return 1
+  pa_lc trap-lib bin/_cursor.sh lib "trap 'exit 2' EXIT" "the word 'trap'" || return 1
+  pa_lc exec-hook hooks/board-tail.sh hook 'exec bash -c true' 'an exec that is not a bare descriptor change' || return 1
+  pa_lc exec-lib bin/_cursor.sh lib 'exec true' 'an exec that is not a bare descriptor change' || return 1
+  pa_lc errexit-hook hooks/board-tail.sh hook 'set -e' 'a set that turns errexit or errtrace on' || return 1
+  pa_lc errexit-bundle bin/_cursor.sh lib 'set -eu' 'a set that turns errexit or errtrace on' || return 1
+  pa_lc errexit-name bin/_cursor.sh lib 'set -o errexit' "the word 'errexit'" || return 1
+  pa_lc after-semicolon hooks/board-tail.sh hook 'true; builtin exit 2' "the word 'builtin'" || return 1
+  pa_lc after-then hooks/board-tail.sh hook 'if true; then command exit 2; fi' "the word 'command'" || return 1
+  pa_lc backslash hooks/board-tail.sh hook '\exit 2' 'an exit 2 statement' || return 1
+  pa_lc time-prefix hooks/board-tail.sh hook 'time exit 2' "word(s) 'exit' that are not a statement of their own" || return 1
+  pa_lc negation hooks/board-tail.sh hook '! exit 2' "word(s) 'exit' that are not a statement of their own" || return 1
+  pa_lc argument-word hooks/board-tail.sh hook 'true && foo exit 2' "word(s) 'exit' that are not a statement of their own" || return 1
+  pa_lc split-word hooks/board-tail.sh hook 'eval "ex""it 2"' "the word 'eval'" || return 1
+  pa_lc errtrace bin/_cursor.sh lib 'set -E' 'a set that turns errexit or errtrace on' || return 1
+  pa_lc unscanned-source-hook hooks/board-tail.sh hook '. "$HERE/_extra.sh" || exit 1' "sources '_extra.sh', a file this lint does not scan" || return 1
+  pa_lc unscanned-source-lib bin/_cursor.sh lib 'source ./other.sh' "sources 'other.sh', a file this lint does not scan" || return 1
+  pa_lc scanned-source hooks/board-tail.sh hook '. "$HERE/../bin/_cursor.sh" || exit 1' - || return 1
+  pa_lc case-arm bin/_cursor.sh lib 'case x in a) exit 0 ;; esac' - || return 1
+  pa_lc case-arm-wrapped bin/_cursor.sh lib 'case x in a) builtin exit 2 ;; esac' "the word 'builtin'" || return 1
+  pa_lc if-eval hooks/board-tail.sh hook 'if eval "exit 2"; then true; fi' "the word 'eval'" || return 1
+  pa_lc var-prefix hooks/board-tail.sh hook 'X=1 command exit 2' "the word 'command'" || return 1
+  pa_lc if-exit hooks/board-tail.sh hook 'if exit 2; then true; fi' "word(s) 'exit' that are not a statement of their own" || return 1
+  pa_lc quoted-exit hooks/board-tail.sh hook '"exit" 2' "word(s) 'exit' that are not a statement of their own" || return 1
+  pa_lc single-quoted-exit bin/_cursor.sh lib "'exit' 2" "word(s) 'exit' that are not a statement of their own" || return 1
+  pa_lc errexit-after-pipefail bin/_cursor.sh lib 'set -o pipefail -e' 'a set that turns errexit or errtrace on' || return 1
+  pa_lc exec-in-arm bin/_cursor.sh lib 'case x in a) exec false ;; esac' 'an exec that is not a bare descriptor change' || return 1
+  pa_lc dropped-end hooks/board-tail.sh none '' - || return 1
+  printf '%s\n' "$(sed '$d' "$PB/../hooks/board-tail.sh")" > "$PAW/lt/hooks/board-tail.sh"
+  PA_WHY=""; pa_hooklint "$PAW/lt"; _lr=$?
+  { [ "$_lr" = 1 ] && case "$PA_WHY" in *"not an explicit exit 0 or 1"*) true ;; *) false ;; esac; } || { PA_WHY="HL2 dropped-end: rc $_lr '$PA_WHY'"; return 1; }
   return 0
 }
 fx_ul1() { # a lock taken by its full path is released by a short spelling even after a failed builtin write (Bash 3.2 leaves text in front of a $( ) result)
@@ -1986,6 +2068,7 @@ pa_run_fx fx_pr1 "process words: an odd pid and a ps that prints something that 
 pa_run_fx fx_pk1 "job check: delivered wakes drop their rows in one rewrite, a failed post keeps exactly that row, the live row stays and the order holds"
 pa_run_fx fx_pk2 "job check: rows are kept byte for byte (an old three-column row gains no column) and a check that delivered nothing does not rewrite the ledger"
 pa_run_fx fx_hl1 "hooks: a failing stage of the board-tail view or a banner that cannot be written exits 1, never 2 and never hidden by the final exit; the static exit rule holds on the tree"
+pa_run_fx fx_hl2 "hooks: the static exit rule refuses a wrapped exit, eval, exec, trap and errexit in a hook and in a library it sources, and accepts the clean tree"
 pa_run_fx fx_ul1 "lock release: a lock taken by its full path is released by a short spelling after a failed builtin write, and can be taken again"
 pa_run_fx fx_ro1 "entry scripts: \$0 = /name looks in /, a folder named -dash works"
 pa_run_fx fx_rd1 "README recovery: one quoted rm -- command for a cursor file that removes exactly that file"
