@@ -126,16 +126,32 @@ if wait_exit $WP 10 && grep -q "after the swap" "$T/g2.out"; then ok "replaced b
 [ "$r1$r2" = 22 ] && ok "waiter without a real session id is refused" || bad "session id check: rc $r1 $r2"
 
 # 9. seat claim: two arms at the same moment, five rounds, never both alive
+# A loaded runner can start the losing arm late, so a fixed 2 s look would sometimes catch it before it had been refused.
+# seat_round waits (cap 15 s) until the registry names ONE session of the seat, that session is an arm that is alive, and the
+# other arm is gone; it then holds that state for two more looks. A second arm that also won shows up as two live arms or a
+# changed row, so the round never settles and fails at the cap. Also the fixture of mutant "bothwin" (section 59).
+seat_round() { # seat_round BINDIR WARROOMDIR TAG: 0 = settled with exactly one live arm, 1 = not (PA_WHY says what was seen)
+  local _b=$1 _w=$2 _t=$3 _p1 _p2 _live _rows _who _n=0 _holds=0 _ok=1
+  rm -f "$_w/seats.tsv" "$_w"/.cursor-*
+  WARROOM_DIR="$_w" "$_b/waiter.sh" BOSS "sid-$_t-a" >/dev/null 2>&1 & _p1=$!
+  WARROOM_DIR="$_w" "$_b/waiter.sh" BOSS "sid-$_t-b" >/dev/null 2>&1 & _p2=$!
+  while [ $_n -lt 75 ]; do   # 75 looks of 0.2 s = 15 s
+    _live=0; kill -0 $_p1 2>/dev/null && _live=$((_live+1)); kill -0 $_p2 2>/dev/null && _live=$((_live+1))
+    _rows=$(awk -F'\t' '$2=="BOSS"' "$_w/seats.tsv" 2>/dev/null | wc -l | tr -d ' ')
+    _who=$(awk -F'\t' '$2=="BOSS" {print $1}' "$_w/seats.tsv" 2>/dev/null)
+    if [ $_live = 1 ] && [ "$_rows" = 1 ] && { { kill -0 $_p1 2>/dev/null && [ "$_who" = "sid-$_t-a" ]; } || { kill -0 $_p2 2>/dev/null && [ "$_who" = "sid-$_t-b" ]; }; }; then
+      _holds=$((_holds+1)); [ $_holds -ge 3 ] && { _ok=0; break; }   # the settling look and two more
+      sleep 0.5; _n=$((_n+3))
+    else _holds=0; sleep 0.2; _n=$((_n+1)); fi
+  done
+  PA_WHY="not one live arm with one matching registry row after 15 s: live $_live, rows $_rows, row names '$_who'"
+  kill $_p1 $_p2 2>/dev/null; wait $_p1 $_p2 2>/dev/null
+  return $_ok
+}
 sec "9. seat claim: two arms at the same moment, five rounds, never"
 race=0
-for i in 1 2 3 4 5; do
-  rm -f "$WARROOM_DIR/seats.tsv" "$WARROOM_DIR"/.cursor-*
-  "$B/waiter.sh" BOSS "sid-r$i-a" >/dev/null 2>&1 & p1=$!
-  "$B/waiter.sh" BOSS "sid-r$i-b" >/dev/null 2>&1 & p2=$!
-  sleep 2; live=0; kill -0 $p1 2>/dev/null && live=$((live+1)); kill -0 $p2 2>/dev/null && live=$((live+1))
-  [ $live = 1 ] || race=$((race+1))
-  kill $p1 $p2 2>/dev/null; wait $p1 $p2 2>/dev/null
-done
+for i in 1 2 3 4 5; do seat_round "$B" "$WARROOM_DIR" "r$i" || race=$((race+1)); done
+fx_seatrace() { PA_IN=""; pa_setup; pa_pass WARROOM_DIR="$PAW/sr" "$PB/board.sh" path || return 1; seat_round "$PB" "$PAW/sr" fx; }
 [ $race = 0 ] && ok "simultaneous arms of one seat: exactly one wins (5 rounds)" || bad "seat claim race: $race of 5 rounds did not have exactly one live"
 
 # 10. an unwritable board is an error; a job row survives until its wake is on the board
@@ -2465,6 +2481,11 @@ else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process st
 fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }
 _f0=$fail; pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant skipctl (control: this fixture always skips)$' "$T/skipctl.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skipctl.out")" = 0 ] && ok "mutants: a skipped fixture makes pa_mut print a skip and count neither ok nor FAIL" || bad "mutants: pa_mut on a skipped fixture: $(cat "$T/skipctl.out")"
+# bothwin: the holder check finds nobody AND the arm keeps the other session's row, so both arms win and both stay armed
+# (a replaced waiter that leaves because its row is gone would otherwise hide a second winner)
+pa_mcopy bothwin; pa_msed bothwin bin/waiter.sh 's/\$2==seat \&\& \$1!=s {print \$3/$2==seat \&\& $1!=s \&\& 0 {print $3/'
+pa_msed bothwin bin/waiter.sh "s/'\$1!=s \&\& \$2!=seat'/'\$1!=s'/"
+[ "$(grep -c '\$1!=s && 0 {print \$3' "$MA/bothwin/bin/waiter.sh")" = 1 ] && [ "$(grep -cF '$1!=s && $2!=seat' "$MA/bothwin/bin/waiter.sh")" = 0 ] && pa_mut bothwin fx_seatrace || bad "mutant bothwin: the change was not applied"
 # 60. read gate, enforcing. The block must fail when the gate cannot run or runs as an empty
 sec "60. read gate, enforcing. The block must fail when the gate cann"
 # no-op: each stage has to print its own summary line, the inventory has to cover every script in bin/ and hooks/, and a missing
