@@ -32,7 +32,7 @@ Seat names are set in `warroom.env` and default to `BOSS MANAGER W1 W2`; the exa
 
 ## Hooks
 
-A script in `hooks/` exits 0 or 1, both non-blocking; 1 only for a skip (it says why on stderr); it never exits 2, which would block the prompt. Every hook ends on an explicit `exit 0` or `exit 1`, and a last write that fails (a banner on a closed stdout) is a skip, exit 1, never hidden by the final `exit 0`. The smoke suite checks this statically for the hooks and for the libraries they source: no bare `exit`, `exit $?` or `exit $var`, and `exit 2` only in the two places that serve the entry scripts of `bin/`.
+A script in `hooks/` exits 0 or 1, both non-blocking; 1 only for a skip (it says why on stderr); it never exits 2, which would block the prompt. Every hook ends on an explicit `exit 0` or `exit 1`, and a last write that fails (a banner on a closed stdout) is a skip, exit 1, never hidden by the final `exit 0`. The smoke suite checks this statically for the hooks and for the libraries they source: every word `exit` is a statement that ends in a literal 0 or 1 (`exit 2` only in the two places that serve the entry scripts of `bin/`), the words `builtin`, `command`, `eval`, `trap` and `errexit` do not appear, `exec` is only a descriptor change, no `set` turns errexit on, and every sourced file is one the check scans. The check guards edits made by hand; it is not a shell parser, so a word built from quoted or expanded pieces (`"ex"it`, `${X:-ex}it`) is not seen.
 
 ## Receipts
 
@@ -55,6 +55,7 @@ A script in `hooks/` exits 0 or 1, both non-blocking; 1 only for a skip (it says
 | order | at most two locks per shell, never the same file twice, never from a subshell. The only nestings: job ledger then board, guard mark then board, seat cursor then seat registry |
 | one name per file | a protected file that is a symlink, has more than one hard link, or has a symlinked `.flock` is refused. A symlinked parent folder is fine, because the lock key is the physical folder plus the file name. An absolute `BOARD` gets the same checks |
 | limits | one machine and a local disk (not NFS or SMB). A start time that is well formed but wrong still reads as another process. A command stopped inside a locked section, such as a hung disk, keeps the lock until it ends if the holder is killed. Moving the run directory or re-pointing a parent link while writers run is not supported |
+| Bash 3.2 (macOS) | after a builtin write fails (for example `echo` on a closed stdout) Bash 3.2 keeps the text and prints it in front of the next `$( )` capture that writes; a path captured with `$( cd ... && pwd )` after such a failure is cut to its last line (`_wr_path`), and `wr_unlock` matches the name a lock was taken with before it resolves a path |
 | upgrade from the old lock | the old `FILE.lock` folders and the `FILE.flock` files do not exclude each other: stop every session, waiter and job that uses the run directory before you update |
 
 ## Not covered in v0.1
