@@ -2093,6 +2093,14 @@ fx_jobjudge() { # the job check judges every row before it posts anything: a pro
   printf 'pk-c\tabc\tW1\npk-d\t000\tW1\n' > "$PW/pids.tsv"
   pa_exec WARROOM_DIR="$PW" bash "$PB/pids.sh" check; _rc=$PA_RC; _o=$PA_OUT
   [ "$_rc" = 3 ] && [ "$(printf '%s\n' "$_o" | grep -c 'is not a plain positive number')" = 2 ] && ! printf '%s\n' "$_o" | grep -q 'ps failed' || { PA_WHY="jobs: odd pids: rc $_rc (want 3), out '$_o'"; return 1; }
+  # every row's process is looked at once per check: the answer of the first pass is the one used for the post (a second look that fails could end a
+  # check after other rows posted). The shim fails on a second look at pid 987655; the dead pid then posts once and the row is dropped.
+  mkdir -p "$PAW/shim2"; _cnt="$PAW/shim2/n"; : > "$_cnt"
+  printf '#!/bin/sh\nfor a; do if [ "$a" = 987655 ]; then echo x >> "%s"; [ "$(wc -l < "%s")" -ge 2 ] && exit 1; fi; done\nexec %s "$@"\n' "$_cnt" "$_cnt" "$_py" > "$PAW/shim2/python3"; chmod +x "$PAW/shim2/python3"
+  printf '[00:00 · BOSS] jobs base\n' > "$PW/board.md"; printf 'pk-e\t%s\tW1\npk-f\t987655\tW1\n' "$_d1" > "$PW/pids.tsv"
+  pa_exec WARROOM_DIR="$PW" PATH="$PAW/shim2:$PATH" bash "$PB/pids.sh" check; _rc=$PA_RC; _o=$PA_OUT
+  [ "$_rc" = 0 ] && [ "$(wc -l < "$_cnt" | tr -d ' ')" = 1 ] || { PA_WHY="jobs: one look per row: rc $_rc (want 0), looks at the pid $(wc -l < "$_cnt" | tr -d ' ') (want 1), out '$_o'"; return 1; }
+  [ "$(grep -c "job 'pk-e'" "$PW/board.md")" = 1 ] && [ "$(grep -c "job 'pk-f'" "$PW/board.md")" = 1 ] && [ ! -s "$PW/pids.tsv" ] || { PA_WHY="jobs: one look per row: both dead rows must be posted once and dropped: board '$(head -c 240 "$PW/board.md")' ledger '$(head -c 120 "$PW/pids.tsv")'"; return 1; }
   return 0
 }
 fx_ul1() { # a lock taken by its full path is released by a short spelling even after a failed builtin write (Bash 3.2 leaves text in front of a $( ) result)
@@ -2325,6 +2333,8 @@ pa_mcopy jobsfirst; pa_msed jobsfirst bin/pids.sh 's|^    while IFS= read -r row
 [ "$(grep -c 'judge_row "\$row"' "$MA/jobsfirst/bin/pids.sh")" = 0 ] && pa_mut jobsfirst fx_jobjudge || bad "mutant jobsfirst: the change was not applied"
 pa_mcopy jobstext; pa_msed jobstext bin/pids.sh "s|^        ''\|\*\[!0-9\]\*\|?????????????\*) echo .*|        ''\|*[!0-9]*\|?????????????*) echo \"pids.sh: cannot read the start time of pid \$rp (job '\$rl'): ps failed, so a live job cannot be told from a reused pid; row kept\" >\&2 ;;|"
 [ "$(grep -c 'not a plain positive number' "$MA/jobstext/bin/pids.sh")" = 1 ] && pa_mut jobstext fx_jobjudge || bad "mutant jobstext: the change was not applied"
+pa_mcopy joblook2; pa_msed joblook2 bin/pids.sh 's/^  st=\${jq%% \*}; jq=\${jq#\* }.*$/  st=$(wr_proc "$rp" "$rs") || return 1/'
+[ "$(grep -c 'jq=\${jq#' "$MA/joblook2/bin/pids.sh")" = 0 ] && pa_mut joblook2 fx_jobjudge || bad "mutant joblook2: the change was not applied"
 pa_mcopy hlwait; pa_msed hlwait hooks/waiter-check.sh 's/^\(echo "\[WAITER NOT ARMED\].*\) || exit 1$/\1/'
 [ "$(diff "$ROOT/hooks/waiter-check.sh" "$MA/hlwait/hooks/waiter-check.sh" | grep -c '^>')" = 1 ] && pa_mut hlwait fx_hl1 || bad "mutant hlwait: the change was not applied"
 pa_mcopy hlexit2; pa_msed hlexit2 hooks/board-tail.sh 's/could not show the lines that name \$seat" >&2; exit 1; }$/could not show the lines that name $seat" >\&2; exit 2; }/'
