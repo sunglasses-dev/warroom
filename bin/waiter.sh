@@ -95,14 +95,27 @@ filter() {
       if (author != seat && (index(rest, "@" seat " ACTION:") == 1 || index(rest, "@ALL ACTION:") == 1)) print
     }'
 }
-# gap_state: prints 1 while the last delivery is less than GAP seconds old (hold the lines), 0 when the gap is open; status 1
-# and nothing printed when the clock or the marker cannot be read. A caller that cannot tell delivers nothing and looks again.
+# gap_state: prints 1 while the last delivery is less than GAP seconds old (hold the lines), 0 when the gap is open, and "ahead" when
+# the marker is dated ahead of the clock (a clock stepped back): that is an open gap, said once by gap_open. Status 1 and nothing
+# printed when the clock or the marker cannot be read. A caller that cannot tell delivers nothing and looks again.
 gap_state() {
   _ga=$(wr_absent "$LAST") || return 1
   if [ "$_ga" = yes ]; then echo 0; return 0; fi
   _gn=$(wr_epoch) || return 1
   _gm=$(wr_mtime "$LAST") || return 1
+  [ "$_gm" -le "$_gn" ] || { echo ahead; return 0; }
   if [ $(( _gn - _gm )) -lt "$GAP" ]; then echo 1; else echo 0; fi
+}
+# gap_open STATE: status 0 when the gap is open (0, or "ahead": a marker dated ahead of the clock is no reason to hold a seat, and
+# the delivery that follows re-stamps it to now), 1 when the lines are held. The ahead case is said once per waiter run: deliver
+# checks the gap twice per attempt and a lock miss repeats the attempt at the next poll. Called in the main shell, never in $( ).
+gap_said=""
+gap_open() {
+  case "$1" in
+    0) return 0 ;;
+    ahead) [ -n "$gap_said" ] || { echo "[WAITER] the gap marker $LAST is dated ahead of the clock: treating the gap as open and delivering; the delivery re-stamps the marker to now" >&2; gap_said=1; }; return 0 ;;
+    *) return 1 ;;
+  esac
 }
 replaced() { echo "[WAITER REPLACED] a newer waiter holds seat $SEAT; this one stops (exit 3). It is not a wake." >&2; exit 3; }
 # mine: is this still the seat's waiter? Status 0 yes. The registry was read and holds no such row (an absent registry is an
@@ -155,12 +168,12 @@ observe() {
 deliver() {
   # loop guard: held, not lost. The held lines are delivered once the gap has passed.
   gapheld=$(gap_state) || { echo "[WAITER] could not read the clock; nothing delivered, will look again" >&2; return 1; }
-  [ "$gapheld" = 0 ] || return 1
+  gap_open "$gapheld" || return 1
   # Deliver under the cursor lock: recheck ownership and gap, then print header and lines before saving marker and position.
   wr_lock "$CUR" || return 1
   mine || { wr_unlock "$CUR"; echo "[WAITER] the seat registry $REG could not be read; nothing delivered, will look again" >&2; return 1; }
   gapheld=$(gap_state) || { wr_unlock "$CUR"; echo "[WAITER] could not read the clock; nothing delivered, will look again" >&2; return 1; }
-  [ "$gapheld" = 0 ] || { wr_unlock "$CUR"; return 1; }
+  gap_open "$gapheld" || { wr_unlock "$CUR"; return 1; }
   # The wake is printed first and marked after it, each step checked alone: header, lines, gap marker, position.
   # A failed delivery step exits 1 without attempting later delivery steps. Header or payload failure leaves the delivery
   # checkpoint unchanged; stamp failure may leave a newly created marker, and position-save failure retains the fresh marker and

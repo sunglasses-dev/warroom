@@ -2036,6 +2036,65 @@ fx_hl2() { # the static exit rule refuses every executable form that can end a h
   { [ "$_lr" = 1 ] && case "$PA_WHY" in *"not an explicit exit 0 or 1"*) true ;; *) false ;; esac; } || { PA_WHY="HL2 dropped-end: rc $_lr '$PA_WHY'"; return 1; }
   return 0
 }
+fx_gapahead() { # a gap marker dated ahead of the clock is an OPEN gap (a clock stepped back must not hold a seat): said once per run even across a lock miss and a retried poll, delivered exactly once, marker re-stamped to now; a marker made now still HOLDS
+  [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  # control: a marker made now is inside the gap: the line is held, nothing is said about the clock
+  pa_setup; pa_w
+  : > "$PW/.lastwake-W1"; touch "$PW/.lastwake-W1" || { PA_WHY="gap: cannot date the marker"; return 1; }
+  pa_run WARROOM_DIR="$PW" WARROOM_MIN_GAP=300 "$PB/waiter.sh" W1 sid-gc > "$PAW/o.gc" 2> "$PAW/e.gc" & _wpk=$!
+  for _ in 1 2 3 4 5 6 7 8; do grep -q "sid-gc" "$PW/seats.tsv" 2>/dev/null && break; sleep 1; done
+  _wp=$(awk -F'\t' '$1 == "sid-gc" { print $3 }' "$PW/seats.tsv" 2>/dev/null)
+  [ -n "$_wp" ] || { kill "$_wpk" 2>/dev/null; PA_WHY="gap: the control waiter did not arm: $(head -c 160 "$PAW/e.gc")"; return 1; }
+  pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: gc line" >/dev/null; sleep 4
+  _alive=n; kill -0 "$_wp" 2>/dev/null && _alive=y
+  kill "$_wp" 2>/dev/null; wait "$_wpk" 2>/dev/null
+  if [ "$_alive" != y ] || [ -s "$PAW/o.gc" ] || grep -q "ahead of the clock" "$PAW/e.gc"; then
+    PA_WHY="gap: a marker made now must hold: alive=$_alive (want y), delivered='$(head -c 80 "$PAW/o.gc")' (want none), err '$(head -c 200 "$PAW/e.gc")' (want no clock line)"; return 1
+  fi
+  # ahead: the marker is dated years ahead; a holder keeps the seat's cursor lock so the first attempts miss it and the poll is retried
+  pa_setup; pa_w
+  : > "$PW/.lastwake-W1"; touch -t "$(( $(date +%Y) + 4 ))12312359" "$PW/.lastwake-W1" || { PA_WHY="gap: cannot date the marker"; return 1; }
+  pa_run WARROOM_DIR="$PW" WARROOM_MIN_GAP=300 WARROOM_LOCK_WAIT=1 "$PB/waiter.sh" W1 sid-ga > "$PAW/o.ga" 2> "$PAW/e.ga" & _wpk=$!
+  for _ in 1 2 3 4 5 6 7 8; do grep -q "sid-ga" "$PW/seats.tsv" 2>/dev/null && break; sleep 1; done
+  _wp=$(awk -F'\t' '$1 == "sid-ga" { print $3 }' "$PW/seats.tsv" 2>/dev/null)
+  [ -n "$_wp" ] || { kill "$_wpk" 2>/dev/null; PA_WHY="gap: the waiter did not arm: $(head -c 160 "$PAW/e.ga")"; return 1; }
+  WARROOM_LOCK_WAIT=5 bash -c '. "$WR_C"; wr_lock "$1" || exit 1; : > "$1.held"; while :; do wr_run sleep 1; done' _ "$PW/.cursor-W1" >/dev/null 2>&1 & _hp=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$PW/.cursor-W1.held" ] && break; sleep 0.5; done
+  [ -e "$PW/.cursor-W1.held" ] || { kill "$_hp" "$_wp" 2>/dev/null; wait "$_hp" 2>/dev/null; wait "$_wpk" 2>/dev/null; PA_WHY="gap: the lock holder did not start"; return 1; }
+  pa_run WARROOM_DIR="$PW" "$PB/board.sh" post BOSS "@W1 ACTION: ga line" >/dev/null
+  sleep 4
+  _alive=n; kill -0 "$_wp" 2>/dev/null && _alive=y
+  _said1=$(grep -c "ahead of the clock" "$PAW/e.ga")
+  kill "$_hp" 2>/dev/null; wait "$_hp" 2>/dev/null
+  if [ "$_alive" != y ] || [ -s "$PAW/o.ga" ]; then
+    kill "$_wp" 2>/dev/null; wait "$_wpk" 2>/dev/null
+    PA_WHY="gap: while the cursor lock was held: alive=$_alive (want y), delivered='$(head -c 80 "$PAW/o.ga")' (want none)"; return 1
+  fi
+  if ! wait_exit "$_wpk" 15; then kill "$_wp" 2>/dev/null; wait "$_wpk" 2>/dev/null; PA_WHY="gap: a marker dated ahead of the clock held the line (not delivered after the lock was free); err '$(head -c 200 "$PAW/e.ga")'"; return 1; fi
+  wait "$_wpk" 2>/dev/null; _rc=$?
+  [ "$_rc" = 0 ] || { PA_WHY="gap: the delivering waiter ended with rc $_rc (want 0)"; return 1; }
+  [ "$(grep -c 'ga line' "$PAW/o.ga")" = 1 ] && [ "$(grep -c '^\[WAKE -> W1\]' "$PAW/o.ga")" = 1 ] || { PA_WHY="gap: want exactly one wake with the line, got '$(head -c 200 "$PAW/o.ga")'"; return 1; }
+  [ "$_said1" -ge 1 ] && [ "$(grep -c 'ahead of the clock' "$PAW/e.ga")" = 1 ] || { PA_WHY="gap: the clock line must appear once per run across the missed and the retried attempt: before the delivery $_said1, in all $(grep -c 'ahead of the clock' "$PAW/e.ga")"; return 1; }
+  [ "$(pa_mt "$PW/.lastwake-W1")" -le "$(date +%s)" ] || { PA_WHY="gap: the delivery did not re-stamp the marker to now"; return 1; }
+  return 0
+}
+fx_jobjudge() { # the job check judges every row before it posts anything: a process that cannot be judged leaves the ledger and the board as they were; an odd pid is named as such
+  pa_setup; pa_w; [ "$PS_OK" = 1 ] || { PA_SKIP="ps cannot read process start times here"; return 0; }
+  mkdir -p "$PAW/shim"; _py=$(command -v python3)
+  printf '#!/bin/sh\nfor a; do [ "$a" = 987654 ] && exit 1; done\nexec %s "$@"\n' "$_py" > "$PAW/shim/python3"; chmod +x "$PAW/shim/python3"
+  sleep 0 & _d1=$!; wait "$_d1"
+  printf '[00:00 · BOSS] jobs base\n' > "$PW/board.md"; cp "$PW/board.md" "$PAW/bd0"; printf 'pk-a\t%s\tW1\npk-b\t987654\tW1\n' "$_d1" > "$PW/pids.tsv"; cp "$PW/pids.tsv" "$PAW/led0"
+  pa_exec WARROOM_DIR="$PW" PATH="$PAW/shim:$PATH" bash "$PB/pids.sh" check; _rc=$PA_RC; _o=$PA_OUT
+  [ "$_rc" = 1 ] && printf '%s\n' "$_o" | grep -q "could not judge pid 987654" || { PA_WHY="jobs: check rc $_rc (want 1) out '$_o'"; return 1; }
+  cmp -s "$PAW/bd0" "$PW/board.md" || { PA_WHY="jobs: the board changed (a wake was posted before the row that cannot be judged was reached): $(head -c 160 "$PW/board.md")"; return 1; }
+  cmp -s "$PAW/led0" "$PW/pids.tsv" || { PA_WHY="jobs: the ledger changed"; return 1; }
+  printf '%s\n' "$_o" | grep -q "nothing posted for any row" || { PA_WHY="jobs: the message does not say it blocks every post: '$_o'"; return 1; }
+  # an odd pid is named as not a number, not blamed on ps
+  printf 'pk-c\tabc\tW1\npk-d\t000\tW1\n' > "$PW/pids.tsv"
+  pa_exec WARROOM_DIR="$PW" bash "$PB/pids.sh" check; _rc=$PA_RC; _o=$PA_OUT
+  [ "$_rc" = 3 ] && [ "$(printf '%s\n' "$_o" | grep -c 'is not a plain positive number')" = 2 ] && ! printf '%s\n' "$_o" | grep -q 'ps failed' || { PA_WHY="jobs: odd pids: rc $_rc (want 3), out '$_o'"; return 1; }
+  return 0
+}
 fx_ul1() { # a lock taken by its full path is released by a short spelling even after a failed builtin write (Bash 3.2 leaves text in front of a $( ) result)
   pa_setup
   _t1=$(pa_run WARROOM_DIR="$PAW" bash -c '. "$1/_common.sh"; touch "$PWD/target"; wr_lock "$PWD/target" || exit 9; echo buffered >&- 2>/dev/null; wr_unlock target; echo "unlock rc=$? slot=[$_WR_SLOT8]"; wr_lock "$PWD/target"; echo "relock rc=$?"; wr_unlock "$PWD/target"; echo "end slot=[$_WR_SLOT8]"' _ "$PB" 2>&1)
@@ -2074,6 +2133,8 @@ pa_run_fx fx_cf1 "config and cursor bytes: a config that is a folder or a link t
 pa_run_fx fx_pr1 "process words: an odd pid and a ps that prints something that is not a start time are unknown, never dead; a good start time is still compared"
 pa_run_fx fx_pk1 "job check: delivered wakes drop their rows in one rewrite, a failed post keeps exactly that row, the live row stays and the order holds"
 pa_run_fx fx_pk2 "job check: rows are kept byte for byte (an old three-column row gains no column) and a check that delivered nothing does not rewrite the ledger"
+pa_run_fx fx_gapahead "gap marker: a marker dated ahead of the clock is an open gap, said once and delivered once, re-stamped to now; a marker made now still holds"
+pa_run_fx fx_jobjudge "job check: every row is judged before the first post; an unjudgeable process changes neither ledger nor board; an odd pid is named as such"
 pa_run_fx fx_hl1 "hooks: a failing stage of the board-tail view or a banner that cannot be written exits 1, never 2 and never hidden by the final exit; the static exit rule holds on the tree"
 pa_run_fx fx_hl2 "hooks: the static exit rule refuses a wrapped exit, eval, exec, trap and errexit in a hook and in a library it sources, and accepts the clean tree"
 pa_run_fx fx_ul1 "lock release: a lock taken by its full path is released by a short spelling after a failed builtin write, and can be taken again"
@@ -2254,6 +2315,16 @@ pa_mcopy hltail; pa_msed hltail hooks/board-tail.sh 's/ || { echo "board-tail: c
 [ "$(diff "$ROOT/hooks/board-tail.sh" "$MA/hltail/hooks/board-tail.sh" | grep -c '^>')" = 1 ] && pa_mut hltail fx_hl1 || bad "mutant hltail: the change was not applied"
 pa_mcopy hlbanner; pa_msed hlbanner hooks/board-tail.sh 's/\(board\.sh") tail \$seat"\) || exit 1$/\1/'
 [ "$(grep -c 'board.sh") tail \$seat" || exit 1' "$MA/hlbanner/hooks/board-tail.sh")" = 0 ] && pa_mut hlbanner fx_hl1 || bad "mutant hlbanner: the change was not applied"
+pa_mcopy gapahead; pa_msed gapahead bin/waiter.sh 's|^  \[ "\$_gm" -le "\$_gn" \] \|\| { echo ahead; return 0; }$|  :|'
+[ "$(grep -c 'echo ahead; return 0' "$MA/gapahead/bin/waiter.sh")" = 0 ] && pa_mut gapahead fx_gapahead || bad "mutant gapahead: the change was not applied"
+pa_mcopy gapsay; pa_msed gapsay bin/waiter.sh 's|gap_said=1; }; return 0 ;;|:; }; return 0 ;;|'
+[ "$(grep -c 'gap_said=1' "$MA/gapsay/bin/waiter.sh")" = 0 ] && pa_mut gapsay fx_gapahead || bad "mutant gapsay: the change was not applied"
+pa_mcopy gapctl; pa_msed gapctl bin/waiter.sh 's|then echo 1; else echo 0; fi|then echo 0; else echo 0; fi|'
+[ "$(grep -c 'then echo 0; else echo 0; fi' "$MA/gapctl/bin/waiter.sh")" = 1 ] && pa_mut gapctl fx_gapahead || bad "mutant gapctl: the change was not applied"
+pa_mcopy jobsfirst; pa_msed jobsfirst bin/pids.sh 's|^    while IFS= read -r row; do judge_row "\$row"; done <<< "\$rows"$|    :|'
+[ "$(grep -c 'judge_row "\$row"' "$MA/jobsfirst/bin/pids.sh")" = 0 ] && pa_mut jobsfirst fx_jobjudge || bad "mutant jobsfirst: the change was not applied"
+pa_mcopy jobstext; pa_msed jobstext bin/pids.sh "s|^        ''\|\*\[!0-9\]\*\|?????????????\*) echo .*|        ''\|*[!0-9]*\|?????????????*) echo \"pids.sh: cannot read the start time of pid \$rp (job '\$rl'): ps failed, so a live job cannot be told from a reused pid; row kept\" >\&2 ;;|"
+[ "$(grep -c 'not a plain positive number' "$MA/jobstext/bin/pids.sh")" = 1 ] && pa_mut jobstext fx_jobjudge || bad "mutant jobstext: the change was not applied"
 pa_mcopy hlwait; pa_msed hlwait hooks/waiter-check.sh 's/^\(echo "\[WAITER NOT ARMED\].*\) || exit 1$/\1/'
 [ "$(diff "$ROOT/hooks/waiter-check.sh" "$MA/hlwait/hooks/waiter-check.sh" | grep -c '^>')" = 1 ] && pa_mut hlwait fx_hl1 || bad "mutant hlwait: the change was not applied"
 pa_mcopy hlexit2; pa_msed hlexit2 hooks/board-tail.sh 's/could not show the lines that name \$seat" >&2; exit 1; }$/could not show the lines that name $seat" >\&2; exit 2; }/'
