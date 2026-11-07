@@ -41,6 +41,14 @@
 #  60. read gate (enforcing): tests/read-gate.py checks its own fixtures and mutants, then lists every read in bin/ and hooks/ whose
 #      failure can reach a state change. An unlisted read, a dead, invalid or ambiguous allow entry, a tool error (unparsable
 #      script, empty discovery) or a failed self-test fails the suite.
+#  61. the run's cleanup (tests/supervise.py): SIGINT, SIGTERM, SIGHUP, a timeout, a normal exit and a killed supervisor each leave no
+#      process of the run group and no temp dir; the exit status is kept; an unsupervised control leaves its children behind.
+# The suite runs under tests/supervise.py: its own process group, so Ctrl-C, SIGTERM, SIGHUP, SMOKE_TIMEOUT (whole seconds, default 2400: the slowest full run seen is 1365 s, macOS CI; CI kills a job at 2700 s) or
+# a dead parent stop every waiter the fixtures started, also those in subshells and mutant copies, and the temp dir goes last.
+# SMOKE_INNER=1 bash tests/smoke.sh runs the suite bare.
+if [ -z "${SMOKE_INNER:-}" ] && command -v python3 >/dev/null 2>&1; then
+  exec python3 -I "$(dirname "$0")/supervise.py" -- bash "$0" "$@"
+fi
 # Some hosts (a Node-based CI runner, for one) start every child with SIGPIPE ignored, and bash cannot restore a signal that was
 # ignored when it started, so `trap '' PIPE` changes nothing there and the closed-pipe tests mean something else. Seats run in
 # terminals, where SIGPIPE is at its default. When the probe sees otherwise, the suite restarts itself once through python3,
@@ -51,7 +59,7 @@ if [ -z "${SMOKE_SIGPIPE_RESET:-}" ] && command -v python3 >/dev/null 2>&1 && [ 
   exec python3 -I -c 'import os,signal,sys; signal.signal(signal.SIGPIPE,signal.SIG_DFL); os.execv(sys.argv[1],sys.argv[1:])' /usr/bin/env bash "$0" "$@"
 fi
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; rm -rf "$T" 2>/dev/null || { sleep 1; rm -rf "$T"; }' EXIT
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=${SMOKE_T:-$(mktemp -d)}; trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; rm -rf "$T" 2>/dev/null || { sleep 1; rm -rf "$T"; }' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
 B="$ROOT/bin"; fail=0
 ok()  { echo "ok   $1"; }
@@ -2536,6 +2544,51 @@ declare -f rg_stage | sed 's/ && printf .*; then$/; then/' > "$RG_T/mutant.sh"
 RG_MUT=$( (. "$RG_T/mutant.sh"; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
 if printf '%s\n' "$RG_MUT" | grep -q '^FAIL'; then bad "read gate block: the summary checks are not pinned (the mutant still fails): $RG_MUT"; else ok "read gate block: with the summary checks removed an empty no-op passes (so the checks are what stops it)"; fi
 rm -rf "$RG_T"
+
+# 61. the supervisor. A stub run starts two grandchildren the way the fixtures start waiters (one in a subshell, one as a job); every
+# case checks what is left of them (a marker in their command line) and of the temp dir the supervisor made for the run.
+sec "61. the run's cleanup: tests/supervise.py leaves nothing behind"
+SV="$ROOT/tests/supervise.py"; SVM="svmark-$$"; SVF="$T/sv.tmpdir"
+SVSTUB='echo "$SMOKE_T" > "$SVF"; ( bash -c "sleep 300; :" '$SVM' & ) ; bash -c "sleep 300; :" '$SVM' & wait'
+SVQUICK='echo "$SMOKE_T" > "$SVF"; ( bash -c "sleep 300; :" '$SVM' & ) ; bash -c "sleep 300; :" '$SVM' & exit 0'
+export SVF
+sv_left() { pgrep -f "$SVM" | wc -l | tr -d ' '; }
+sv_up() { for _ in $(seq 1 40); do [ -s "$SVF" ] && [ "$(pgrep -f "bash -c sleep 300; : $SVM" | wc -l | tr -d ' ')" -ge 2 ] && return 0; sleep 0.25; done; return 1; }
+sv_gone() { for _ in $(seq 1 20); do [ "$(sv_left)" = 0 ] && return 0; sleep 0.5; done; return 1; }
+sv_case() { # name, signal, expected status
+  rm -f "$SVF"; python3 -I "$SV" --timeout 60 -- bash -c "$SVSTUB" 2>"$T/sv.err" & SVP=$!
+  if sv_up; then kill -"$2" $SVP; wait $SVP; _rc=$?; else kill -KILL $SVP 2>/dev/null; wait $SVP 2>/dev/null; _rc=none; fi
+  if [ "$_rc" = "$3" ] && sv_gone && [ -n "$(cat "$SVF" 2>/dev/null)" ] && [ ! -e "$(cat "$SVF")" ]; then ok "supervisor: $1 stops the whole run group (status $3), no process and no temp dir left"
+  else bad "supervisor: $1: status $_rc (want $3), $(sv_left) process(es) left, temp dir '$(cat "$SVF" 2>/dev/null)', stderr '$(head -c 400 "$T/sv.err" | tr '\n' ' ')'"; pkill -f "$SVM" 2>/dev/null; fi
+}
+sv_case "SIGINT" INT 130; sv_case "SIGTERM" TERM 143; sv_case "SIGHUP" HUP 129
+rm -f "$SVF"; python3 -I "$SV" --timeout 3 -- bash -c "$SVSTUB" 2>"$T/sv.err"; _rc=$?
+if [ $_rc = 124 ] && grep -q 'SMOKE_TIMEOUT 3s exceeded' "$T/sv.err" && sv_gone && [ ! -e "$(cat "$SVF")" ]; then ok "supervisor: the timeout stops the run group, exits 124 and names SMOKE_TIMEOUT"
+else bad "supervisor timeout: status $_rc, $(sv_left) left, stderr '$(cat "$T/sv.err")'"; pkill -f "$SVM" 2>/dev/null; fi
+rm -f "$SVF"; python3 -I "$SV" --timeout 60 -- bash -c "$SVQUICK" 2>"$T/sv.err"; _rc=$?
+if [ $_rc = 0 ] && sv_gone && [ ! -e "$(cat "$SVF")" ]; then ok "supervisor: a run that exits normally still leaves nothing in its group"
+else bad "supervisor normal exit: status $_rc, $(sv_left) left"; pkill -f "$SVM" 2>/dev/null; fi
+python3 -I "$SV" --timeout 60 -- bash -c 'exit 7'; _rc=$?
+[ $_rc = 7 ] && ok "supervisor: the command's exit status is kept" || bad "supervisor: status $_rc, want 7"
+# macOS answers EPERM, not ESRCH, for a group that holds only zombies: the sweep must read that as "nothing left", not crash (CI macOS: status 1)
+_o=$(python3 -I -c 'import importlib.util,os,sys
+spec=importlib.util.spec_from_file_location("sv",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+def refuse(*a): raise PermissionError(1,"Operation not permitted")
+os.killpg=refuse
+sys.exit(m.main(["--timeout","60","--","bash","-c","exit 3"]))' "$SV" 2>&1); _rc=$?
+[ $_rc = 3 ] && ok "supervisor: killpg refused with EPERM is read as nothing left to stop; the command's status is kept" || bad "supervisor EPERM: status $_rc '$_o'"
+_o=$(SMOKE_TIMEOUT=abc python3 -I "$SV" -- bash -c 'echo ran' 2>&1); _rc=$?
+{ [ $_rc != 0 ] && ! printf '%s' "$_o" | grep -q '^ran$' && printf '%s' "$_o" | grep -q 'whole seconds'; } && ok "supervisor: a bad SMOKE_TIMEOUT is refused before anything runs" || bad "supervisor: SMOKE_TIMEOUT=abc gave rc $_rc '$_o'"
+# the supervisor itself killed outright: the guard (its own session) ends the group and removes the temp dir
+rm -f "$SVF"; python3 -I "$SV" --timeout 60 -- bash -c "$SVSTUB" 2>"$T/sv.err" & SVP=$!
+if sv_up; then kill -KILL $SVP; wait $SVP 2>/dev/null; fi
+if sv_gone && [ ! -e "$(cat "$SVF" 2>/dev/null)" ] && [ -s "$SVF" ]; then ok "supervisor: killed with SIGKILL, its guard still ends the run group and removes the temp dir"
+else bad "supervisor SIGKILL: $(sv_left) process(es) left, temp dir '$(cat "$SVF" 2>/dev/null)'"; pkill -f "$SVM" 2>/dev/null; fi
+# control: the same stub with no supervisor and a trap-less TERM leaves its grandchildren, so the cases above can fail
+rm -f "$SVF"; SMOKE_T=$T/none bash -c "$SVSTUB" 2>/dev/null & SVP=$!
+if sv_up; then kill -TERM $SVP; wait $SVP 2>/dev/null; sleep 1; fi
+[ "$(sv_left)" -ge 2 ] && ok "supervisor control: without it, SIGTERM to the run leaves its grandchildren behind" || bad "supervisor control: the unsupervised stub left $(sv_left) process(es); the fixture is blind"
+pkill -f "$SVM" 2>/dev/null; sv_gone || bad "supervisor fixture: could not clear its own marker processes"
 
 sec end
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
