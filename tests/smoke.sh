@@ -51,7 +51,7 @@ if [ -z "${SMOKE_SIGPIPE_RESET:-}" ] && command -v python3 >/dev/null 2>&1 && [ 
   exec python3 -I -c 'import os,signal,sys; signal.signal(signal.SIGPIPE,signal.SIG_DFL); os.execv(sys.argv[1],sys.argv[1:])' /usr/bin/env bash "$0" "$@"
 fi
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; rm -rf "$T" 2>/dev/null || { sleep 1; rm -rf "$T"; }' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
 B="$ROOT/bin"; fail=0
 ok()  { echo "ok   $1"; }
@@ -1260,11 +1260,18 @@ MA="$T/mutA"; mkdir -p "$MA"
 pa_mcopy() { rm -rf "${MA:?}/${1:?}"; mkdir -p "$MA/$1"; cp -R "$B" "$MA/$1/bin"; cp -R "$ROOT/hooks" "$MA/$1/hooks"; }
 pa_msed() { _mt=$(sed "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }   # rewritten in place: the exec bit stays
 pa_mawk() { _mt=$(awk "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }
+PA_PRISTINE_OK=" "
 pa_mut() { # pa_mut NAME FIXTURE: the pristine copy passes FIXTURE, the mutated copy fails it
   _n=$1; _fx=$2; PA_WHY=""; PA_SKIP=""
   PB="$MA/pristine/bin"; PHK="$MA/pristine/hooks"
-  if ! "$_fx"; then bad "mutant $_n: the unmutated copy fails $_fx: $PA_WHY"; PB="$B"; PHK="$ROOT/hooks"; return; fi
-  if [ -n "$PA_SKIP" ]; then echo "skip mutant $_n ($PA_SKIP)"; PB="$B"; PHK="$ROOT/hooks"; return; fi
+  # the unmutated copy runs the fixture once per fixture (a pass is remembered in PA_PRISTINE_OK): it is the same tree every time
+  case "$PA_PRISTINE_OK" in
+    *" $_fx "*) ;;
+    *)
+      if ! "$_fx"; then bad "mutant $_n: the unmutated copy fails $_fx: $PA_WHY"; PB="$B"; PHK="$ROOT/hooks"; return; fi
+      if [ -n "$PA_SKIP" ]; then echo "skip mutant $_n ($PA_SKIP)"; PB="$B"; PHK="$ROOT/hooks"; return; fi
+      PA_PRISTINE_OK="$PA_PRISTINE_OK$_fx " ;;
+  esac
   PB="$MA/$_n/bin"; PHK="$MA/$_n/hooks"; PA_WHY=""
   if "$_fx"; then bad "mutant $_n survived: $_fx passed"; else ok "mutant $_n: $_fx fails at: $(printf '%s' "$PA_WHY" | head -c 150)"; fi
   PB="$B"; PHK="$ROOT/hooks"
@@ -2361,7 +2368,7 @@ pa_mcopy krm; pa_msed krm bin/waiter.sh 's|if ! wr_cursor_put "\$CUR" "\$gen" "\
 [ "$(grep -c 'then rm -f "\$LAST";' "$MA/krm/bin/waiter.sh")" = 1 ] && pa_mut krm fx_k1 || bad "mutant krm: the change was not applied"
 # F3 root control (id double): K1's own root skip reaches pa_mut as a skip, counted as neither ok nor FAIL
 mkdir -p "$T/idroot" && printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exec /usr/bin/id "$@"' > "$T/idroot/id" && chmod +x "$T/idroot/id"
-_f0=$fail; _p0=$PATH; PATH="$T/idroot:$PATH"; pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0
+_f0=$fail; _p0=$PATH; _pc0=$PA_PRISTINE_OK; PA_PRISTINE_OK=" "; PATH="$T/idroot:$PATH"; pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0; PA_PRISTINE_OK=$_pc0
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant krm (running as root: mode 444 does not block root)$' "$T/skiproot.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skiproot.out")" = 0 ] && ok "mutants: K1 under an id double that reports root skips; pa_mut prints the skip and counts neither ok nor FAIL" || bad "mutants: K1 root-skip control: $(cat "$T/skiproot.out")"
 pa_mcopy khdr; pa_msed khdr bin/waiter.sh 's|^  if ! echo \(".*"\); then$|  echo \1; if false; then|'
 [ "$(grep -c 'if false; then$' "$MA/khdr/bin/waiter.sh")" = 1 ] && pa_mut khdr fx_k2 || bad "mutant khdr: the change was not applied"
