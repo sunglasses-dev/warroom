@@ -46,6 +46,10 @@
 # The suite runs under tests/supervise.py: its own process group, so Ctrl-C, SIGTERM, SIGHUP, SMOKE_TIMEOUT (whole seconds, default 2400: the slowest full run seen is 1365 s, macOS CI; CI kills a job at 2700 s) or
 # a dead parent stop every waiter the fixtures started, also those in subshells and mutant copies, and the temp dir goes last.
 # SMOKE_INNER=1 bash tests/smoke.sh runs the suite bare.
+# SMOKE_PART=base|m1|m2 runs one part: base = sections 1-58, 60 and 61 and the fixtures run directly in them; m1 and m2 = halves of section 59,
+# balanced by seconds. tests/smoke-parts.txt names the part of every pa_mut / pa_run_fx call and the fewest ok lines a part prints; CI runs
+# the three parts in parallel and tests/smoke-all.sh fails unless each ran every call it owns. Unset runs everything. Every run ends with
+# one line: smoke-part NAME: ran=<calls made> expected=<calls owned> ok=<ok lines> fail=<failures>. tests/smoke-gates.sh tests the gate.
 if [ -z "${SMOKE_INNER:-}" ] && command -v python3 >/dev/null 2>&1; then
   exec python3 -I "$(dirname "$0")/supervise.py" -- bash "$0" "$@"
 fi
@@ -62,8 +66,8 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=${SMOKE_T:-$(mktemp -d)}; trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; rm -rf "$T" 2>/dev/null || { sleep 1; rm -rf "$T"; }' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
 B="$ROOT/bin"; fail=0
-ok()  { echo "ok   $1"; }
-bad() { echo "FAIL $1"; fail=1; }
+ok()  { echo "ok   $1"; echo >> "$T/.n.ok"; }          # the counters are files: a call inside a subshell is still counted
+bad() { echo "FAIL $1"; fail=1; printf '%s\n' "${1//$'\n'/ }" >> "$T/.n.bad"; }
 wait_exit() { for _ in $(seq 1 "$2"); do kill -0 "$1" 2>/dev/null || return 0; sleep 1; done; return 1; }
 # wait_text FILE PATTERN SECONDS: poll (0.2 s) until the pattern is in the file; 0 at the first hit, 1 at the cap. A fixed sleep after
 # starting a waiter guesses how slow the machine is; this waits for the thing the next step needs.
@@ -71,11 +75,21 @@ wait_text() { local _i _n=$(($3 * 5)); for ((_i = 0; _i < _n; _i++)); do grep -q
 # sec NAME: one elapsed-time line for the section that just ended, then start the next
 _SEC_N=""; _SEC_T=$(date +%s)
 sec() { local _now; _now=$(date +%s); [ -n "$_SEC_N" ] && echo "time $((_now - _SEC_T))s  $_SEC_N"; _SEC_N=$1; _SEC_T=$_now; }
+# the definitions and setup lines the sections below share live in smoke-lib.sh (moved out so a part of the suite can source them without running sections 1-58)
+[ -r "$ROOT/tests/smoke-lib.sh" ] || { echo "FAIL tests/smoke-lib.sh is missing"; exit 1; }
+. "$ROOT/tests/smoke-lib.sh"
+# G10: a run that did not get the definitions must stop here, never pass without having run its fixtures
+[ "${SMOKE_LIB_SOURCED:-}" = 1 ] && type smoke_begin smoke_finish pa_claim pa_run_fx pa_setup >/dev/null 2>&1 || { echo "FAIL tests/smoke-lib.sh did not define what the sections call"; exit 1; }
+# SMOKE_PART=base|m1|m2 runs one part of the suite (see tests/smoke-parts.txt); unset runs everything. An unknown value, or a manifest
+# that does not match the calls written in this file, stops the run before it starts.
+smoke_begin "$0" || exit 1
+case "${SMOKE_PART:-}" in "") _in_base=1; _in_m=1 ;; base) _in_base=1; _in_m=0 ;; *) _in_base=0; _in_m=1 ;; esac
 # the tests below that close a pipe early only mean something when SIGPIPE is at its default (see the restart at the top)
 [ "$(bash -c 'yes 2>/dev/null|head -c1>/dev/null; echo ${PIPESTATUS[0]}')" = 141 ] && ok "SIGPIPE is at its default" || bad "SIGPIPE is not at its default; the PIPE tests would be meaningless"
 ( sleep 1; echo hit > "$T/wt.f" ) & wait_text "$T/wt.f" hit 5 && ok "wait_text: text that appears after a second is seen before the cap" || bad "wait_text missed text that appeared after a second"
 wait_text "$T/wt.none" hit 1 && bad "wait_text: absent text reported as found" || ok "wait_text: absent text ends at the cap with 1"
 
+if [ "$_in_base" = 1 ]; then   # sections 1-58 (part base)
 # 1. wake grammar
 sec "1. wake grammar"
 "$B/waiter.sh" W1 sid-w1 > "$T/w1.out" 2> "$T/w1.err" & WP=$!; wait_text "$T/w1.err" '^armed ' 20
@@ -138,28 +152,9 @@ if wait_exit $WP 10 && grep -q "after the swap" "$T/g2.out"; then ok "replaced b
 # seat_round waits (cap 15 s) until the registry names ONE session of the seat, that session is an arm that is alive, and the
 # other arm is gone; it then holds that state for two more looks. A second arm that also won shows up as two live arms or a
 # changed row, so the round never settles and fails at the cap. Also the fixture of mutant "bothwin" (section 59).
-seat_round() { # seat_round BINDIR WARROOMDIR TAG: 0 = settled with exactly one live arm, 1 = not (PA_WHY says what was seen)
-  local _b=$1 _w=$2 _t=$3 _p1 _p2 _live _rows _who _n=0 _holds=0 _ok=1
-  rm -f "$_w/seats.tsv" "$_w"/.cursor-*
-  WARROOM_DIR="$_w" "$_b/waiter.sh" BOSS "sid-$_t-a" >/dev/null 2>&1 & _p1=$!
-  WARROOM_DIR="$_w" "$_b/waiter.sh" BOSS "sid-$_t-b" >/dev/null 2>&1 & _p2=$!
-  while [ $_n -lt 75 ]; do   # 75 looks of 0.2 s = 15 s
-    _live=0; kill -0 $_p1 2>/dev/null && _live=$((_live+1)); kill -0 $_p2 2>/dev/null && _live=$((_live+1))
-    _rows=$(awk -F'\t' '$2=="BOSS"' "$_w/seats.tsv" 2>/dev/null | wc -l | tr -d ' ')
-    _who=$(awk -F'\t' '$2=="BOSS" {print $1}' "$_w/seats.tsv" 2>/dev/null)
-    if [ $_live = 1 ] && [ "$_rows" = 1 ] && { { kill -0 $_p1 2>/dev/null && [ "$_who" = "sid-$_t-a" ]; } || { kill -0 $_p2 2>/dev/null && [ "$_who" = "sid-$_t-b" ]; }; }; then
-      _holds=$((_holds+1)); [ $_holds -ge 3 ] && { _ok=0; break; }   # the settling look and two more
-      sleep 0.5; _n=$((_n+3))
-    else _holds=0; sleep 0.2; _n=$((_n+1)); fi
-  done
-  PA_WHY="not one live arm with one matching registry row after 15 s: live $_live, rows $_rows, row names '$_who'"
-  kill $_p1 $_p2 2>/dev/null; wait $_p1 $_p2 2>/dev/null
-  return $_ok
-}
 sec "9. seat claim: two arms at the same moment, five rounds, never"
 race=0
 for i in 1 2 3 4 5; do seat_round "$B" "$WARROOM_DIR" "r$i" || race=$((race+1)); done
-fx_seatrace() { PA_IN=""; pa_setup; pa_pass WARROOM_DIR="$PAW/sr" "$PB/board.sh" path || return 1; seat_round "$PB" "$PAW/sr" fx; }
 [ $race = 0 ] && ok "simultaneous arms of one seat: exactly one wins (5 rounds)" || bad "seat claim race: $race of 5 rounds did not have exactly one live"
 
 # 10. an unwritable board is an error; a job row survives until its wake is on the board
@@ -183,17 +178,6 @@ export WARROOM_DIR="$T/run"
 
 # 11. the writer lock: flock on FILE.flock
 sec "11. the writer lock: flock on FILE.flock"
-LD="$T/lock"; mkdir -p "$LD"; C="$B/_common.sh"
-# TRY FILE: an independent fresh process tries FILE's lock for 1 s and prints 0 (taken) or 1 (held elsewhere)
-printf '%s\n' 'WARROOM_LOCK_WAIT=1; . "$WR_C"; wr_lock "$1" >/dev/null 2>&1; echo $?' > "$LD/try.sh"
-export WR_C="$C" TRY="$LD/try.sh"
-try() { bash "$TRY" "$1"; }
-lk() { s=$1; shift; WARROOM_LOCK_WAIT=1 bash -c ". \"\$WR_C\"; $s" _ "$@" 2>&1; }   # run a snippet in a fresh shell
-hold() { # hold FILE: a fresh process takes FILE's lock and keeps it (its sleeps run through wr_run); HP = its pid
-  WARROOM_LOCK_WAIT=5 bash -c '. "$WR_C"; wr_lock "$1" || exit 1; : > "$1.held"; while :; do wr_run sleep 1; done' _ "$1" >/dev/null 2>&1 & HP=$!
-  for _ in $(seq 1 50); do [ -e "$1.held" ] && return 0; sleep 0.1; done; return 1; }
-unhold() { kill -9 "$HP" 2>/dev/null; wait "$HP" 2>/dev/null; rm -f "$1.held"; }
-ino() { stat -c %i "$1" 2>/dev/null || stat -f %i "$1"; }
 
 # stable_inode_contention_and_crash
 : > "$LD/a"; hold "$LD/a"; i1=$(ino "$LD/a.flock"); r1=$(try "$LD/a"); unhold "$LD/a"; r2=$(try "$LD/a"); i2=$(ino "$LD/a.flock")
@@ -516,7 +500,6 @@ git -C "$ROOT" check-ignore -q board.md.flock && ok "a lock sidecar is ignored b
 sec "40. process identity: alive, dead or unknown. A pid whose start"
 #     a seat, a strike count and an opt-out belong to one process (pid + start time), so a reused pid inherits none of them
 RI="$T/r40"; mkdir -p "$RI" "$T/fakebin"; : > "$RI/board.md"; printf '#!/bin/sh\nexit 1\n' > "$T/fakebin/ps"; chmod +x "$T/fakebin/ps"
-lst() { ps -o lstart= -p "$1" | tr -s ' ' | sed 's/^ //;s/ $//'; }
 sleep 60 & IJ=$!; WARROOM_DIR="$RI" "$B/pids.sh" add id-job $IJ W1 >/dev/null
 e=$(WARROOM_DIR="$RI" PATH="$T/fakebin:$PATH" "$B/pids.sh" check 2>&1 >/dev/null); rc=$?
 [ $rc = 3 ] && grep -q '^id-job' "$RI/pids.tsv" && ! grep -q "id-job" "$RI/board.md" && case "$e" in *"cannot read the start time of pid $IJ"*) true ;; *) false ;; esac \
@@ -726,260 +709,28 @@ done
 # before anything is created. Every case is a function of a fixture dir under $T, run against the tree in PB (bin/) and PHK
 # (hooks/); section 59 runs the same functions against mutated copies. HOME and CLAUDE_CONFIG_DIR are fixture folders: no
 # case reads or touches a real settings file.
-PB="$B"; PHK="$ROOT/hooks"; PA_IN='{"session_id": "sid-pa"}'; PA_WHY=""; PA_SKIP=""; PA_NOTE=""
-pa_setup() { PAW=$(cd -P "$(mktemp -d "$T/paw.XXXXXX")" && pwd -P); PAH="$PAW/h"; PAC="$PAW/cfg"; mkdir -p "$PAH" "$PAC" "$PAW/cwd"; }
-pa_snap() { find "$PAW" -print 2>/dev/null | LC_ALL=C sort; }
-pa_mt() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
-pa_run() { ( cd "${PA_CWD:-$PAW/cwd}" && env HOME="$PAH" CLAUDE_CONFIG_DIR="$PAC" PYTHONDONTWRITEBYTECODE=1 WARROOM_ENV="$PAW/none.env" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0 "$@" ); }
-pa_exec() { PA_OUT=$(printf '%s' "$PA_IN" | pa_run "$@" 2>&1); PA_RC=$?; }
-pa_pass() { pa_exec "$@"; [ "$PA_RC" = 0 ] || { PA_WHY="rc $PA_RC (want 0): $* -> $(printf '%s' "$PA_OUT" | head -c 160)"; return 1; }; }
 # (pa_run sets PYTHONDONTWRITEBYTECODE=1: the Apple /usr/bin/python3 stub otherwise writes a bytecode cache under $HOME/Library,
 # which is the interpreter creating a file, not a script of ours)
 # pa_want PATTERN RC [ENV=VAL...] CMD [ARGS]: the run ends with RC, says PATTERN, and creates nothing under $PAW
-pa_want() {
-  _pat=$1; _wrc=$2; shift 2
-  pa_snap > "$PAW.b"; pa_exec "$@"; pa_snap > "$PAW.a"
-  [ "$PA_RC" = "$_wrc" ] || { PA_WHY="rc $PA_RC (want $_wrc): $* -> $(printf '%s' "$PA_OUT" | head -c 160)"; return 1; }
-  printf '%s\n' "$PA_OUT" | grep -Eq -- "$_pat" || { PA_WHY="no '$_pat' in: $(printf '%s' "$PA_OUT" | head -c 160) ($*)"; return 1; }
-  cmp -s "$PAW.b" "$PAW.a" || { PA_WHY="created: $(diff "$PAW.b" "$PAW.a" | grep '^[<>]' | head -3 | tr '\n' ' ') ($*)"; return 1; }
-  return 0
-}
-pa_cfgbytes() { printf 'SEATS=BOSS W1\n' > "$1"; }
 
 # 45. resolver: lexical gate, nearest existing ancestor, physical identity (R1-R5)
 sec "45. resolver: lexical gate, nearest existing ancestor, physical"
-fx_r1() { # the config folder, spelled four lexical ways and through a symlink, is refused
-  pa_setup; ln -s "$PAC" "$PAW/lnk-cfg"
-  for w in "$PAC" "$PAC/" "$PAC/x/.." "$PAC/." "$PAW/lnk-cfg" "$PAW/lnk-cfg/"; do
-    pa_want 'config folder|component' 2 WARROOM_DIR="$w" "$PB/board.sh" path || return 1
-  done
-}
-fx_r2() { # an absent nested run folder is made only after the checks; the board is exactly under it (physical spelling)
-  pa_setup
-  pa_pass WARROOM_DIR="$PAW/fresh/a/b" "$PB/board.sh" path || return 1
-  [ "$PA_OUT" = "$PAW/fresh/a/b/board.md" ] && [ -f "$PAW/fresh/a/b/board.md" ] || { PA_WHY="board path '$PA_OUT'"; return 1; }
-  mkdir "$PAW/real"; ln -s "$PAW/real" "$PAW/lnk"
-  pa_pass WARROOM_DIR="$PAW/lnk/f2/g" "$PB/board.sh" path || return 1
-  [ "$PA_OUT" = "$PAW/lnk/f2/g/board.md" ] && [ -f "$PAW/real/f2/g/board.md" ] || { PA_WHY="symlinked spelling: '$PA_OUT'"; return 1; }
-}
-fx_r3() { # a refused board leaves a fresh run folder AND the board's parents uncreated (checks come before the bootstrap)
-  pa_setup
-  pa_want 'settings file' 2 WARROOM_DIR="$PAW/w3" BOARD="$PAW/fresh2/x/settings.json" "$PB/board.sh" path || return 1
-  [ ! -e "$PAW/w3" ] && [ ! -e "$PAW/fresh2" ] || { PA_WHY="w3 or fresh2 was created"; return 1; }
-}
-fx_r4() { # a parent that cannot be searched is refused, nothing created (skipped as root)
-  if [ "$(id -u)" = 0 ]; then PA_SKIP="running as root: mode 000 does not block root"; return 0; fi
-  pa_setup; mkdir "$PAW/r4"; chmod 000 "$PAW/r4"
-  if ( cd "$PAW/r4" ) 2>/dev/null; then chmod 755 "$PAW/r4"; PA_SKIP="the folder stayed accessible (an ACL or a privileged user)"; return 0; fi
-  pa_want 'cannot be resolved' 2 WARROOM_DIR="$PAW/r4/w" "$PB/board.sh" path; _r=$?; chmod 755 "$PAW/r4"; return $_r
-}
-fx_r5() { # a board with a trailing /, an existing folder, a folder symlink, or a folder above the run folder
-  pa_setup; mkdir -p "$PAW/r5/d" "$PAW/r5/t"; ln -s "$PAW/r5/d" "$PAW/r5/dl"
-  pa_want 'board|BOARD' 2 WARROOM_DIR="$PAW/r5" BOARD="$PAW/r5/b/" "$PB/board.sh" path || return 1
-  pa_want 'board|BOARD' 2 WARROOM_DIR="$PAW/r5" BOARD=d "$PB/board.sh" path || return 1
-  pa_want 'board|BOARD' 2 WARROOM_DIR="$PAW/r5" BOARD=dl "$PB/board.sh" path || return 1
-  pa_want 'above the run folder' 2 WARROOM_DIR="$PAW/a/w" BOARD="$PAW/a" "$PB/board.sh" path || return 1
-  [ ! -e "$PAW/a" ] || { PA_WHY="$PAW/a was created"; return 1; }
-}
 
 # 46. an absolute run folder; the board goes under it; the validated values cannot be reassigned (R6, R7)
 sec "46. an absolute run folder; the board goes under it; the validat"
-fx_r6() {
-  pa_setup; mkdir -p "$PAW/p1" "$PAW/p2"
-  pa_want 'WARROOM_DIR must be an absolute path' 2 WARROOM_DIR=run "$PB/board.sh" path || return 1
-  pa_want 'WARROOM_ENV must be an absolute path' 2 WARROOM_ENV=rel.env WARROOM_DIR="$PAW/r6" "$PB/board.sh" path || return 1
-  for b in ./board.md ../x a/./b; do
-    pa_want 'BOARD must not contain \. or \.\. components; write board\.md' 2 WARROOM_DIR="$PAW/r6" BOARD="$b" "$PB/board.sh" path || return 1
-  done
-  PA_CWD="$PAW/p1" pa_pass WARROOM_DIR="$PAW/r6" BOARD=board.md "$PB/board.sh" path || return 1; _a=$PA_OUT
-  PA_CWD="$PAW/p2" pa_pass WARROOM_DIR="$PAW/r6" BOARD=board.md "$PB/board.sh" path || return 1
-  [ "$_a" = "$PA_OUT" ] && [ "$_a" = "$PAW/r6/board.md" ] && [ ! -e "$PAW/p1/board.md" ] && [ ! -e "$PAW/p2/board.md" ] || { PA_WHY="board path from p1 '$_a', p2 '$PA_OUT'"; return 1; }
-}
-fx_r7a() { # W cannot be reassigned by a script that sourced _common.sh
-  pa_setup; pa_exec WARROOM_DIR="$PAW/r7" bash -c '. "$1"; W=/elsewhere; echo "w=$W"' _ "$PB/_common.sh"
-  case "$PA_OUT" in *"W: readonly variable"*) case "$PA_OUT" in *elsewhere*) ;; *) return 0 ;; esac ;; esac; PA_WHY="W was assignable: $PA_OUT"; return 1
-}
-fx_r7b() { # BOARD_FILE cannot be reassigned either
-  pa_setup; pa_exec WARROOM_DIR="$PAW/r7" bash -c '. "$1"; BOARD_FILE=/elsewhere; echo "b=$BOARD_FILE"' _ "$PB/_common.sh"
-  case "$PA_OUT" in *"BOARD_FILE: readonly variable"*) case "$PA_OUT" in *elsewhere*) ;; *) return 0 ;; esac ;; esac; PA_WHY="BOARD_FILE was assignable: $PA_OUT"; return 1
-}
-fx_r7c() { # a child started with BOARD=settings.json re-validates and is refused
-  pa_setup; pa_pass WARROOM_DIR="$PAW/r7" "$PB/board.sh" path || return 1
-  pa_want 'settings file' 2 WARROOM_DIR="$PAW/r7" bash -c 'BOARD=settings.json "$1" path' _ "$PB/board.sh"
-}
 
-fx_r8() { # a HOME with a trailing / (or HOME=/) is the same HOME: the default config path and ~/ values add no second /
-  pa_setup
-  pa_pass HOME="$PAH/" WARROOM_DIR="$PAW/r8a" bash -c 'unset WARROOM_ENV; exec "$@"' _ "$PB/board.sh" path || return 1
-  [ "$PA_OUT" = "$PAW/r8a/board.md" ] || { PA_WHY="HOME with a trailing /: board '$PA_OUT'"; return 1; }
-  pa_pass HOME=/ WARROOM_DIR="$PAW/r8b" bash -c 'unset WARROOM_ENV; exec "$@"' _ "$PB/board.sh" path || return 1
-  printf 'WARROOM_DIR=~/sub\n' > "$PAW/r8.env"
-  pa_pass HOME="$PAH/" WARROOM_ENV="$PAW/r8.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
-  [ "$PA_OUT" = "$PAH/sub/board.md" ] || { PA_WHY="a home-relative value under HOME with a trailing /: board '$PA_OUT'"; return 1; }
-  # a bare ~ stays HOME as written (line 23 of _config.sh): HOME with a trailing / still gives HOME/board.md, HOME=/ is refused
-  printf 'WARROOM_DIR=~\n' > "$PAW/r8c.env"
-  pa_pass HOME="$PAH/" WARROOM_ENV="$PAW/r8c.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
-  [ "$PA_OUT" = "$PAH/board.md" ] || { PA_WHY="a bare ~ with HOME ending in /: board '$PA_OUT'"; return 1; }
-  pa_want 'names no folder or file' 2 HOME=/ WARROOM_ENV="$PAW/r8c.env" bash -c 'unset WARROOM_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
-}
 
 # 47. settings names, reserved state names, the board's own aliases (N1-N5)
 sec "47. settings names, reserved state names, the board's own aliase"
-fx_n1() {
-  pa_setup; mkdir -p "$PAW/n1b"; printf 'keep' > "$PAW/n1b/settings.json"; _k=$(cksum < "$PAW/n1b/settings.json")
-  _sl=settings.l; _sl="${_sl}ocal.json"
-  for n in settings.json Settings.JSON "$_sl" MANAGED-settings.json .Claude.json; do
-    pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1a" BOARD="$n" "$PB/board.sh" post BOSS hello || return 1
-  done
-  pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1b" BOARD=settings.json "$PB/board.sh" post BOSS hello || return 1
-  [ "$(cksum < "$PAW/n1b/settings.json")" = "$_k" ] || { PA_WHY="an existing settings.json changed"; return 1; }
-  pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1c/SETTINGS.json" "$PB/board.sh" path || return 1
-  pa_want 'settings file' 2 WARROOM_DIR="$PAW/n1a" BOARD=Settings.JSON "$PB/waiter.sh" W1 sid-n1 || return 1
-  for h in waiter-check board-tail board-guard; do
-    pa_want 'settings file' 1 WARROOM_DIR="$PAW/n1a" BOARD=settings.json "$PHK/$h.sh" || return 1
-  done
-  pa_want 'cannot locate the Claude Code config folder' 2 CLAUDE_CONFIG_DIR=cfg WARROOM_DIR="$PAW/n1d" "$PB/board.sh" path || return 1
-  pa_want 'cannot locate' 2 WARROOM_DIR="$PAW/n1d" bash -c 'unset HOME CLAUDE_CONFIG_DIR; exec "$@"' _ "$PB/board.sh" path || return 1
-  pa_want 'cannot locate' 2 WARROOM_DIR="$PAW/n1d" bash -c 'unset CLAUDE_CONFIG_DIR; exec env HOME=rel "$@"' _ "$PB/board.sh" path || return 1
-  pa_want 'cannot locate' 2 WARROOM_DIR="$PAW/n1d" HOME= bash -c 'unset CLAUDE_CONFIG_DIR; exec "$@"' _ "$PB/board.sh" path
-}
-fx_n2() {
-  pa_setup; W="$PAW/n2/w"
-  for n in seats.tsv pids.tsv .cursor-W1 .lastwake-W1 .anchor-W1 .guard-W1 .poll-W1.123 .snap-W1.123 .wrtmp.abcd1234 x.flock b.tmp.123 b.chunk.123 .LASTWAKE-W1 SEATS.TSV \
-           seats.tsv/board.md sub/.anchor-W1/b.md .wrtmp.q/b.md "$W/.cursor-W1/b.md"; do
-    pa_want 'name this tool writes|ends in \.flock' 2 WARROOM_DIR="$W" BOARD="$n" "$PB/board.sh" path || return 1
-  done
-  mkdir -p "$PAW/n2e"; printf 'x' > "$PAW/n2e/seats.tsv"; _k=$(cksum < "$PAW/n2e/seats.tsv")
-  pa_want 'name this tool writes' 2 WARROOM_DIR="$PAW/n2e" BOARD=seats.tsv "$PB/board.sh" path || return 1
-  [ "$(cksum < "$PAW/n2e/seats.tsv")" = "$_k" ] || { PA_WHY="an existing seats.tsv changed"; return 1; }
-  for n in board.tmp.md x.tmp.d/b.md sub/board.md; do   # not reserved: board.tmp.md, a folder named x.tmp.d, a plain subfolder
-    pa_pass WARROOM_DIR="$PAW/n2c" BOARD="$n" "$PB/board.sh" path || return 1; rm -rf "${PAW:?}/n2c"
-  done
-}
-fx_n3() {
-  pa_setup; W="$PAW/n3/w"; mkdir -p "$W"; pa_cfgbytes "$PAW/n3/c.env"; _k=$(cksum < "$PAW/n3/c.env")
-  pa_want 'config file' 2 WARROOM_ENV="$PAW/n3/c.env" WARROOM_DIR="$W" BOARD="$PAW/n3/c.env" "$PB/board.sh" path || return 1
-  [ "$(cksum < "$PAW/n3/c.env")" = "$_k" ] || { PA_WHY="the config file changed"; return 1; }
-  printf 'row\n' > "$W/pids.tsv"; ln "$W/pids.tsv" "$W/b.md"
-  pa_want 'same file as a state entry' 2 WARROOM_DIR="$W" BOARD=b.md "$PB/board.sh" path || return 1
-  ln -s "$W" "$PAW/link-to-W"
-  pa_want 'name this tool writes' 2 WARROOM_DIR="$W" BOARD="$PAW/link-to-W/seats.tsv" "$PB/board.sh" path
-}
-fx_n4() { # controls: a plain subfolder board; an external board (its lock file appears beside it, as documented)
-  pa_setup
-  pa_pass WARROOM_DIR="$PAW/n4" BOARD=sub/board.md "$PB/board.sh" path || return 1
-  pa_pass WARROOM_DIR="$PAW/n4" BOARD="$PAW/ext/board.md" "$PB/board.sh" post BOSS hi || return 1
-  [ -f "$PAW/ext/board.md.flock" ] && grep -q hi "$PAW/ext/board.md" || { PA_WHY="no ext/board.md.flock after the post"; return 1; }
-}
-fx_n5() { # a fullwidth lookalike of settings.json is not folded: accepted (a stated limit); the filesystem's own answer is recorded
-  pa_setup; mkdir -p "$PAW/n5"; : > "$PAW/n5/settings.json"; _fw=$(printf '\357\275\223ettings.json')
-  pa_pass WARROOM_DIR="$PAW/n5" BOARD="$_fw" "$PB/board.sh" path || return 1
-  [ -f "$PAW/n5/$_fw" ] || { PA_WHY="lookalike board not created"; return 1; }
-  if [ "$PAW/n5/$_fw" -ef "$PAW/n5/settings.json" ]; then PA_NOTE="observed: the filesystem treats the lookalike as the same file"; else PA_NOTE="observed: the filesystem makes a distinct entry for the lookalike"; fi
-}
 
 # 48. the config file at a name this tool writes (N6)
 sec "48. the config file at a name this tool writes (N6)"
-fx_n6a() { # absent and existing, at each derived slot of the run folder
-  pa_setup; W="$PAW/n6"
-  for slot in .anchor-W1 seats.tsv pids.tsv .guard-W1 .lastwake-W1 .cursor-W1 .anchor-W9 board.md.flock .wrtmp.q1; do
-    pa_want 'name this tool writes|lock file|ends in \.flock' 2 WARROOM_ENV="$W/$slot" WARROOM_DIR="$W" "$PB/board.sh" path || return 1   # absent
-    mkdir -p "$W"; pa_cfgbytes "$W/$slot"; _k=$(cksum < "$W/$slot"); _m=$(pa_mt "$W/$slot")
-    pa_want 'name this tool writes|lock file|ends in \.flock' 2 WARROOM_ENV="$W/$slot" WARROOM_DIR="$W" "$PB/board.sh" path || return 1   # existing
-    [ "$(cksum < "$W/$slot")" = "$_k" ] && [ "$(pa_mt "$W/$slot")" = "$_m" ] || { PA_WHY="config at $slot changed"; return 1; }
-    rm -rf "${W:?}"
-  done
-}
-fx_n6b() { # under a nested reserved component, and the control at a plain name
-  pa_setup; W="$PAW/n6"
-  pa_want 'name this tool writes' 2 WARROOM_ENV="$W/.cursor-W1/sub/warroom.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
-  mkdir -p "$W/.cursor-W1/sub"; pa_cfgbytes "$W/.cursor-W1/sub/warroom.env"
-  pa_want 'name this tool writes' 2 WARROOM_ENV="$W/.cursor-W1/sub/warroom.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
-  rm -rf "${W:?}"; mkdir -p "$W"; pa_cfgbytes "$W/warroom.env"
-  pa_pass WARROOM_ENV="$W/warroom.env" WARROOM_DIR="$W" "$PB/board.sh" path
-}
-fx_n6c() { # the same file under another name: a hard link to a state entry or to the board's lock file; a dangling link to a slot
-  pa_setup; W="$PAW/n6"; mkdir -p "$W"
-  pa_cfgbytes "$W/.anchor-W1"; ln "$W/.anchor-W1" "$PAW/hl-anchor.env"
-  pa_want 'same file as a state entry|name this tool writes' 2 WARROOM_ENV="$PAW/hl-anchor.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
-  pa_cfgbytes "$W/board.md.flock"; ln "$W/board.md.flock" "$PAW/hl-flock.env"
-  pa_want 'lock file' 2 WARROOM_ENV="$PAW/hl-flock.env" WARROOM_DIR="$W" "$PB/board.sh" path || return 1
-  rm -f "${W:?}/.anchor-W1"; ln -s "$W/.anchor-W1" "$PAW/dangling.env"
-  pa_want 'leads nowhere|name this tool writes' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$W" "$PB/board.sh" path
-}
-fx_n6d() { # a config path whose links loop is refused, and so is a link that leads nowhere
-  pa_setup; ln -s "$PAW/loop2" "$PAW/loop1"; ln -s "$PAW/loop1" "$PAW/loop2"
-  pa_want 'config path loops' 2 WARROOM_ENV="$PAW/loop1" WARROOM_DIR="$PAW/n6d" "$PB/board.sh" path || return 1
-  ln -s "$PAW/nowhere.env" "$PAW/dangling.env"
-  pa_want 'link that leads nowhere' 2 WARROOM_ENV="$PAW/dangling.env" WARROOM_DIR="$PAW/n6d" "$PB/board.sh" path
-}
 
 # 49. seat arguments that become paths (S1, S2)
 sec "49. seat arguments that become paths (S1, S2)"
-fx_s1() {
-  pa_setup; W="$PAW/s1"
-  pa_exec WARROOM_DIR="$W" "$PB/board.sh" tail ../x
-  [ "$PA_RC" = 2 ] && [ "$(find "$W" -print | LC_ALL=C sort | tr '\n' ' ')" = "$W $W/board.md " ] || { PA_WHY="fresh run: rc $PA_RC, new entries: $(find "$W" -print | LC_ALL=C sort | tr '\n' ' ')"; return 1; }
-  for a in ../x W1/x "" w1 ZZ NONE; do
-    pa_want 'unknown seat|usage' 2 WARROOM_DIR="$W" "$PB/board.sh" tail "$a" || return 1
-  done
-  pa_want 'usage' 2 WARROOM_DIR="$W" "$PB/board.sh" tail || return 1
-  pa_want 'unknown seat' 2 WARROOM_DIR="$W" "$PB/waiter.sh" ../x sid-s1 || return 1
-}
-fx_s2() { # a registry row is data: a seat outside SEATS is not trusted by the read hooks
-  pa_setup; W="$PAW/s2"; pa_pass WARROOM_DIR="$W" "$PB/board.sh" path || return 1
-  printf '[00:00 · BOSS] hello\n' >> "$W/board.md"; printf 'sid-pa\t../x\t99999\tx\tstart\n' > "$W/seats.tsv"
-  pa_want 'unknown seat in registry' 0 WARROOM_DIR="$W" "$PHK/waiter-check.sh" || return 1
-  pa_want '^$' 0 WARROOM_DIR="$W" "$PHK/board-tail.sh" || return 1
-  printf 'sid-pa\tW1\t99999\tx\tstart\n' > "$W/seats.tsv"
-  pa_pass WARROOM_DIR="$W" "$PHK/board-tail.sh" || return 1
-  case "$PA_OUT" in *"[BOARD]"*) return 0 ;; esac; PA_WHY="control (registry seat W1) printed '$PA_OUT'"; return 1
-}
 
 # 50. python3 is required; hook exits (P1, P2, H1)
 sec "50. python3 is required; hook exits (P1, P2, H1)"
-fx_p1() {
-  pa_setup; mkdir -p "$PAW/nopy" "$PAW/brokenpy"
-  for t in dirname bash; do ln -s "$(command -v $t)" "$PAW/nopy/$t"; done
-  for t in dirname bash; do ln -s "$(command -v $t)" "$PAW/brokenpy/$t"; done
-  printf '#!/bin/sh\nexit 1\n' > "$PAW/brokenpy/python3"; chmod +x "$PAW/brokenpy/python3"
-  for d in nopy brokenpy; do
-    pa_want 'python3 is required' 2 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PB/board.sh" path || return 1
-    pa_want 'python3 is required' 2 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PB/waiter.sh" W1 sid-p1 || return 1
-    pa_want 'python3 is required' 2 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PB/pids.sh" check || return 1
-    for h in waiter-check board-tail board-guard; do
-      pa_want 'python3 is required' 1 PATH="$PAW/$d" WARROOM_DIR="$PAW/p1" "$PHK/$h.sh" || return 1
-    done
-  done
-}
-fx_p2() { # python3 passes the startup check and fails only the hook's JSON parse: exit 1 with a message, never a silent 0
-  pa_setup; mkdir -p "$PAW/shim"; _py=$(command -v python3); pa_pass WARROOM_DIR="$PAW/p2" "$PB/board.sh" path || return 1
-  printf '#!/bin/sh\ncase "$*" in *json*) echo "shim: json failed" >&2; exit 1 ;; esac\nexec %s "$@"\n' "$_py" > "$PAW/shim/python3"; chmod +x "$PAW/shim/python3"
-  for h in waiter-check board-tail; do
-    pa_want 'could not read the hook input' 1 PATH="$PAW/shim:$PATH" WARROOM_DIR="$PAW/p2" "$PHK/$h.sh" || return 1
-  done
-  PA_IN='not json'; for h in waiter-check board-tail; do pa_want 'could not read the hook input' 1 WARROOM_DIR="$PAW/p2" "$PHK/$h.sh" || { PA_IN='{"session_id": "sid-pa"}'; return 1; }; done
-  PA_IN='{"session_id": "sid-pa"}'
-}
-fx_p3() { # a json.py planted in the folder the hook runs from is never imported: the hooks start python3 isolated
-  pa_setup; mkdir -p "$PAW/plant"; printf 'open("PWNED", "w").write("ran")\ndef load(f):\n    return {"session_id": "sid-pa"}\n' > "$PAW/plant/json.py"
-  PA_CWD="$PAW/plant"
-  for h in waiter-check board-tail; do
-    pa_pass WARROOM_DIR="$PAW/p3" "$PHK/$h.sh" || { PA_CWD=""; return 1; }
-    [ ! -e "$PAW/plant/PWNED" ] || { PA_WHY="$h imported the json.py from its working folder"; PA_CWD=""; return 1; }
-  done
-  PA_CWD=""
-}
-fx_h1() { # a bad warroom.env: every hook exits 1, never 2, and the message names the line
-  pa_setup; printf 'SEATS=$(touch x)\n' > "$PAW/bad.env"
-  for h in waiter-check board-tail board-guard; do
-    pa_want 'warroom\.env line 1' 1 WARROOM_ENV="$PAW/bad.env" WARROOM_DIR="$PAW/h1" "$PHK/$h.sh" || return 1
-  done
-}
-pa_run_fx() { # pa_run_fx FIXTURE "what it shows": ok, a printed skip, or FAIL with the assert that fired
-  PA_WHY=""; PA_SKIP=""; PA_NOTE=""
-  if "$1"; then if [ -n "$PA_SKIP" ]; then echo "skip $2 ($PA_SKIP)"; else ok "$2${PA_NOTE:+ [$PA_NOTE]}"; fi; else bad "$2: $PA_WHY"; fi
-}
 _TP=$(cd -P "$T" && pwd -P); pa_setup; case "$PAH$PAC" in "$_TP"/*"$_TP"/*) ok "destinations: the fixture HOME and CLAUDE_CONFIG_DIR are under the temp dir" ;; *) bad "destinations: fixture HOME/CLAUDE_CONFIG_DIR are not under $T" ;; esac
 pa_setup; if [ -x /usr/bin/python3 ]; then pa_run /usr/bin/python3 -c 'import json, os, re' >/dev/null 2>&1; [ ! -e "$PAH/Library" ] && ok "interpreter: the system python3, run the way every fixture runs it, leaves nothing under the fixture HOME" || bad "interpreter: the system python3 created $(find "$PAH" -print | head -3 | tr '\n' ' ')"; fi
 pa_run_fx fx_r1 "resolver: the config folder is refused however it is spelled (trailing /, /./, /x/.., a symlink to it)"
@@ -1009,15 +760,11 @@ pa_run_fx fx_p3 "python3: a json.py planted in the hook's working folder is not 
 pa_run_fx fx_h1 "hooks: a bad warroom.env exits 1 (never 2) and names the line"
 
 SH51="$T/shim51"; mkdir -p "$SH51"; REALPY=$(command -v python3)
-PS_OK=1; [ -n "$(ps -o lstart= -p $$ 2>/dev/null)" ] || PS_OK=0   # sections 51-55 and their mutants arm waiters, which need ps to read a start time; without it they are skipped, printed as skips
 
 # 51. links and hard links at state leaves (PR B). A protected state file that is a link, or has a second name, is refused: the
 sec "51. links and hard links at state leaves (PR B). A protected sta"
 #     link target is never created or written, and the temp that was made is removed. Cleanup success and failure are separate cases.
 L51="$T/l51"; mkdir -p "$L51/tgt"
-l51_base() { rm -rf "$L51/w" "$L51/tgt"; : > "$L51/o"; : > "$L51/e"; mkdir -p "$L51/w" "$L51/tgt";   # o and e are emptied by us: a background job truncates its own redirect late, and wait_text must not see the last run's 'armed'
-  printf '[00:00 · BOSS] one\n' > "$L51/w/board.md"; }
-l51_clean() { [ ! -e "$L51/tgt/$1" ] && [ -L "$L51/w/$1" ] && [ -z "$(find "$L51/w" -name '.wrtmp.*')" ]; }
 # L1: a dangling link at each protected file; the arm / add / guard is refused, the link still points at nothing, no temp is left
 if [ "$PS_OK" = 1 ]; then
 l51_base; ln -s "$L51/tgt/seats.tsv" "$L51/w/seats.tsv"
@@ -1080,10 +827,6 @@ for tool in mktemp awk cksum rm; do
   cond=$(printf '%s' "$cond" | sed 's/\\&/\&/g')
   printf '#!/bin/sh\nf="%s/%s"\nif [ -f "$f" ]; then k=$(cat "$f"); %s\nfi\nexec %s "$@"\n' "$FAULT55" "$tool" "$cond" "$real" > "$SH55/$tool"; chmod +x "$SH55/$tool"
 done
-fault_set() { rm -f "$FAULT55/$1" "$FAULT55/$1.cnt"; printf '%s\n' "$2" > "$FAULT55/$1"; }
-fault_clear() { rm -f "$FAULT55"/*; }
-l52_base() { rm -rf "$L51/w"; : > "$L51/o"; : > "$L51/e"; mkdir -p "$L51/w"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] two\n' > "$L51/w/board.md"; printf 'other-sid\tBOSS\t1\t00:00\n' > "$L51/w/seats.tsv"; }
-l52_dir() { ls -A "$L51/w" | tr '\n' ' '; }
 if [ "$PS_OK" = 1 ]; then
 # L4: legacy same-PID temp names are planted (links and a hard link) and the waiter is exec'd in the SAME pid: nothing planted is written through or removed
 l51_base; printf 'victim\n' > "$L51/victim"; v0=$(cksum < "$L51/victim"); printf 'seats\n' > "$L51/hl"; ln "$L51/hl" "$L51/w/.hardtmp"; mkdir "$L51/w/.wrtmp.PLANTED"
@@ -1172,19 +915,6 @@ case "$e" in *"was delivered but the mark could not be saved"*) true ;; *) false
 # 55. a failed filter or checksum consumes nothing (PR B). Armed waiter, a fault appears, a wake line is posted: the waiter stays up, the
 sec "55. a failed filter or checksum consumes nothing (PR B). Armed w"
 #     position does not move, it says so; once the fault is gone the line is delivered.
-l55_run() { # name mode desc: mode = filter | gen | prefix | snap, the fault is set before the wake line is posted
-  l52_base; rm -f "$L51/w/seats.tsv"; WARROOM_DIR="$L51/w" PATH="$SH55:$PATH" "$B/waiter.sh" W1 sid-$1 > "$L51/o" 2>"$L51/e" & WP=$!; wait_text "$L51/e" '^armed ' 20; c0=$(cksum < "$L51/w/.cursor-W1")
-  case $2 in
-    filter) fault_set awk filter ;;
-    gen)    fault_set cksum "$(head -n 1 "$L51/w/board.md" | wc -c | tr -d ' ')" ;;
-    prefix) fault_set cksum "$(wc -c < "$L51/w/board.md" | tr -d ' ')" ;;
-    snap)   fault_set cksum "$(( $(wc -c < "$L51/w/board.md") + $(printf '[00:00 · BOSS] @W1 ACTION: %s line\n' "$1" | wc -c) ))" ;;
-  esac
-  WARROOM_DIR="$L51/w" "$B/board.sh" post BOSS "@W1 ACTION: $1 line" >/dev/null; sleep 3
-  alive=0; kill -0 $WP 2>/dev/null && alive=1; mid=$(cksum < "$L51/w/.cursor-W1"); said=$(grep -c "nothing consumed" "$L51/e"); fault_clear
-  wait_exit $WP 8 || kill $WP 2>/dev/null; wait $WP 2>/dev/null
-  if [ $alive = 1 ] && [ "$mid" = "$c0" ] && [ "$said" -ge 1 ] && grep -q "$1 line" "$L51/o"; then ok "consume: $3 consumes nothing (waiter stays up, position kept, message) and the line comes on the next good poll"; else bad "consume $1: alive $alive said $said same-pos $([ "$mid" = "$c0" ] && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")'"; fi
-}
 if [ "$PS_OK" = 1 ]; then
 l55_run filterfault filter "a failed filter"
 l55_run gensumfault gen "a failed generation checksum"
@@ -1209,24 +939,6 @@ sec "55b. write faults AFTER the temp exists (PR B): a mktemp shim han"
 #      fails while the allocation and the rename would have worked. "N" counts every mktemp; "N waiter.sh" counts only those made by a
 #      process whose command line has that word (pids.sh check also makes temps on every poll). Stages: cursor, anchor, snapshot, chunk, guard mark. Each: the final
 #      file is as it was, the message is exact, the fault was reached (hit marker), and a retry without the fault delivers.
-SHRO="$T/shimro"; mkdir -p "$SHRO"; FRO="$T/faultro"; _rmk=$(command -v mktemp)
-cat > "$SHRO/mktemp" <<SHIM
-#!/bin/sh
-f="$FRO"
-if [ -f "\$f" ]; then
-  k=\$(cat "\$f"); n=\${k%% *}; pat=\${k#* }; [ "\$pat" = "\$k" ] && pat=""
-  if [ -n "\$pat" ]; then par=\$(ps -o command= -p \$PPID 2>/dev/null); case "\$par" in *"\$pat"*) ;; *) exec $_rmk "\$@" ;; esac; fi
-  c=\$(cat "\$f.cnt" 2>/dev/null || echo 0); c=\$((c+1)); echo "\$c" > "\$f.cnt"
-  if [ "\$n" = "\$c" ]; then p=\$($_rmk "\$@") || exit 1; chmod 444 "\$p"; echo "\$c" >> "\$f.hit"; echo "\$p"; exit 0; fi
-fi
-exec $_rmk "\$@"
-SHIM
-chmod +x "$SHRO/mktemp"
-ro_set() { rm -f "$FRO.cnt" "$FRO.hit"; printf '%s\n' "$1" > "$FRO"; }
-ro_clear() { rm -f "$FRO" "$FRO.cnt"; }
-ro_hit() { [ -s "$FRO.hit" ]; }
-f2_base() { rm -rf "$L51/w"; : > "$L51/o"; : > "$L51/e"; mkdir -p "$L51/w"; printf '[00:00 · BOSS] one\n[00:00 · BOSS] three words here\n' > "$L51/w/board.md"; }
-f2_tail() { WARROOM_DIR="$L51/w" PATH="$SHRO:$PATH" "$B/board.sh" tail BOSS 2>"$L51/e"; }
 if [ "$(id -u)" != 0 ]; then
 for st in "snapshot 1 scratch" "chunk 2 scratch" "anchor 3 position"; do
   set -- $st; name=$1; nth=$2; kind=$3
@@ -1277,6 +989,8 @@ WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-pd2 > "$L51/o2" 2>/dev/null & WP=$!; 
   && ok "write fault: a failed position write at delivery exits 1 'printed but not marked' (header and line printed, fault reached) and the re-arm delivers it again" || bad "write fault waiter delivery: rc $r, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")', retry '$(cat "$L51/o2")'"
 else echo "skip write faults in the waiter: cursor, snapshot, chunk, delivery position (no ps start times, or running as root)"; fi
 
+fi
+if [ "$_in_m" = 1 ]; then   # section 59 (parts m1 and m2)
 # 59. mutants of the checks above: each is a copy of bin/ and hooks/ in $T with ONE change (asserted by grep -c); the copy
 sec "59. mutants of the checks above: each is a copy of bin/ and hook"
 # without the change passes the fixture, the copy with it fails the fixture at the printed assert.
@@ -1286,6 +1000,7 @@ pa_msed() { _mt=$(sed "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }
 pa_mawk() { _mt=$(awk "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }
 PA_PRISTINE_OK=" "
 pa_mut() { # pa_mut NAME FIXTURE: the pristine copy passes FIXTURE, the mutated copy fails it
+  pa_claim mut "$1" "$2"; case $? in 0) ;; 1) return 0 ;; *) bad "mutant $1: pa_claim is not defined (smoke-lib.sh not sourced?)"; return 0 ;; esac
   _n=$1; _fx=$2; PA_WHY=""; PA_SKIP=""
   PB="$MA/pristine/bin"; PHK="$MA/pristine/hooks"
   # the unmutated copy runs the fixture once per fixture (a pass is remembered in PA_PRISTINE_OK): it is the same tree every time
@@ -2480,24 +2195,26 @@ pa_mcopy krm; pa_msed krm bin/waiter.sh 's|if ! wr_cursor_put "\$CUR" "\$gen" "\
 [ "$(grep -c 'then rm -f "\$LAST";' "$MA/krm/bin/waiter.sh")" = 1 ] && pa_mut krm fx_k1 || bad "mutant krm: the change was not applied"
 # F3 root control (id double): K1's own root skip reaches pa_mut as a skip, counted as neither ok nor FAIL
 mkdir -p "$T/idroot" && printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exec /usr/bin/id "$@"' > "$T/idroot/id" && chmod +x "$T/idroot/id"
-_f0=$fail; _p0=$PATH; _pc0=$PA_PRISTINE_OK; PA_PRISTINE_OK=" "; PATH="$T/idroot:$PATH"; pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0; PA_PRISTINE_OK=$_pc0
+_f0=$fail; _p0=$PATH; _pc0=$PA_PRISTINE_OK; PA_PRISTINE_OK=" "; PATH="$T/idroot:$PATH"; PA_OWN_ALL=1 pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0; PA_PRISTINE_OK=$_pc0
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant krm (running as root: mode 444 does not block root)$' "$T/skiproot.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skiproot.out")" = 0 ] && ok "mutants: K1 under an id double that reports root skips; pa_mut prints the skip and counts neither ok nor FAIL" || bad "mutants: K1 root-skip control: $(cat "$T/skiproot.out")"
 pa_mcopy khdr; pa_msed khdr bin/waiter.sh 's|^  if ! echo \(".*"\); then$|  echo \1; if false; then|'
 [ "$(grep -c 'if false; then$' "$MA/khdr/bin/waiter.sh")" = 1 ] && pa_mut khdr fx_k2 || bad "mutant khdr: the change was not applied"
 pa_mcopy knotrap; pa_msed knotrap bin/waiter.sh "s|^trap '' PIPE.*\$|:|"
 [ "$(grep -c "^trap '' PIPE" "$MA/knotrap/bin/waiter.sh")" = 0 ] && pa_mut knotrap fx_k5 || bad "mutant knotrap: the change was not applied"
 pa_mcopy knounlock; pa_msed knounlock bin/waiter.sh 's|wr_unlock "\$CUR"; echo "\[WAITER ERROR\]|echo "[WAITER ERROR]|'
-[ "$(grep -c 'wr_unlock "\$CUR"; echo "\[WAITER ERROR\]' "$MA/knounlock/bin/waiter.sh")" = 0 ] && for _kf in fx_k1 fx_k2 fx_k3 fx_k5; do pa_mut knounlock $_kf; done || bad "mutant knounlock: the change was not applied"
+[ "$(grep -c 'wr_unlock "\$CUR"; echo "\[WAITER ERROR\]' "$MA/knounlock/bin/waiter.sh")" = 0 ] && { pa_mut knounlock fx_k1; pa_mut knounlock fx_k2; pa_mut knounlock fx_k3; pa_mut knounlock fx_k5; } || bad "mutant knounlock: the change was not applied"
 else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # a fixture that skips (root, no ps) makes pa_mut print a skip and count nothing: no ok, no FAIL
 fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }
-_f0=$fail; pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
+_f0=$fail; PA_OWN_ALL=1 pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant skipctl (control: this fixture always skips)$' "$T/skipctl.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skipctl.out")" = 0 ] && ok "mutants: a skipped fixture makes pa_mut print a skip and count neither ok nor FAIL" || bad "mutants: pa_mut on a skipped fixture: $(cat "$T/skipctl.out")"
 # bothwin: the holder check finds nobody AND the arm keeps the other session's row, so both arms win and both stay armed
 # (a replaced waiter that leaves because its row is gone would otherwise hide a second winner)
 pa_mcopy bothwin; pa_msed bothwin bin/waiter.sh 's/\$2==seat \&\& \$1!=s {print \$3/$2==seat \&\& $1!=s \&\& 0 {print $3/'
 pa_msed bothwin bin/waiter.sh "s/'\$1!=s \&\& \$2!=seat'/'\$1!=s'/"
 [ "$(grep -c '\$1!=s && 0 {print \$3' "$MA/bothwin/bin/waiter.sh")" = 1 ] && [ "$(grep -cF '$1!=s && $2!=seat' "$MA/bothwin/bin/waiter.sh")" = 0 ] && pa_mut bothwin fx_seatrace || bad "mutant bothwin: the change was not applied"
+fi
+if [ "$_in_base" = 1 ]; then   # sections 60 and 61 (part base)
 # 60. read gate, enforcing. The block must fail when the gate cannot run or runs as an empty
 sec "60. read gate, enforcing. The block must fail when the gate cann"
 # no-op: each stage has to print its own summary line, the inventory has to cover every script in bin/ and hooks/, and a missing
@@ -2525,23 +2242,24 @@ rg_stage() {    # $1 gate script, $2 tree root; prints one "ok" or "FAIL" line p
 rg_stage "$ROOT/tests/read-gate.py" "$ROOT"
 # the block itself: an empty no-op gate and a missing python3 must both fail it, and with the summary checks taken out the no-op passes
 RG_T=$(mktemp -d) || exit 1
+# the three controls below call rg_stage inside a subshell with T=$RG_T: their deliberate bad/ok calls must not reach the part counters
 printf 'pass\n' > "$RG_T/noop.py"
 RG_TOOLS="$RG_T/tools"; mkdir "$RG_TOOLS"
 for RG_X in grep ls wc head tr sed; do ln -s "$(command -v "$RG_X")" "$RG_TOOLS/$RG_X"; done
-RG_NOOP=$( (rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
+RG_NOOP=$( (T=$RG_T; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
 if printf '%s\n' "$RG_NOOP" | grep -q '^FAIL read gate self-test' && printf '%s\n' "$RG_NOOP" | grep -q '^FAIL read gate inventory' && ! printf '%s\n' "$RG_NOOP" | grep -q '^ok '; then
   ok "read gate block: an empty no-op gate fails both stages"
 else
   bad "read gate block accepts an empty no-op gate: $RG_NOOP"
 fi
-RG_NOPY=$( (PATH="$RG_TOOLS"; rg_stage "$ROOT/tests/read-gate.py" "$ROOT") 2>&1 )
+RG_NOPY=$( (T=$RG_T; PATH="$RG_TOOLS"; rg_stage "$ROOT/tests/read-gate.py" "$ROOT") 2>&1 )
 if printf '%s\n' "$RG_NOPY" | grep -q '^FAIL read gate needs python3' && ! printf '%s\n' "$RG_NOPY" | grep -q '^ok '; then
   ok "read gate block: a missing python3 is a failure, not a skip"
 else
   bad "read gate block passes without python3: $RG_NOPY"
 fi
 declare -f rg_stage | sed 's/ && printf .*; then$/; then/' > "$RG_T/mutant.sh"
-RG_MUT=$( (. "$RG_T/mutant.sh"; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
+RG_MUT=$( (T=$RG_T; . "$RG_T/mutant.sh"; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
 if printf '%s\n' "$RG_MUT" | grep -q '^FAIL'; then bad "read gate block: the summary checks are not pinned (the mutant still fails): $RG_MUT"; else ok "read gate block: with the summary checks removed an empty no-op passes (so the checks are what stops it)"; fi
 rm -rf "$RG_T"
 
@@ -2590,6 +2308,8 @@ if sv_up; then kill -TERM $SVP; wait $SVP 2>/dev/null; sleep 1; fi
 [ "$(sv_left)" -ge 2 ] && ok "supervisor control: without it, SIGTERM to the run leaves its grandchildren behind" || bad "supervisor control: the unsupervised stub left $(sv_left) process(es); the fixture is blind"
 pkill -f "$SVM" 2>/dev/null; sv_gone || bad "supervisor fixture: could not clear its own marker processes"
 
+fi
 sec end
+smoke_finish || fail=1
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail
