@@ -10,14 +10,60 @@ jobs:
       - uses: actions/checkout@v4
       - name: shellcheck (warnings and errors fail the build)
         run: shellcheck -S warning bin/*.sh hooks/*.sh tools/*.sh tests/*.sh
-      - name: smoke test (throwaway board in a temp dir)
-        run: bash tests/smoke.sh
+      - name: gate tests (each way the part split could pass by running less must fail)
+        run: bash tests/smoke-gates.sh
   # macOS runs on pull requests and on main, not on other branch pushes (its minutes bill 10x Linux)
-  macos:
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: macos-latest
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      oses: ${{ steps.p.outputs.oses }}
+    steps:
+      - id: p
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$EVENT" = pull_request ] || { [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ]; }; then
+            echo 'oses=["ubuntu-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'oses=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+  # tests/smoke.sh in three parts per OS (base, m1, m2; tests/smoke-parts.txt says which call belongs to which), in parallel
+  smoke:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.oses) }}
+        part: [base, m1, m2]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: smoke test (throwaway board in a temp dir)
-        run: bash tests/smoke.sh
+      - name: smoke test, part ${{ matrix.part }} (throwaway board in a temp dir)
+        run: bash tests/smoke-part-run.sh "${{ matrix.part }}" "$RUNNER_TEMP/trailer/${{ matrix.os }}-${{ matrix.part }}.trailer"
+      - name: keep the trailer line for smoke-all
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-trailer-${{ matrix.os }}-${{ matrix.part }}
+          path: ${{ runner.temp }}/trailer/${{ matrix.os }}-${{ matrix.part }}.trailer
+          if-no-files-found: ignore
+  # the one job to require: it fails unless every part of every OS ran every call it owns
+  smoke-all:
+    needs: [plan, smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smoke-trailer-*
+          path: trailers
+          merge-multiple: true
+      - name: every part of every OS ran completely
+        env:
+          SMOKE_LEGS_RESULT: ${{ needs.smoke.result }}
+          OSES: ${{ join(fromJSON(needs.plan.outputs.oses), ' ') }}
+        run: bash tests/smoke-all.sh trailers $OSES

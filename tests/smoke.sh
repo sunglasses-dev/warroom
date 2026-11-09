@@ -46,6 +46,10 @@
 # The suite runs under tests/supervise.py: its own process group, so Ctrl-C, SIGTERM, SIGHUP, SMOKE_TIMEOUT (whole seconds, default 2400: the slowest full run seen is 1365 s, macOS CI; CI kills a job at 2700 s) or
 # a dead parent stop every waiter the fixtures started, also those in subshells and mutant copies, and the temp dir goes last.
 # SMOKE_INNER=1 bash tests/smoke.sh runs the suite bare.
+# SMOKE_PART=base|m1|m2 runs one part: base = sections 1-58, 60 and 61 and the fixtures run directly in them; m1 and m2 = halves of section 59,
+# balanced by seconds. tests/smoke-parts.txt names the part of every pa_mut / pa_run_fx call and the fewest ok lines a part prints; CI runs
+# the three parts in parallel and tests/smoke-all.sh fails unless each ran every call it owns. Unset runs everything. Every run ends with
+# one line: smoke-part NAME: ran=<calls made> expected=<calls owned> ok=<ok lines> fail=<failures>. tests/smoke-gates.sh tests the gate.
 if [ -z "${SMOKE_INNER:-}" ] && command -v python3 >/dev/null 2>&1; then
   exec python3 -I "$(dirname "$0")/supervise.py" -- bash "$0" "$@"
 fi
@@ -62,8 +66,8 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; T=${SMOKE_T:-$(mktemp -d)}; trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; rm -rf "$T" 2>/dev/null || { sleep 1; rm -rf "$T"; }' EXIT
 export WARROOM_DIR="$T/run" WARROOM_ENV="$T/none" SEATS="BOSS W1" WARROOM_POLL=1 WARROOM_MIN_GAP=0
 B="$ROOT/bin"; fail=0
-ok()  { echo "ok   $1"; }
-bad() { echo "FAIL $1"; fail=1; }
+ok()  { echo "ok   $1"; echo >> "$T/.n.ok"; }          # the counters are files: a call inside a subshell is still counted
+bad() { echo "FAIL $1"; fail=1; printf '%s\n' "${1//$'\n'/ }" >> "$T/.n.bad"; }
 wait_exit() { for _ in $(seq 1 "$2"); do kill -0 "$1" 2>/dev/null || return 0; sleep 1; done; return 1; }
 # wait_text FILE PATTERN SECONDS: poll (0.2 s) until the pattern is in the file; 0 at the first hit, 1 at the cap. A fixed sleep after
 # starting a waiter guesses how slow the machine is; this waits for the thing the next step needs.
@@ -74,11 +78,18 @@ sec() { local _now; _now=$(date +%s); [ -n "$_SEC_N" ] && echo "time $((_now - _
 # the definitions and setup lines the sections below share live in smoke-lib.sh (moved out so a part of the suite can source them without running sections 1-58)
 [ -r "$ROOT/tests/smoke-lib.sh" ] || { echo "FAIL tests/smoke-lib.sh is missing"; exit 1; }
 . "$ROOT/tests/smoke-lib.sh"
+# G10: a run that did not get the definitions must stop here, never pass without having run its fixtures
+[ "${SMOKE_LIB_SOURCED:-}" = 1 ] && type smoke_begin smoke_finish pa_claim pa_run_fx pa_setup >/dev/null 2>&1 || { echo "FAIL tests/smoke-lib.sh did not define what the sections call"; exit 1; }
+# SMOKE_PART=base|m1|m2 runs one part of the suite (see tests/smoke-parts.txt); unset runs everything. An unknown value, or a manifest
+# that does not match the calls written in this file, stops the run before it starts.
+smoke_begin "$0" || exit 1
+case "${SMOKE_PART:-}" in "") _in_base=1; _in_m=1 ;; base) _in_base=1; _in_m=0 ;; *) _in_base=0; _in_m=1 ;; esac
 # the tests below that close a pipe early only mean something when SIGPIPE is at its default (see the restart at the top)
 [ "$(bash -c 'yes 2>/dev/null|head -c1>/dev/null; echo ${PIPESTATUS[0]}')" = 141 ] && ok "SIGPIPE is at its default" || bad "SIGPIPE is not at its default; the PIPE tests would be meaningless"
 ( sleep 1; echo hit > "$T/wt.f" ) & wait_text "$T/wt.f" hit 5 && ok "wait_text: text that appears after a second is seen before the cap" || bad "wait_text missed text that appeared after a second"
 wait_text "$T/wt.none" hit 1 && bad "wait_text: absent text reported as found" || ok "wait_text: absent text ends at the cap with 1"
 
+if [ "$_in_base" = 1 ]; then   # sections 1-58 (part base)
 # 1. wake grammar
 sec "1. wake grammar"
 "$B/waiter.sh" W1 sid-w1 > "$T/w1.out" 2> "$T/w1.err" & WP=$!; wait_text "$T/w1.err" '^armed ' 20
@@ -978,6 +989,8 @@ WARROOM_DIR="$L51/w" "$B/waiter.sh" W1 sid-pd2 > "$L51/o2" 2>/dev/null & WP=$!; 
   && ok "write fault: a failed position write at delivery exits 1 'printed but not marked' (header and line printed, fault reached) and the re-arm delivers it again" || bad "write fault waiter delivery: rc $r, hit $(ro_hit && echo y || echo n), out '$(cat "$L51/o")', err '$(cat "$L51/e")', retry '$(cat "$L51/o2")'"
 else echo "skip write faults in the waiter: cursor, snapshot, chunk, delivery position (no ps start times, or running as root)"; fi
 
+fi
+if [ "$_in_m" = 1 ]; then   # section 59 (parts m1 and m2)
 # 59. mutants of the checks above: each is a copy of bin/ and hooks/ in $T with ONE change (asserted by grep -c); the copy
 sec "59. mutants of the checks above: each is a copy of bin/ and hook"
 # without the change passes the fixture, the copy with it fails the fixture at the printed assert.
@@ -987,6 +1000,7 @@ pa_msed() { _mt=$(sed "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }
 pa_mawk() { _mt=$(awk "$3" "$MA/$1/$2") && printf '%s\n' "$_mt" > "$MA/$1/$2"; }
 PA_PRISTINE_OK=" "
 pa_mut() { # pa_mut NAME FIXTURE: the pristine copy passes FIXTURE, the mutated copy fails it
+  pa_claim mut "$1" "$2"; case $? in 0) ;; 1) return 0 ;; *) bad "mutant $1: pa_claim is not defined (smoke-lib.sh not sourced?)"; return 0 ;; esac
   _n=$1; _fx=$2; PA_WHY=""; PA_SKIP=""
   PB="$MA/pristine/bin"; PHK="$MA/pristine/hooks"
   # the unmutated copy runs the fixture once per fixture (a pass is remembered in PA_PRISTINE_OK): it is the same tree every time
@@ -2181,24 +2195,26 @@ pa_mcopy krm; pa_msed krm bin/waiter.sh 's|if ! wr_cursor_put "\$CUR" "\$gen" "\
 [ "$(grep -c 'then rm -f "\$LAST";' "$MA/krm/bin/waiter.sh")" = 1 ] && pa_mut krm fx_k1 || bad "mutant krm: the change was not applied"
 # F3 root control (id double): K1's own root skip reaches pa_mut as a skip, counted as neither ok nor FAIL
 mkdir -p "$T/idroot" && printf '%s\n' '#!/bin/sh' '[ "$1" = -u ] && { echo 0; exit 0; }' 'exec /usr/bin/id "$@"' > "$T/idroot/id" && chmod +x "$T/idroot/id"
-_f0=$fail; _p0=$PATH; _pc0=$PA_PRISTINE_OK; PA_PRISTINE_OK=" "; PATH="$T/idroot:$PATH"; pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0; PA_PRISTINE_OK=$_pc0
+_f0=$fail; _p0=$PATH; _pc0=$PA_PRISTINE_OK; PA_PRISTINE_OK=" "; PATH="$T/idroot:$PATH"; PA_OWN_ALL=1 pa_mut krm fx_k1 > "$T/skiproot.out" 2>&1; PATH=$_p0; PA_PRISTINE_OK=$_pc0
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant krm (running as root: mode 444 does not block root)$' "$T/skiproot.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skiproot.out")" = 0 ] && ok "mutants: K1 under an id double that reports root skips; pa_mut prints the skip and counts neither ok nor FAIL" || bad "mutants: K1 root-skip control: $(cat "$T/skiproot.out")"
 pa_mcopy khdr; pa_msed khdr bin/waiter.sh 's|^  if ! echo \(".*"\); then$|  echo \1; if false; then|'
 [ "$(grep -c 'if false; then$' "$MA/khdr/bin/waiter.sh")" = 1 ] && pa_mut khdr fx_k2 || bad "mutant khdr: the change was not applied"
 pa_mcopy knotrap; pa_msed knotrap bin/waiter.sh "s|^trap '' PIPE.*\$|:|"
 [ "$(grep -c "^trap '' PIPE" "$MA/knotrap/bin/waiter.sh")" = 0 ] && pa_mut knotrap fx_k5 || bad "mutant knotrap: the change was not applied"
 pa_mcopy knounlock; pa_msed knounlock bin/waiter.sh 's|wr_unlock "\$CUR"; echo "\[WAITER ERROR\]|echo "[WAITER ERROR]|'
-[ "$(grep -c 'wr_unlock "\$CUR"; echo "\[WAITER ERROR\]' "$MA/knounlock/bin/waiter.sh")" = 0 ] && for _kf in fx_k1 fx_k2 fx_k3 fx_k5; do pa_mut knounlock $_kf; done || bad "mutant knounlock: the change was not applied"
+[ "$(grep -c 'wr_unlock "\$CUR"; echo "\[WAITER ERROR\]' "$MA/knounlock/bin/waiter.sh")" = 0 ] && { pa_mut knounlock fx_k1; pa_mut knounlock fx_k2; pa_mut knounlock fx_k3; pa_mut knounlock fx_k5; } || bad "mutant knounlock: the change was not applied"
 else echo "skip mutants krm, khdr, knotrap, knounlock (ps cannot read process start times here, so a waiter cannot arm)"; fi
 # a fixture that skips (root, no ps) makes pa_mut print a skip and count nothing: no ok, no FAIL
 fx_skipctl() { PA_SKIP="control: this fixture always skips"; return 0; }
-_f0=$fail; pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
+_f0=$fail; PA_OWN_ALL=1 pa_mut skipctl fx_skipctl > "$T/skipctl.out" 2>&1
 [ "$fail" = "$_f0" ] && grep -q '^skip mutant skipctl (control: this fixture always skips)$' "$T/skipctl.out" && [ "$(grep -Ec '^(ok|FAIL) ' "$T/skipctl.out")" = 0 ] && ok "mutants: a skipped fixture makes pa_mut print a skip and count neither ok nor FAIL" || bad "mutants: pa_mut on a skipped fixture: $(cat "$T/skipctl.out")"
 # bothwin: the holder check finds nobody AND the arm keeps the other session's row, so both arms win and both stay armed
 # (a replaced waiter that leaves because its row is gone would otherwise hide a second winner)
 pa_mcopy bothwin; pa_msed bothwin bin/waiter.sh 's/\$2==seat \&\& \$1!=s {print \$3/$2==seat \&\& $1!=s \&\& 0 {print $3/'
 pa_msed bothwin bin/waiter.sh "s/'\$1!=s \&\& \$2!=seat'/'\$1!=s'/"
 [ "$(grep -c '\$1!=s && 0 {print \$3' "$MA/bothwin/bin/waiter.sh")" = 1 ] && [ "$(grep -cF '$1!=s && $2!=seat' "$MA/bothwin/bin/waiter.sh")" = 0 ] && pa_mut bothwin fx_seatrace || bad "mutant bothwin: the change was not applied"
+fi
+if [ "$_in_base" = 1 ]; then   # sections 60 and 61 (part base)
 # 60. read gate, enforcing. The block must fail when the gate cannot run or runs as an empty
 sec "60. read gate, enforcing. The block must fail when the gate cann"
 # no-op: each stage has to print its own summary line, the inventory has to cover every script in bin/ and hooks/, and a missing
@@ -2226,23 +2242,24 @@ rg_stage() {    # $1 gate script, $2 tree root; prints one "ok" or "FAIL" line p
 rg_stage "$ROOT/tests/read-gate.py" "$ROOT"
 # the block itself: an empty no-op gate and a missing python3 must both fail it, and with the summary checks taken out the no-op passes
 RG_T=$(mktemp -d) || exit 1
+# the three controls below call rg_stage inside a subshell with T=$RG_T: their deliberate bad/ok calls must not reach the part counters
 printf 'pass\n' > "$RG_T/noop.py"
 RG_TOOLS="$RG_T/tools"; mkdir "$RG_TOOLS"
 for RG_X in grep ls wc head tr sed; do ln -s "$(command -v "$RG_X")" "$RG_TOOLS/$RG_X"; done
-RG_NOOP=$( (rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
+RG_NOOP=$( (T=$RG_T; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
 if printf '%s\n' "$RG_NOOP" | grep -q '^FAIL read gate self-test' && printf '%s\n' "$RG_NOOP" | grep -q '^FAIL read gate inventory' && ! printf '%s\n' "$RG_NOOP" | grep -q '^ok '; then
   ok "read gate block: an empty no-op gate fails both stages"
 else
   bad "read gate block accepts an empty no-op gate: $RG_NOOP"
 fi
-RG_NOPY=$( (PATH="$RG_TOOLS"; rg_stage "$ROOT/tests/read-gate.py" "$ROOT") 2>&1 )
+RG_NOPY=$( (T=$RG_T; PATH="$RG_TOOLS"; rg_stage "$ROOT/tests/read-gate.py" "$ROOT") 2>&1 )
 if printf '%s\n' "$RG_NOPY" | grep -q '^FAIL read gate needs python3' && ! printf '%s\n' "$RG_NOPY" | grep -q '^ok '; then
   ok "read gate block: a missing python3 is a failure, not a skip"
 else
   bad "read gate block passes without python3: $RG_NOPY"
 fi
 declare -f rg_stage | sed 's/ && printf .*; then$/; then/' > "$RG_T/mutant.sh"
-RG_MUT=$( (. "$RG_T/mutant.sh"; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
+RG_MUT=$( (T=$RG_T; . "$RG_T/mutant.sh"; rg_stage "$RG_T/noop.py" "$ROOT") 2>&1 )
 if printf '%s\n' "$RG_MUT" | grep -q '^FAIL'; then bad "read gate block: the summary checks are not pinned (the mutant still fails): $RG_MUT"; else ok "read gate block: with the summary checks removed an empty no-op passes (so the checks are what stops it)"; fi
 rm -rf "$RG_T"
 
@@ -2291,6 +2308,8 @@ if sv_up; then kill -TERM $SVP; wait $SVP 2>/dev/null; sleep 1; fi
 [ "$(sv_left)" -ge 2 ] && ok "supervisor control: without it, SIGTERM to the run leaves its grandchildren behind" || bad "supervisor control: the unsupervised stub left $(sv_left) process(es); the fixture is blind"
 pkill -f "$SVM" 2>/dev/null; sv_gone || bad "supervisor fixture: could not clear its own marker processes"
 
+fi
 sec end
+smoke_finish || fail=1
 [ $fail = 0 ] && echo "smoke: all passed" || echo "smoke: FAILED"
 exit $fail

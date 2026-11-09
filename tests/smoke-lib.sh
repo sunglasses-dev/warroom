@@ -4,6 +4,66 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # PS_OK and the marker below are read by smoke.sh, the file that sources this one
 SMOKE_LIB_SOURCED=1
+
+# ---- the part gate: which calls this run owns, and proof that it ran all of them ----
+# tests/smoke-parts.txt lists every pa_mut / pa_run_fx call of smoke.sh once, with the part (base, m1, m2) that runs it.
+# SMOKE_PART=<part> runs only that part's calls; unset runs everything. Counters are files in $T so a subshell cannot lose a count.
+SMOKE_PARTS_ALLOWED="base m1 m2"
+smoke_count() { # smoke_count NAME: how many lines the counter file $T/.n.NAME has
+  if [ -f "$T/.n.$1" ]; then echo $(( $(wc -l < "$T/.n.$1") )); else echo 0; fi
+}
+smoke_calls() { # smoke_calls SUITE: every pa_mut / pa_run_fx call written in SUITE as "mut NAME FIXTURE" or "fx - FIXTURE", sorted.
+  # A call spelled with PA_OWN_ALL=1 in front is a control of pa_mut itself: it runs in every part and is not in the manifest.
+  { grep -vE '^[[:space:]]*#' "$1" | grep -oE '(PA_OWN_ALL=1 )?pa_mut [A-Za-z0-9_]+ fx_[A-Za-z0-9_]+' | grep -v '^PA_OWN_ALL=1 ' | sed -E 's/^pa_mut /mut /'
+    grep -oE '^pa_run_fx fx_[A-Za-z0-9_]+' "$1" | sed -E 's/^pa_run_fx /fx - /'; } | LC_ALL=C sort
+}
+smoke_begin() { # smoke_begin SUITE: check SMOKE_PART and the manifest against the calls written in SUITE. Non-zero = do not run anything.
+  local _mf=${SMOKE_MANIFEST:-$ROOT/tests/smoke-parts.txt} _p _n=0 _l _bad=0 _rows _calls _want _ctl
+  case " $SMOKE_PARTS_ALLOWED " in *" ${SMOKE_PART:-base} "*) ;; *) echo "FAIL unknown SMOKE_PART '$SMOKE_PART' (want one of: $SMOKE_PARTS_ALLOWED, or unset for everything)"; return 1 ;; esac
+  [ -r "$_mf" ] || { echo "FAIL the part manifest $_mf is missing"; return 1; }
+  while IFS= read -r _l; do
+    _n=$((_n + 1))
+    case "$_l" in ''|'#'*) continue ;; esac
+    if printf '%s\n' "$_l" | grep -Eq '^(base|m1|m2) (mut [A-Za-z0-9_]+|fx -) fx_[A-Za-z0-9_]+$|^floor (base|m1|m2) [0-9]+$|^controls [0-9]+$'; then :
+    else echo "FAIL $_mf line $_n is not a row, a floor or a controls line: $_l"; _bad=1; fi
+  done < "$_mf"
+  [ "$_bad" = 0 ] || return 1
+  SMOKE_ROWS=$'\n'$(grep -E '^(base|m1|m2) (mut|fx) ' "$_mf")$'\n'
+  _rows=$(grep -E '^(base|m1|m2) (mut|fx) ' "$_mf" | awk '{print $2 " " $3 " " $4}' | LC_ALL=C sort)
+  _calls=$(smoke_calls "$1")
+  if [ $(( $(printf '%s\n' "$_rows" | uniq -d | wc -l) )) != 0 ]; then echo "FAIL $_mf lists a call twice (a call belongs to exactly one part):"; printf '%s\n' "$_rows" | uniq -d | sed 's/^/  /'; _bad=1; fi
+  if [ $(( $(printf '%s\n' "$_calls" | uniq -d | wc -l) )) != 0 ]; then echo "FAIL $1 makes a call twice that the manifest can list once:"; printf '%s\n' "$_calls" | uniq -d | sed 's/^/  /'; _bad=1; fi
+  if [ "$_rows" != "$_calls" ]; then
+    echo "FAIL the manifest and the calls written in $1 differ (< = only in the file, > = only in the manifest):"
+    diff <(printf '%s\n' "$_calls") <(printf '%s\n' "$_rows") | grep '^[<>]' | head -20 | sed 's/^/  /'; _bad=1
+  fi
+  _want=$(awk '$1 == "controls" {print $2}' "$_mf"); _ctl=$(grep -vE '^[[:space:]]*#' "$1" | grep -c 'PA_OWN_ALL=1 pa_mut')
+  if [ "${_want:-0}" != "$_ctl" ]; then echo "FAIL $1 has $_ctl PA_OWN_ALL=1 controls, the manifest says ${_want:-0}"; _bad=1; fi
+  if [ -n "${SMOKE_PART:-}" ]; then SMOKE_EXP=$(grep -cE "^$SMOKE_PART (mut|fx) " "$_mf"); else SMOKE_EXP=$(grep -cE '^(base|m1|m2) (mut|fx) ' "$_mf"); fi
+  SMOKE_FLOOR=0
+  for _p in ${SMOKE_PART:-$SMOKE_PARTS_ALLOWED}; do SMOKE_FLOOR=$((SMOKE_FLOOR + $(awk -v p="$_p" '$1 == "floor" && $2 == p {print $3}' "$_mf"))); done
+  [ "$_bad" = 0 ]
+}
+pa_claim() { # pa_claim KIND NAME FIXTURE: 0 = this run owns the call and it is counted; 1 = another part owns it
+  local _k="$1 $2 $3" _o="" _p
+  [ -n "${PA_OWN_ALL:-}" ] && return 0
+  for _p in $SMOKE_PARTS_ALLOWED; do case "$SMOKE_ROWS" in *$'\n'"$_p $_k"$'\n'*) _o=$_p ;; esac; done
+  if [ -z "$_o" ]; then bad "the manifest has no row for: $_k"; return 1; fi
+  [ -z "${SMOKE_PART:-}" ] || [ "$_o" = "$SMOKE_PART" ] || return 1
+  echo >> "$T/.n.ran"
+  return 0
+}
+smoke_finish() { # smoke_finish: the run fails unless it ran every call it owns and printed enough ok lines; then one trailer line
+  local _ran _ok
+  _ran=$(smoke_count ran)
+  [ "$_ran" = "$SMOKE_EXP" ] || bad "part ${SMOKE_PART:-all} ran $_ran of the $SMOKE_EXP calls it owns"
+  _ok=$(smoke_count ok)
+  [ "$_ok" -ge "$SMOKE_FLOOR" ] || bad "part ${SMOKE_PART:-all} printed $_ok ok lines, the manifest floor is $SMOKE_FLOOR"
+  echo "smoke-part ${SMOKE_PART:-all}: ran=$_ran expected=$SMOKE_EXP ok=$(smoke_count ok) fail=$(smoke_count bad)"
+  # a bad called inside $( ) prints its FAIL line into the capture, not the log: list every one here so none is invisible
+  if [ "$(smoke_count bad)" != 0 ]; then fail=1; sed 's/^/FAIL (recorded) /' "$T/.n.bad"; fi
+  return 0
+}
 seat_round() { # seat_round BINDIR WARROOMDIR TAG: 0 = settled with exactly one live arm, 1 = not (PA_WHY says what was seen)
   local _b=$1 _w=$2 _t=$3 _p1 _p2 _live _rows _who _n=0 _holds=0 _ok=1
   rm -f "$_w/seats.tsv" "$_w"/.cursor-*
@@ -264,6 +324,7 @@ fx_h1() { # a bad warroom.env: every hook exits 1, never 2, and the message name
   done
 }
 pa_run_fx() { # pa_run_fx FIXTURE "what it shows": ok, a printed skip, or FAIL with the assert that fired
+  pa_claim fx - "$1" || return 0
   PA_WHY=""; PA_SKIP=""; PA_NOTE=""
   if "$1"; then if [ -n "$PA_SKIP" ]; then echo "skip $2 ($PA_SKIP)"; else ok "$2${PA_NOTE:+ [$PA_NOTE]}"; fi; else bad "$2: $PA_WHY"; fi
 }
