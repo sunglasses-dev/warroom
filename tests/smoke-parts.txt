@@ -6,9 +6,9 @@
 # m1 and m2 are balanced by seconds (about 326 s each on one Mac, one run): every mutant of a fixture sits in the same part as the
 # fixture, so each fixture's unmutated run happens in exactly one process. Re-balance by hand when timings drift; CI never recomputes it.
 controls 2
-floor base 193
-floor m1 64
-floor m2 62
+floor base 198
+floor m1 69
+floor m2 67
 base fx - fx_r1
 base fx - fx_r2
 base fx - fx_r3
