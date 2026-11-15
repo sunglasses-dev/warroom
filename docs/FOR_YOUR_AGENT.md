@@ -5,6 +5,7 @@ You are an AI agent. Your user said something like "read this repo and set it up
 ## Frame
 
 - **Developer mode.** This is for Claude Code in terminal sessions: several terminals on one project, working as a team. It is not for the web app or the desktop app.
+- **Where.** Your user started you in the warroom folder: a clone, or `warroom-main` from the zip download. Use its full path wherever INSTALL.md says `/ABSOLUTE/PATH/TO/FOLDER`. If the folder is already there, do not run `git clone`. A zip folder in Downloads is moved somewhere your user keeps first, because the hooks hold its path.
 - **Project scope.** Every setting on this page belongs in the project's `.claude/settings.json` and the project's hooks, not in your user's global Claude Code settings. INSTALL.md step 3 points `f` at the user-level settings file, which applies to every session that reads it. To keep the setup project-scoped, set `f` to the project's `.claude/settings.json` instead and follow the same copy, merge and check steps. We wrote INSTALL.md for the user-level file and have not tested the project-level placement, so run the two-session wake check from the README Quick start after you place the hooks.
 - **Ask first.** Where a block says **Ask**, put the question to your user and wait. Never change a setting they did not agree to. Before you edit any settings file, save a copy, as INSTALL.md step 3 shows.
 - **What ships and what does not.** Blocks 1 to 8 are scripts in this repo. Blocks 9 and 10 are things we do and settings we use; no script here does them.
@@ -109,14 +110,14 @@ Build the setting. The key is `autoCompactWindow`: how full the context gets bef
 { "autoCompactWindow": 250000 }
 ```
 
-Build the hook. Save this as a script outside the clone's tracked files, for example `.claude/post-compact-reorient.sh` in the project, and replace the placeholder with the full path of the clone:
+Build the hook. Save this as a script outside the clone's tracked files, for example `.claude/post-compact-reorient.sh` in the project, and replace the placeholder with the full path of the warroom folder:
 
 ```bash
 #!/usr/bin/env bash
 # SessionStart hook, matcher "compact": runs right after a compaction. What it prints reaches the model.
 echo "Your context was just compacted. The summary above is a hint, not the truth. Before your next action:"
 echo "1. Re-read your newest card in the cards folder of the run directory (WARROOM_DIR in ~/.warroom/warroom.env)."
-echo "2. Run: bash '/ABSOLUTE/PATH/TO/warroom/bin/board.sh' read 15"
+echo "2. Run: bash '/ABSOLUTE/PATH/TO/FOLDER/bin/board.sh' read 15"
 echo "3. Check live state yourself before relying on any id, version or status in the summary."
 echo "4. Continue the row you were on. Do not close or bank: the compaction replaced the reopen."
 ```
