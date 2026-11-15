@@ -1,6 +1,16 @@
 
 # warroom
 
+Free and MIT licensed. Several Claude Code windows hand work to each other through one text file.
+
+You need Claude Code (signed in), bash and python3 on the computer you work on.
+
+On a phone? Save this page and open it on that computer.
+
+To start, download it, open docs/INSTALL.md and follow it step by step. The check at the end shows two windows waking each other.
+
+Stuck on a step? Start Claude Code in the folder and tell it to read docs/FOR_YOUR_AGENT.md and do the setup with you.
+
 Coordinate several Claude Code sessions through one text file. A shell waiter delivers a matching first-line `ACTION` post to a seat, and a job check posts a wake line to a job's owner when it ends. How many sessions you can run depends on your plan.
 
 If you are an agent reading this for a user, start here: [docs/FOR_YOUR_AGENT.md](docs/FOR_YOUR_AGENT.md).
@@ -23,13 +33,15 @@ If you are an agent reading this for a user, start here: [docs/FOR_YOUR_AGENT.md
 
 ## Quick start: two sessions
 
-You need git, bash, python3 and Claude Code, signed in.
+You need bash, python3 and Claude Code, signed in. git is only for the clone route; the zip needs none.
 
 **1. Install.** There is no installer script: you make one edit to your Claude Code settings, by hand or with your Claude Code session, and [docs/INSTALL.md](docs/INSTALL.md) has the exact commands and the hook block. In short:
 
 ```
 git clone https://github.com/sunglasses-dev/warroom warroom && cd warroom
 ```
+
+No git? Unzip the download, move the folder `warroom-main` somewhere you will keep it (not Downloads), and open a terminal in it: `cd /path/to/warroom-main`. Every `warroom` path below means that folder.
 
 - (a) Copy `warroom.env.example` to `~/.warroom/warroom.env` and edit the seats, run directory and board name.
 - (b) Create the run directory and an empty board.
@@ -45,7 +57,7 @@ The hooks apply to every Claude Code session that reads that settings file, incl
 
 `warroom.env` is read as data and never run. It is looked up at `$WARROOM_ENV`, otherwise `~/.warroom/warroom.env`, and nowhere else. `$WARROOM_ENV` must be an absolute path.
 
-Keep the clone where it is: the hooks hold its absolute path. After a move, edit the four paths in the settings file by hand. To remove the war room, see the end of `docs/INSTALL.md`: remove the four entries, stop your jobs, and delete the run directory only after looking inside it.
+Keep the clone where it is: the hooks hold its absolute path. From the zip: move the folder out of Downloads first. After a move, edit the four paths in the settings file by hand. To remove the war room, see the end of `docs/INSTALL.md`: remove the four entries, stop your jobs, and delete the run directory only after looking inside it.
 
 **2. Start two Claude Code sessions** and paste into each the first message from step 5 of `docs/INSTALL.md` (`BOSS` as the seat in the first, `W1` in the second). If you already pasted it while following that page, go to step 3.
 
@@ -71,7 +83,7 @@ bash "<clone>/bin/board.sh" post BOSS '@W1 ACTION: reply with ready'
 
 When Claude Code delivers the background task's completion, the `W1` session sees the line the waiter printed; this two-session check is how you confirm it on your machine. The default is a 5-second sleep between checks (`WARROOM_POLL`) and a hold of about 60 seconds between ordinary sequential wakes for one seat (`WARROOM_MIN_GAP`). The seat is expected to act on the line and start its waiter again. If nothing arrives, the next prompt reports a missing or dead waiter; a live waiter can stay silent, so also check the line's grammar, the saved position and the gap.
 
-**Show it to your AI instead.** Paste this into a Claude Code session started in the clone:
+**Show it to your AI instead.** Paste this into a Claude Code session started in the warroom folder:
 
 ```
 Read README.md, docs/INSTALL.md and hooks/waiter-check.sh in this folder. Follow docs/INSTALL.md

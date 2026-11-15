@@ -336,7 +336,7 @@ got=$(cd "$T/cwd" && env -u SEATS -u WARROOM_DIR -u WARROOM_ENV HOME="$T/h8" bas
 # 17. docs/INSTALL.md is the install: its hook block parses, holds the four entries, and its quoted path works when the clone path has a space
 sec "17. docs/INSTALL.md is the install: its hook block parses, holds"
 D="$ROOT/docs/INSTALL.md"; CLX="$T/sp ace/wr"; mkdir -p "$CLX" "$T/i17"; cp -R "$ROOT/bin" "$ROOT/hooks" "$CLX/"
-sed -n '/^```json$/,/^```$/p' "$D" | sed '1d;$d' | sed "s#/ABSOLUTE/PATH/TO/warroom#$CLX#g" > "$T/i17/settings.json"
+sed -n '/^```json$/,/^```$/p' "$D" | sed '1d;$d' | sed "s#/ABSOLUTE/PATH/TO/FOLDER#$CLX#g" > "$T/i17/settings.json"
 cmds=$(python3 - "$T/i17/settings.json" <<'PY'
 import json, shlex, sys, os
 d = json.load(open(sys.argv[1])); h = d["hooks"]; out = []
@@ -360,7 +360,7 @@ f="$T/i17/good.json" sh -c "$pc" >/dev/null 2>&1; g=$?; f="$T/i17/broken.json" s
 
 # (17, re-read against the destination checks) line 3 carries the PATH requirement for python3 once, and names the refusals it makes true
 l3=$(sed -n 3p "$D"); np=$(cat "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT"/docs/*.md | grep -c 'python3 must be on the PATH your Claude Code hooks run with')
-want3='Five steps, run from the clone. You need git, bash, python3 and Claude Code, signed in; python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; a run folder that is the config folder itself (compared by its physical path) and a run folder or board named like a settings file are refused, while dedicated subfolders remain allowed.'
+want3='Five steps, run from the warroom folder (the clone, or `warroom-main` from the zip). You need bash, python3 and Claude Code, signed in (git only for the clone route); python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; a run folder that is the config folder itself (compared by its physical path) and a run folder or board named like a settings file are refused, while dedicated subfolders remain allowed.'
 case "$l3" in "$want3") [ "$np" = 1 ] && [ "$(wc -l < "$D" | tr -d ' ')" = 60 ] && ok "INSTALL.md line 3 is exactly the ruled line (python3 PATH said once in the docs) and the page is exactly 60 lines" || bad "python3 PATH sentence appears $np times, or the page is not 60 lines" ;; *) bad "INSTALL.md line 3 is not the ruled line: $l3" ;; esac
 
 # 21. a hook never exits 2 on a bad config: Claude Code would block the prompt, in every session on the machine

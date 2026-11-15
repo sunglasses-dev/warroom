@@ -1,6 +1,6 @@
 # Install by hand
 
-Five steps, run from the clone. You need git, bash, python3 and Claude Code, signed in; python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; a run folder that is the config folder itself (compared by its physical path) and a run folder or board named like a settings file are refused, while dedicated subfolders remain allowed.
+Five steps, run from the warroom folder (the clone, or `warroom-main` from the zip). You need bash, python3 and Claude Code, signed in (git only for the clone route); python3 must be on the PATH your Claude Code hooks run with. There is no settings installer: you add the hook entries by hand after saving a copy. Prefer paths outside the config folder; a run folder that is the config folder itself (compared by its physical path) and a run folder or board named like a settings file are refused, while dedicated subfolders remain allowed.
 1. **Config.** Copy the example and edit the seats, run directory and board name. It is read as data, never run. An existing `~/.warroom/warroom.env` is kept as it is: edit it instead.
 ```
 mkdir -p ~/.warroom && { [ -e ~/.warroom/warroom.env ] || cp warroom.env.example ~/.warroom/warroom.env; }
@@ -15,19 +15,19 @@ f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 mkdir -p "$(dirname "$f")"
 [ ! -f "$f" ] || { b="$f.before-warroom-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM"; ( set -C; cat "$f" > "$b" ) && echo "saved $b" || echo "backup FAILED, stop here: do not edit $f"; }
 ```
-First run the check in step 4 on the file as it is: if it fails, stop and repair that first (a file that does not parse, or a `"hooks"` of the wrong shape). Replace `/ABSOLUTE/PATH/TO/warroom` below with the full path of this clone, keeping the single quotes. The path must not contain a single quote: move the clone first if it does. Merge the `"hooks"` property into the file: no file yet, make this block the whole file; no `"hooks"` key, add this one; a `"hooks"` key already there, keep every event and entry in it and add only these as new groups at the end of each event's list, skipping any entry that is already there with the same command. Never add a second `"hooks"` key or a second JSON document.
+First run the check in step 4 on the file as it is: if it fails, stop and repair that first (a file that does not parse, or a `"hooks"` of the wrong shape). Replace `/ABSOLUTE/PATH/TO/FOLDER` below with the full path of the folder that holds `hooks/` (the clone, or `warroom-main` from the zip), keeping the single quotes. The path must not contain a single quote: move the folder first if it does. Merge the `"hooks"` property into the file: no file yet, make this block the whole file; no `"hooks"` key, add this one; a `"hooks"` key already there, keep every event and entry in it and add only these as new groups at the end of each event's list, skipping any entry that is already there with the same command. Never add a second `"hooks"` key or a second JSON document.
 
 ```json
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/warroom/hooks/waiter-check.sh'" } ] }
+      { "hooks": [ { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/FOLDER/hooks/waiter-check.sh'" } ] }
     ],
     "UserPromptSubmit": [
       { "hooks": [
-        { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/warroom/hooks/waiter-check.sh'" },
-        { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/warroom/hooks/board-tail.sh'" },
-        { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/warroom/hooks/board-guard.sh'" }
+        { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/FOLDER/hooks/waiter-check.sh'" },
+        { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/FOLDER/hooks/board-tail.sh'" },
+        { "type": "command", "command": "bash '/ABSOLUTE/PATH/TO/FOLDER/hooks/board-guard.sh'" }
       ] }
     ]
   }
@@ -43,7 +43,7 @@ Compare the file with your copy: `diff "$f".before-warroom-* "$f"` (skip this if
 5. **Two fresh sessions, then the wake check.** Open a new Claude Code session (an open one may need a restart before it uses the hooks) and paste this as its first message, once per seat, with the seat name in place of `BOSS` (use `W1` in the second session) and your clone path in place of the placeholder:
 
 ```
-You are BOSS. This session shows a [WAITER NOT ARMED] line whose waiter command holds your session id. As a background job, run the command that line gives, with BOSS in place of its <one of: …> part, then read docs/PROTOCOL.md in the clone and post: bash '/ABSOLUTE/PATH/TO/warroom/bin/board.sh' post BOSS "online"
+You are BOSS. This session shows a [WAITER NOT ARMED] line whose waiter command holds your session id. As a background job, run the command that line gives, with BOSS in place of its <one of: …> part, then read docs/PROTOCOL.md in the warroom folder and post: bash '/ABSOLUTE/PATH/TO/FOLDER/bin/board.sh' post BOSS "online"
 ```
 That paste is README Quick start step 2, so do not paste it again there: continue with its steps 3 and 4. That two-session wake check is the real test. A waiter ends after one wake: re-arm it, as a background job, before the next post.
 
