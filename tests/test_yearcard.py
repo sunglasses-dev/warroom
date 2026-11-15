@@ -285,7 +285,9 @@ class TestNothingLeavesTheMachine(Base):
         opens = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "open"]
         attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         self.assertEqual(len(opens), 1)          # the card; log files are read with Path.open
-        self.assertEqual(attrs & {"write_text", "write_bytes", "mkdir", "touch", "unlink", "rename", "replace", "remove", "rmdir"}, set())
+        self.assertEqual(attrs & {"write_text", "write_bytes", "mkdir", "touch", "unlink", "rename", "remove", "rmdir"}, set())
+        os_uses = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "os"}
+        self.assertEqual(os_uses, {"environ"})
 
     def test_the_tool_finishes_with_every_network_call_refusing(self):
         standard_fixture(self.logs)
@@ -367,6 +369,16 @@ class TestFormatDrift(Base):
         self.assertEqual(code, 2)
         self.assertIn("format may have changed", out + err)
         self.assertFalse(self.card.exists())
+
+    def test_a_line_over_the_size_limit_is_skipped_counted_and_the_lines_after_it_are_still_read(self):
+        standard_fixture(self.logs)
+        p = next(self.logs.rglob("second.jsonl"))
+        huge = line(type="user", timestamp="2026-03-03T15:00:00Z", sessionId="big", message={"role": "user", "content": "x" * (yearcard.MAX_LINE + 10)})
+        p.write_text(p.read_text() + huge + "\n" + asst("2026-03-03T15:00:10Z", "sess-two", "m9", "r9", "claude-sample-mid", 9) + "\n")
+        code, out, err = run_tool(["--logs", str(self.logs), "--out", str(self.card)])
+        self.assertEqual(code, 0)
+        self.assertIn("skipped 1", out + err)
+        self.assertIn("replies 6", out + err)
 
 
 class TestHints(Base):

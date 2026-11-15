@@ -163,6 +163,7 @@ Optional helper beside the board: `pids.sh` notices when a registered job's proc
 | Windows? | Not yet. The scripts need bash and python3. |
 | pip or pipx? | Roadmap, not in v0.1. |
 | Where do I ask a question? | Open an issue on this repo. |
+| Is there a card of my own Claude Code activity? | Yes, `tools/yearcard.py` draws one from your local logs and sends nothing anywhere. See [docs/YEARCARD.md](docs/YEARCARD.md). |
 
 ## The story
 
