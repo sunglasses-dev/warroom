@@ -495,6 +495,19 @@ fi
 rm -f "$LK/tree/pids.tsv"; : > "$LK/tree/board.md.flock"; bash "$ROOT/tools/leak-check.sh" "$LK/tree" >/dev/null 2>&1; r4=$?
 [ $r4 = 1 ] && ok "leak-check: a lock sidecar (board.md.flock) inside the tree is a hit" || bad "leak-check on a tree holding board.md.flock: rc $r4"
 git -C "$ROOT" check-ignore -q board.md.flock && ok "a lock sidecar is ignored by git" || bad ".gitignore does not cover *.flock"
+# leak-check allows the default log folder in two files only: the card tool and its page of docs
+LP="$LK/p"; LKD="$LK/paths.deny"; rm -rf "$LP"; mkdir -p "$LP/tools" "$LP/docs" "$LP/other"
+CD=".cl""aude"; HT="~"   # the folder name is written in two pieces so this file holds no path of its own
+printf '%s\n' "$HT/\\$CD" "\\$CD/(projects|state|hooks)" > "$LKD"
+printf "reads $HT/$CD/projects (or $CD/projects)\n" > "$LP/tools/yearcard.py"; cp "$LP/tools/yearcard.py" "$LP/docs/YEARCARD.md"
+LEAKCHECK_DENYLIST="$LKD" bash "$ROOT/tools/leak-check.sh" "$LP" >/dev/null 2>&1; p0=$?
+cp "$LP/tools/yearcard.py" "$LP/other/yearcard.py"; LEAKCHECK_DENYLIST="$LKD" bash "$ROOT/tools/leak-check.sh" "$LP" >/dev/null 2>&1; p1=$?
+rm -f "$LP/other/yearcard.py"; cp "$LP/tools/yearcard.py" "$LP/other/notes.md"; LEAKCHECK_DENYLIST="$LKD" bash "$ROOT/tools/leak-check.sh" "$LP" >/dev/null 2>&1; p2=$?
+rm -f "$LP/other/notes.md"; printf "and $HT/$CD/state/board\n" >> "$LP/tools/yearcard.py"; LEAKCHECK_DENYLIST="$LKD" bash "$ROOT/tools/leak-check.sh" "$LP" >/dev/null 2>&1; p3=$?
+cp "$LP/docs/YEARCARD.md" "$LP/tools/yearcard.py"; printf "and $HT/$CD/hooks/x\n" >> "$LP/docs/YEARCARD.md"; LEAKCHECK_DENYLIST="$LKD" bash "$ROOT/tools/leak-check.sh" "$LP" >/dev/null 2>&1; p4=$?
+[ $p0 = 0 ] && ok "leak-check: the default log folder passes in the card tool and its docs page" || bad "leak-check: the card tool and docs with the log folder: rc $p0"
+[ $p1 = 1 ] && [ $p2 = 1 ] && ok "leak-check: the same line in a third file is a hit, also under the same file name in another folder" || bad "leak-check: same line elsewhere: rc $p1 (same name), $p2 (other name)"
+[ $p3 = 1 ] && [ $p4 = 1 ] && ok "leak-check: a state or hooks path in the card tool or its docs is still a hit" || bad "leak-check: state path in the card files: rc $p3 (tool), $p4 (docs)"
 
 # 40. process identity: alive, dead or unknown. A pid whose start time cannot be read (ps failed) is "unknown", never "dead";
 sec "40. process identity: alive, dead or unknown. A pid whose start"

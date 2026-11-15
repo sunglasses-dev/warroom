@@ -49,6 +49,19 @@ jobs:
           name: smoke-trailer-${{ matrix.os }}-${{ matrix.part }}
           path: ${{ runner.temp }}/trailer/${{ matrix.os }}-${{ matrix.part }}.trailer
           if-no-files-found: ignore
+  # the card tool (tools/yearcard.py): standard library only, on each OS the smoke test uses
+  card:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.oses) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: card tool checks (standard library only)
+        run: python3 -m unittest tests.test_yearcard
   # the one job to require: it fails unless every part of every OS ran every call it owns
   smoke-all:
     needs: [plan, smoke]
