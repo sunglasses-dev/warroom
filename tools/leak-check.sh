@@ -37,6 +37,14 @@ while IFS= read -r pat; do
   # grep exits 0 = matches, 1 = none, 2+ = error (bad pattern, unreadable file): an error must never count as clean
   raw=$(grep -rnIoE --exclude-dir=.git --exclude=leak-check.sh -e "$pat" "$ROOT" 2>"$ERR"); rc=$?
   if [ "$rc" -ge 2 ]; then echo "ERROR pattern $i/$total  the scan did not complete (grep exit $rc)"; errs=$((errs+1)); fi
+  # allowed: the default log folder, spelled ~/.claude/projects or .claude/projects, in tools/yearcard.py and docs/YEARCARD.md only
+  # (the folder text is blanked in those two files and the scan runs on what is left, so any other path there is still a hit)
+  for f in tools/yearcard.py docs/YEARCARD.md; do
+    [ -f "$ROOT/$f" ] || continue
+    raw=$(printf '%s\n' "$raw" | awk -v p="$ROOT/$f:" 'index($0, p) != 1')
+    kept=$(sed -e 's#~/\.claude/projects##g' -e 's#\.claude/projects##g' "$ROOT/$f" | grep -nIoE -e "$pat" 2>/dev/null | sed "s#^#$ROOT/$f:#" || true)
+    [ -n "$kept" ] && raw=$(printf '%s\n%s\n' "$raw" "$kept")
+  done
   # allowed: example.com addresses, and the word CONTRACT inside the standard MIT text of LICENSE
   out=$(printf '%s\n' "$raw" | grep -vE -e '^$' -e ':[^:]*@example\.com$' -e '/LICENSE:[0-9]+:CONTRACT$' | cut -d: -f1,2 || true)
   if [ -n "$out" ]; then
