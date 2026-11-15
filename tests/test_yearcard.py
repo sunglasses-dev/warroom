@@ -36,10 +36,10 @@ def canaries():
         "prurl": "https" + "://" + "git" + "hub.com/" + "zq-org/zq-repo/pull/7",
         "email": "zq.carol" + "@" + "example" + ".org",
         "keyshape": "s" + "k-" + "zq" + "A1b2C3d4E5f6G7h8I9j0",
-        "arn": "arn:" + "aws:bedrock:us-west-2:" + "123456789012:" + "inference-profile/zq-custom",
+        "arn": "arn:" + "aws:bedrock:us-west-2:" + "1234567890:" + "inference-profile/zq-custom",
         "title": "zq " + "quarterly " + "numbers chat",
         "branch": "feature/" + "zq-hidden-branch",
-        "session": "zq5e55i0n-" + "0000-4000-8000-" + "00000000beef",
+        "session": "zq5e55i0n-" + "0000-4000-8000-" + "0000000beef",
     }
 
 
@@ -76,22 +76,22 @@ def standard_fixture(root, junk=None):
                 prUrl=c["prurl"], prRepository=c["project"], email=c["email"], toolUseResult=c["keyshape"])
     leak.update(junk)
     rows1 = [
-        user("2026-03-02T10:00:00.000Z", s1, extra=leak),
-        asst("2026-03-02T10:00:30.000Z", s1, "m1", "r1", "claude-sample-large", 5, extra=leak),
-        asst("2026-03-02T10:00:30.000Z", s1, "m1", "r1", "claude-sample-large", 10, extra=leak),
-        asst("2026-03-02T10:00:31.000Z", s1, "m1", "r1", "claude-sample-large", 40, extra=leak),
-        user("2026-03-02T10:01:00.000Z", s1, text=False, extra=leak),
-        asst("2026-03-02T10:01:10.000Z", s1, "m2", "r2", "claude-sample-large", 20, extra=leak),
-        user("2026-03-02T10:30:00.000Z", s1, extra=leak),
-        asst("2026-03-02T10:30:20.000Z", s1, "m3", "r3", c["arn"], 7, extra=leak),
+        user("2015-03-02T10:00:00.000Z", s1, extra=leak),
+        asst("2015-03-02T10:00:30.000Z", s1, "m1", "r1", "claude-sample-large", 5, extra=leak),
+        asst("2015-03-02T10:00:30.000Z", s1, "m1", "r1", "claude-sample-large", 10, extra=leak),
+        asst("2015-03-02T10:00:31.000Z", s1, "m1", "r1", "claude-sample-large", 40, extra=leak),
+        user("2015-03-02T10:01:00.000Z", s1, text=False, extra=leak),
+        asst("2015-03-02T10:01:10.000Z", s1, "m2", "r2", "claude-sample-large", 20, extra=leak),
+        user("2015-03-02T10:30:00.000Z", s1, extra=leak),
+        asst("2015-03-02T10:30:20.000Z", s1, "m3", "r3", c["arn"], 7, extra=leak),
         line(type="ai-title", aiTitle=c["title"], sessionId=s1),
         line(type="pr-link", prUrl=c["prurl"], sessionId=s1),
     ]
     rows2 = [
-        user("2026-03-03T14:00:00.000Z", s2, extra=leak),
-        asst("2026-03-03T14:00:10.000Z", s2, "m4", "r4", "claude-sample-mid", 30, extra=leak),
-        asst("2026-03-03T14:00:50.000Z", s2, "m5", "r5", "claude-sample-mid", 30, extra=leak),
-        asst("2026-03-03T14:01:00.000Z", s2, "m6", "r6", "<synthetic>", 0, extra=leak),
+        user("2015-03-03T14:00:00.000Z", s2, extra=leak),
+        asst("2015-03-03T14:00:10.000Z", s2, "m4", "r4", "claude-sample-mid", 30, extra=leak),
+        asst("2015-03-03T14:00:50.000Z", s2, "m5", "r5", "claude-sample-mid", 30, extra=leak),
+        asst("2015-03-03T14:01:00.000Z", s2, "m6", "r6", "<synthetic>", 0, extra=leak),
     ]
     (a / (c["session"] + ".jsonl")).write_text("\n".join(rows1) + "\n")
     (b / "second.jsonl").write_text("\n".join(rows2) + "\n")
@@ -159,7 +159,7 @@ class TestNumbers(Base):
         self.assertEqual(self.stats["prompts"], 3)
 
     def test_the_busiest_day_is_the_local_date_with_most_messages(self):
-        self.assertEqual((self.stats["busiest_day"], self.stats["busiest_count"]), ("2026-03-02", 3))
+        self.assertEqual((self.stats["busiest_day"], self.stats["busiest_count"]), ("2015-03-02", 3))
 
     def test_active_time_caps_each_gap_at_five_minutes(self):
         self.assertEqual(self.stats["active_seconds"], 440)
@@ -171,7 +171,7 @@ class TestNumbers(Base):
         self.assertEqual(self.stats["messages"], 5)
 
     def test_the_span_runs_from_the_first_to_the_last_day_inclusive(self):
-        self.assertEqual((self.stats["first"], self.stats["last"], self.stats["span_days"]), ("2026-03-02", "2026-03-03", 2))
+        self.assertEqual((self.stats["first"], self.stats["last"], self.stats["span_days"]), ("2015-03-02", "2015-03-03", 2))
 
     def test_the_hour_strip_counts_messages_by_weekday_and_hour(self):
         self.assertEqual(self.stats["strip"][0][10], 3)   # Monday 10:00
@@ -188,13 +188,13 @@ class TestTitle(Base):
         return yearcard.render_card(stats)
 
     def test_a_span_of_300_days_or_more_says_the_year(self):
-        html = self.card_for([user("2025-04-01T10:00:00Z", "a"), asst("2026-03-02T10:00:00Z", "a", "m", "r", "claude-sample-large", 1)])
-        self.assertIn("YOUR 2026 IN CLAUDE CODE", html)
+        html = self.card_for([user("2014-04-01T10:00:00Z", "a"), asst("2015-03-02T10:00:00Z", "a", "m", "r", "claude-sample-large", 1)])
+        self.assertIn("YOUR 2015 IN CLAUDE CODE", html)
 
     def test_a_shorter_span_says_how_many_days_it_found(self):
-        html = self.card_for([user("2026-02-01T10:00:00Z", "a"), asst("2026-03-06T10:00:00Z", "a", "m", "r", "claude-sample-large", 1)])
+        html = self.card_for([user("2015-02-01T10:00:00Z", "a"), asst("2015-03-06T10:00:00Z", "a", "m", "r", "claude-sample-large", 1)])
         self.assertIn("YOUR LAST 34 DAYS IN CLAUDE CODE", html)
-        self.assertNotIn("YOUR 2026", html)
+        self.assertNotIn("YOUR 2015", html)
 
 
 class TestPrivacy(Base):
@@ -357,7 +357,7 @@ class TestFormatDrift(Base):
     def test_an_unknown_record_type_is_not_an_error(self):
         standard_fixture(self.logs)
         p = next(self.logs.rglob("second.jsonl"))
-        p.write_text(p.read_text() + line(type="some-new-kind", timestamp="2026-03-04T10:00:00Z", sessionId="n") + "\n")
+        p.write_text(p.read_text() + line(type="some-new-kind", timestamp="2015-03-04T10:00:00Z", sessionId="n") + "\n")
         code, out, err = run_tool(["--logs", str(self.logs), "--out", str(self.card)])
         self.assertEqual(code, 0)
 
@@ -373,8 +373,8 @@ class TestFormatDrift(Base):
     def test_a_line_over_the_size_limit_is_skipped_counted_and_the_lines_after_it_are_still_read(self):
         standard_fixture(self.logs)
         p = next(self.logs.rglob("second.jsonl"))
-        huge = line(type="user", timestamp="2026-03-03T15:00:00Z", sessionId="big", message={"role": "user", "content": "x" * (yearcard.MAX_LINE + 10)})
-        p.write_text(p.read_text() + huge + "\n" + asst("2026-03-03T15:00:10Z", "sess-two", "m9", "r9", "claude-sample-mid", 9) + "\n")
+        huge = line(type="user", timestamp="2015-03-03T15:00:00Z", sessionId="big", message={"role": "user", "content": "x" * (yearcard.MAX_LINE + 10)})
+        p.write_text(p.read_text() + huge + "\n" + asst("2015-03-03T15:00:10Z", "sess-two", "m9", "r9", "claude-sample-mid", 9) + "\n")
         code, out, err = run_tool(["--logs", str(self.logs), "--out", str(self.card)])
         self.assertEqual(code, 0)
         self.assertIn("skipped 1", out + err)
@@ -388,7 +388,7 @@ class TestHints(Base):
         self.assertIn("cleanupPeriodDays", out + err)
         longp = self.logs / "long"
         longp.mkdir()
-        (longp / "y.jsonl").write_text("\n".join([user("2025-01-02T10:00:00Z", "z"), asst("2026-03-02T10:00:00Z", "z", "m", "r", "claude-sample-large", 1)]) + "\n")
+        (longp / "y.jsonl").write_text("\n".join([user("2014-01-02T10:00:00Z", "z"), asst("2015-03-02T10:00:00Z", "z", "m", "r", "claude-sample-large", 1)]) + "\n")
         self.card.unlink()
         _, out2, err2 = run_tool(["--logs", str(longp), "--out", str(self.card)])
         self.assertNotIn("cleanupPeriodDays", out2 + err2)
@@ -400,7 +400,7 @@ class TestSpeed(Base):
         d.mkdir()
         rows = []
         for i in range(20000):
-            rows.append(asst("2026-03-02T10:%02d:%02dZ" % (i // 60 % 60, i % 60), "s%d" % (i % 50), "m%d" % i, "r%d" % i, "claude-sample-large", 3,
+            rows.append(asst("2015-03-02T10:%02d:%02dZ" % (i // 60 % 60, i % 60), "s%d" % (i % 50), "m%d" % i, "r%d" % i, "claude-sample-large", 3,
                              extra={"cwd": "x" * 400}))
         (d / "big.jsonl").write_text("\n".join(rows) + "\n")
         t = time.perf_counter()
